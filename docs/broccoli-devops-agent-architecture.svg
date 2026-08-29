@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
+  <title id="title">Broccoli DevOps Agent Architecture</title>
+  <desc id="desc">Machines report data to a collector. An immutable snapshot is judged for anomalies and dispatched by a top scheduler to develop or operate agent teams. Human reports have highest priority. The agents platform provides controlled SSH, firewall, service, worktree, build, and artifact capabilities.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .panel { fill: #ffffff; stroke: #334155; stroke-width: 2; }
+      .machine { fill: #e0f2fe; stroke: #0284c7; stroke-width: 2; }
+      .collector { fill: #f3e8ff; stroke: #9333ea; stroke-width: 2.5; }
+      .logdb { fill: #f1f5f9; stroke: #64748b; stroke-width: 2.5; }
+      .judge { fill: #fef3c7; stroke: #d97706; stroke-width: 2.5; }
+      .human { fill: #fee2e2; stroke: #dc2626; stroke-width: 2.5; }
+      .scheduler { fill: #e0e7ff; stroke: #4f46e5; stroke-width: 3; }
+      .team { fill: #ecfdf5; stroke: #059669; stroke-width: 2.5; }
+      .develop { fill: #fff7ed; stroke: #ea580c; stroke-width: 2; }
+      .operate { fill: #ecfeff; stroke: #0891b2; stroke-width: 2; }
+      .platform { fill: #172033; stroke: #0f172a; stroke-width: 2.5; }
+      .title { font: 700 30px Inter, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .h1 { font: 700 22px Inter, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .h2 { font: 700 18px Inter, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .body { font: 15px Inter, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #334155; }
+      .small { font: 13px Inter, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #475569; }
+      .white-h { font: 700 20px Inter, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #f8fafc; }
+      .white-body { font: 14px Inter, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #cbd5e1; }
+      .arrow { fill: none; stroke: #475569; stroke-width: 2.3; marker-end: url(#arrow); }
+      .arrow-red { fill: none; stroke: #dc2626; stroke-width: 3; marker-end: url(#arrow-red); }
+      .arrow-dashed { fill: none; stroke: #64748b; stroke-width: 2; stroke-dasharray: 7 6; marker-end: url(#arrow); }
+      .label { font: 600 13px Inter, "PingFang SC", "Microsoft YaHei", sans-serif; fill: #334155; paint-order: stroke; stroke: #f8fafc; stroke-width: 5; stroke-linejoin: round; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1000"/>
+  <text class="title" x="52" y="55">Broccoli DevOps Agent</text>
+  <text class="body" x="52" y="82">Snapshot-based scheduling · Human-first priority · Develop / Operate agent teams</text>
+
+  <rect class="panel" x="45" y="120" width="315" height="610" rx="22"/>
+  <text class="h1" x="72" y="158">Machines</text>
+
+  <rect class="machine" x="72" y="190" width="260" height="88" rx="15"/>
+  <text class="h2" x="202" y="222" text-anchor="middle">Infra / Database</text>
+  <text class="small" x="202" y="248" text-anchor="middle">PostgreSQL · Redis · Object Storage</text>
+
+  <rect class="machine" x="72" y="300" width="260" height="88" rx="15"/>
+  <text class="h2" x="202" y="332" text-anchor="middle">Frontend / Server</text>
+  <text class="small" x="202" y="358" text-anchor="middle">Broccoli API · Web · Gateway</text>
+
+  <rect class="machine" x="72" y="410" width="260" height="88" rx="15"/>
+  <text class="h2" x="202" y="442" text-anchor="middle">Workers</text>
+  <text class="small" x="202" y="468" text-anchor="middle">Judge daemon · isolate · heartbeat</text>
+
+  <rect class="machine" x="72" y="520" width="260" height="130" rx="15"/>
+  <text class="h2" x="202" y="552" text-anchor="middle">Stations</text>
+  <text class="body" x="202" y="583" text-anchor="middle">Printer Station</text>
+  <text class="body" x="202" y="609" text-anchor="middle">Balloon Station</text>
+  <text class="small" x="202" y="635" text-anchor="middle">Future station types</text>
+
+  <rect class="collector" x="445" y="315" width="210" height="125" rx="20"/>
+  <text class="h1" x="550" y="354" text-anchor="middle">Collector</text>
+  <text class="body" x="550" y="385" text-anchor="middle">data · logs</text>
+  <text class="body" x="550" y="410" text-anchor="middle">status · events</text>
+
+  <rect class="logdb" x="425" y="125" width="330" height="125" rx="20"/>
+  <text class="h1" x="590" y="164" text-anchor="middle">AutoLog DB / Snapshot Store</text>
+  <text class="body" x="590" y="194" text-anchor="middle">Immutable snapshots · scheduler checkpoints</text>
+  <text class="small" x="590" y="220" text-anchor="middle">Recovery and post-contest review</text>
+
+  <rect class="judge" x="750" y="315" width="200" height="125" rx="20"/>
+  <text class="h1" x="850" y="354" text-anchor="middle">Judge</text>
+  <text class="body" x="850" y="385" text-anchor="middle">Anomaly detection</text>
+  <text class="small" x="850" y="411" text-anchor="middle">reads Snapshot N</text>
+
+  <rect class="human" x="1040" y="100" width="335" height="120" rx="20"/>
+  <text class="h1" x="1208" y="140" text-anchor="middle">Human Report</text>
+  <text class="body" x="1208" y="171" text-anchor="middle">Human-identified problem</text>
+  <text class="h2" x="1208" y="198" text-anchor="middle" fill="#b91c1c">Top Priority</text>
+
+  <rect class="scheduler" x="1010" y="285" width="395" height="245" rx="26"/>
+  <text class="h1" x="1208" y="330" text-anchor="middle">Top Scheduler</text>
+  <text class="body" x="1045" y="369">• Owns global context and issue queue</text>
+  <text class="body" x="1045" y="399">• Dispatches against an immutable snapshot</text>
+  <text class="body" x="1045" y="429">• Freeze / resume / recovery</text>
+  <text class="body" x="1045" y="459">• Aggregates callbacks and human choices</text>
+  <text class="body" x="1045" y="489">• Worktree, Bundle and operation conflicts</text>
+
+  <rect class="team" x="945" y="620" width="520" height="250" rx="24"/>
+  <text class="h1" x="1205" y="657" text-anchor="middle">Agent Teams</text>
+
+  <rect class="develop" x="975" y="680" width="220" height="155" rx="18"/>
+  <text class="h2" x="1085" y="714" text-anchor="middle">Develop</text>
+  <text class="small" x="995" y="746">• Hotfix / Feature Request</text>
+  <text class="small" x="995" y="772">• Broccoli source / WASM</text>
+  <text class="small" x="995" y="798">• One worktree per problem</text>
+  <text class="small" x="995" y="824">• Multiple options for human choice</text>
+
+  <rect class="operate" x="1215" y="680" width="220" height="155" rx="18"/>
+  <text class="h2" x="1325" y="714" text-anchor="middle">Operate</text>
+  <text class="small" x="1235" y="746">• Deployment troubleshooting</text>
+  <text class="small" x="1235" y="772">• Configuration changes</text>
+  <text class="small" x="1235" y="798">• Service / network / UFW</text>
+  <text class="small" x="1235" y="824">• Verify and callback</text>
+
+  <rect class="platform" x="315" y="905" width="1150" height="70" rx="22"/>
+  <text class="white-h" x="355" y="936">Agents Platform</text>
+  <text class="white-body" x="590" y="936">controlled SSH · UFW · service/config · Git worktrees · builds · WASM/Bundle replacement</text>
+  <text class="white-body" x="355" y="960">Credentials stay in the platform; Scheduler grants scoped capabilities to each assignment.</text>
+
+  <path class="arrow" d="M 360 378 C 390 378, 410 378, 445 378"/>
+  <text class="label" x="378" y="361">telemetry</text>
+
+  <path class="arrow" d="M 550 315 C 550 285, 560 270, 575 250"/>
+  <text class="label" x="500" y="286">append</text>
+
+  <path class="arrow" d="M 655 378 C 690 378, 710 378, 750 378"/>
+  <text class="label" x="675" y="359">Snapshot N</text>
+
+  <path class="arrow" d="M 950 378 C 970 378, 985 378, 1010 378"/>
+  <text class="label" x="955" y="359">issue</text>
+
+  <path class="arrow-red" d="M 1208 220 C 1208 245, 1208 260, 1208 285"/>
+  <text class="label" x="1223" y="258">priority override</text>
+
+  <path class="arrow-dashed" d="M 1085 285 C 1000 240, 900 205, 755 188"/>
+  <text class="label" x="850" y="225">freeze snapshot / checkpoint</text>
+
+  <path class="arrow" d="M 1150 530 C 1115 565, 1090 590, 1085 620"/>
+  <text class="label" x="930" y="575">sanitized Snapshot N + work order</text>
+
+  <path class="arrow" d="M 1325 620 C 1325 580, 1305 560, 1270 530"/>
+  <text class="label" x="1338" y="577">callback / options / artifacts</text>
+
+  <path class="arrow" d="M 1205 870 C 1205 885, 1205 893, 1205 905"/>
+  <text class="label" x="1220" y="895">scoped tools</text>
+
+  <path class="arrow-dashed" d="M 315 940 C 210 880, 165 805, 165 730"/>
+  <text class="label" x="125" y="842">SSH / platform operations</text>
+</svg>

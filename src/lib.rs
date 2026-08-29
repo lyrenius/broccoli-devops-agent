@@ -1,0 +1,16 @@
+//! Core architecture scaffold for the Broccoli operations agent.
+//!
+//! This crate describes domain objects, component interfaces, minimal scheduling behavior, and
+//! in-memory storage. Real networking, model access, and machine execution will be integrated only
+//! after these boundaries are stable.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+pub mod domain;
+pub mod error;
+pub mod ports;
+pub mod scheduler;
+pub mod store;
+
+pub use error::{AgentError, AgentResult};
