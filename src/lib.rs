@@ -7,10 +7,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod collector;
 pub mod domain;
 pub mod error;
 pub mod ports;
+pub mod runner;
 pub mod scheduler;
 pub mod store;
+pub mod team;
+pub mod topology;
+pub mod view;
 
 pub use error::{AgentError, AgentResult};

@@ -70,4 +70,16 @@ pub enum AgentError {
     /// Structured event or model-boundary data could not be serialized.
     #[error("JSON serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    /// A filesystem operation failed while loading configuration or persisting state.
+    ///
+    /// The context names what the store or loader was doing so an operator can find the affected
+    /// path without a debugger.
+    #[error("I/O failure while {context}: {source}")]
+    Io {
+        /// What the caller was doing when the failure occurred.
+        context: String,
+        /// Underlying operating-system error.
+        source: std::io::Error,
+    },
 }

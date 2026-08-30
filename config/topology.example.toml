@@ -1,0 +1,99 @@
+# Deployment topology for the Broccoli DevOps Agent.
+#
+# Copy this file to config/topology.toml and adjust hosts and ports for your deployment.
+# Endpoints below match the Broccoli development docker-compose (postgres on 5433, redis on
+# 6379, SeaweedFS master on 9333 / S3 on 8333) and the server default of 127.0.0.1:3000.
+#
+# Probes are read-only reachability checks from the v0.1 Probe Registry:
+#   tcp.connect  — { probe = "tcp.connect", target = "host:port" }
+#   http.status  — { probe = "http.status", url = "http://host:port/path" }   (plain HTTP only)
+# A resource without probes appears as Unknown with an explicit coverage gap.
+#
+# This file must never contain credentials.
+
+[deployment]
+id = "0198c936-5f2a-7000-8000-4a6f8c2d91aa"
+name = "broccoli-dev"
+topology_revision = "dev-compose-1"
+operation_mode = "rehearsal"
+
+[[resources]]
+id = "postgres-main"
+kind = "postgresql"
+node = "infra-1"
+probes = [{ probe = "tcp.connect", target = "127.0.0.1:5433" }]
+
+[[resources]]
+id = "redis-mq"
+kind = "redis"
+node = "infra-1"
+probes = [{ probe = "tcp.connect", target = "127.0.0.1:6379" }]
+
+[[resources]]
+id = "seaweedfs-master"
+kind = "object_storage"
+node = "infra-1"
+probes = [
+    { probe = "tcp.connect", target = "127.0.0.1:9333" },
+    { probe = "tcp.connect", target = "127.0.0.1:8333" },
+]
+
+[[resources]]
+id = "broccoli-server"
+kind = "broccoli_server"
+node = "app-1"
+probes = [{ probe = "http.status", url = "http://127.0.0.1:3000/healthz" }]
+
+[[resources]]
+id = "web-frontend"
+kind = "frontend"
+node = "app-1"
+probes = [{ probe = "tcp.connect", target = "127.0.0.1:5173" }]
+
+# Judge workers are Linux-only; from a dev laptop they are typically unreachable and will show
+# as coverage gaps until worker probes are configured for the contest network.
+[[resources]]
+id = "worker-1"
+kind = "worker"
+node = "judge-1"
+
+[[resources]]
+id = "printer-station-1"
+kind = "printer_station"
+node = "stations-1"
+
+[[dependencies]]
+from = "broccoli-server"
+to = "postgres-main"
+relation = "sql"
+critical = true
+
+[[dependencies]]
+from = "broccoli-server"
+to = "redis-mq"
+relation = "redis_mq"
+critical = true
+
+[[dependencies]]
+from = "broccoli-server"
+to = "seaweedfs-master"
+relation = "s3_blob"
+critical = true
+
+[[dependencies]]
+from = "web-frontend"
+to = "broccoli-server"
+relation = "rest_api"
+critical = true
+
+[[dependencies]]
+from = "worker-1"
+to = "redis-mq"
+relation = "redis_mq"
+critical = true
+
+[[dependencies]]
+from = "printer-station-1"
+to = "broccoli-server"
+relation = "rest_api"
+critical = false

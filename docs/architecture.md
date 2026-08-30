@@ -691,22 +691,31 @@ Recommended indexes include:
 
 Large artifact bodies should not be stored inline in SQLite.
 
-## 10. Suggested v0.1 Implementation Scope
+## 10. v0.1 Implementation Scope — IMPLEMENTED
 
-The first usable vertical slice should be intentionally narrow:
+The first vertical slice is implemented and exercised by the CLI and the
+`tests/vertical_slice.rs` suite:
 
-1. Load a static deployment topology.
-2. Collect Broccoli health, system overview, worker, queue, service, and station
-   state.
-3. Write append-only events and immutable Snapshots.
-4. Display or export a Snapshot and its coverage gaps.
-5. Accept a Human Report and create a highest-priority Issue.
-6. Dispatch one read-only Operate Job based on an exact Snapshot View.
-7. Receive a structured callback and persist the Job result.
-8. Restart the controller and recover the Issue and Job state.
+1. Load a static deployment topology (`src/topology.rs`,
+   `config/topology.example.toml`).
+2. Collect reachability and health state through the v0.1 Probe Registry —
+   `tcp.connect` and plain-HTTP `http.status` (`src/collector.rs`).
+3. Write append-only events and immutable Snapshots to the file-backed Store
+   (`src/store/file.rs`).
+4. Display a Snapshot and its coverage gaps (`cargo run -- snapshot`).
+5. Accept a Human Report and create its Issue, defaulting to `HumanTop`
+   (`cargo run -- report`).
+6. Dispatch one read-only Operate Job based on an exact, hash-verified Snapshot
+   View built with the `operate-readonly-v1` redaction profile (`src/view.rs`,
+   `src/team.rs`).
+7. Receive structured callbacks through the sink and persist the Job result.
+8. Restart the controller and recover Issue and Job state, with event
+   sequencing continuing from the persisted log (`cargo run -- recover`).
 
-This slice proves the Snapshot, Scheduler, Team, model, and recovery boundaries
-without permitting production mutation yet.
+The slice proves the Snapshot, Scheduler, Team, and recovery boundaries without
+permitting production mutation. No Scheduler Policy model is wired yet, so every
+decision point runs its conservative deterministic fallback — deliberately, so
+the fallback path is the first one exercised in practice.
 
 The next slices are:
 

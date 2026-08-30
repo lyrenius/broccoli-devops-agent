@@ -37,6 +37,10 @@ pub enum SnapshotCause {
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
     /// PostgreSQL database service.
+    ///
+    /// The serde alias lets topology files use the natural spelling while the canonical
+    /// serialization in Snapshots and events stays unchanged.
+    #[serde(alias = "postgresql")]
     PostgreSql,
     /// Redis message queue and state storage.
     Redis,
