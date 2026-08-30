@@ -760,15 +760,30 @@ sanitized Judge View, never the canonical Snapshot. See §4.3.
 - Raw log retention and artifact size limits.
 - How long post-contest replay data is retained.
 
-### OD-5: Agent Team and Scheduler Policy backend
+### OD-5: Agent Team and Scheduler Policy backend — PARTIALLY DECIDED
 
-- Direct Responses API orchestration in the Rust harness.
-- Codex/subagent-backed development work.
-- A backend abstraction supporting both.
+The backend abstraction is decided and implemented; the concrete model backend
+is not yet.
 
-Whatever is chosen also serves the Scheduler Policy model (§4.4) and the
-Snapshot Judge's LLM layer (§4.3): all three sit behind ports, so the backend
-decision is shared and swappable.
+The control-plane ports (`AgentTeamPort`, `SchedulerPolicyPort`,
+`SnapshotJudgePort`) are the backend-neutral seam. Two integration options will
+meet the Scheduler at those ports:
+
+1. **Our own harness** — the `broccoli-agent-harness` workspace crate
+   (`crates/harness`): a model-agnostic agentic loop with typed allowlisted
+   tools, terminal tools for structured output, turn and tool-call budgets,
+   cooperative cancellation, and a serializable transcript stored as an
+   Artifact for replay. The harness is generic over its own `ModelClient`
+   boundary, which is where the OpenAI Responses client (or any other model
+   backend) plugs in. The crate knows nothing about Broccoli; adapters in the
+   control plane translate ports onto it. `HarnessOperateTeam` is the first
+   such adapter.
+2. **Codex-backed teams** — planned; will implement the same control-plane
+   ports directly, without the harness.
+
+Still open: which concrete model and Responses client configuration to use,
+and when the codex adapter lands. Nothing from the harness may leak into a
+port signature — that rule is what keeps both options interchangeable.
 
 ### OD-6: Reporter — DECIDED
 

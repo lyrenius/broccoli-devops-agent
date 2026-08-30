@@ -4,6 +4,15 @@ This is an agentic operations control plane for the Broccoli online judging syst
 
 See the [architecture document](./docs/architecture.md) for the complete design and the [Excalidraw source](./docs/broccoli-devops-agent-architecture.excalidraw) for the editable diagram.
 
+## Workspace Layout
+
+The repository is a Cargo workspace with two crates and a strict dependency direction:
+
+- **`broccoli-devops-agent`** (root) — the control plane: domain model, ports, Scheduler, Collector, stores, Teams, and CLI. Its ports (`AgentTeamPort`, `SchedulerPolicyPort`, `SnapshotJudgePort`) are the backend-neutral seam for model-backed work.
+- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call budgets, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (where an OpenAI Responses client plugs in) and knows nothing about Broccoli.
+
+The control plane depends on the harness, never the reverse. Model-backed integrations meet the Scheduler only at the ports: `team::HarnessOperateTeam` adapts `AgentTeamPort` onto the harness today, and a codex-backed Team implementing the same port directly is the planned second option — the Scheduler cannot tell any of them apart.
+
 ## Running the v0.1 slice
 
 ```bash
@@ -33,9 +42,10 @@ State lives under `./data/` (override with `--data`): one JSON document per Snap
 3. `src/scheduler.rs`: see how the AI-integrated Top Scheduler accepts human reports, requests Snapshot captures, triages candidates through the policy model with deterministic fallbacks, creates and supersedes Jobs, handles callbacks, gates ActionRuns, and manages freeze/recovery.
 4. `src/topology.rs` and `src/collector.rs`: the static deployment map and the probe-driven Collector behind `CollectorPort`.
 5. `src/view.rs`: the redacting Snapshot View Builder and content-hashed artifact store.
-6. `src/team.rs`: the deterministic read-only Operate Team behind `AgentTeamPort`.
-7. `src/store/file.rs`: the file-backed Store that makes restart recovery real (`src/store/memory.rs` remains for tests).
-8. `src/runner.rs` and `src/main.rs`: wiring and the operator CLI.
+6. `src/team/`: the deterministic read-only Operate Team and the harness-backed `HarnessOperateTeam` — two backends behind one `AgentTeamPort`.
+7. `crates/harness/src/`: the agent loop (`agent.rs`), tool registry (`tool.rs`), and `ModelClient` boundary (`client.rs`).
+8. `src/store/file.rs`: the file-backed Store that makes restart recovery real (`src/store/memory.rs` remains for tests).
+9. `src/runner.rs` and `src/main.rs`: wiring and the operator CLI.
 
 Code identifiers and all documentation are written in English. Documentation comments focus on why an item exists and where future decisions belong instead of merely repeating its name.
 
@@ -43,9 +53,10 @@ Code identifiers and all documentation are written in English. Documentation com
 
 The v0.1 slice deliberately does not implement:
 
-- OpenAI Responses API integration (the Scheduler Policy, Snapshot Judge, and
-  model-backed Agent Team ports are defined; every Scheduler decision point runs
-  its conservative deterministic fallback).
+- A wire-level model client: the agent harness and the harness-backed Operate
+  Team are implemented, but no `ModelClient` speaks to a real model API yet, so
+  every Scheduler decision point still runs its conservative deterministic
+  fallback.
 - SSH, UFW, Docker, service, or configuration changes — no ActionRun executes.
 - Authenticated PostgreSQL, Redis, object-storage, or Broccoli API probes; the
   v0.1 Probe Registry is `tcp.connect` and plain-HTTP `http.status` only.

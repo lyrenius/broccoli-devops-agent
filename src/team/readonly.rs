@@ -2,8 +2,9 @@
 //!
 //! This Team diagnoses from its Snapshot View alone: it verifies the View's content hash, reads
 //! the sanitized document, and reports unhealthy resources, threatened critical dependencies, and
-//! coverage gaps. It proposes no actions and touches no machine. A model-backed Team (OD-5) will
-//! implement the same `AgentTeamPort`; nothing in the Scheduler changes when it does.
+//! coverage gaps. It proposes no actions and touches no machine. The model-backed
+//! [`super::HarnessOperateTeam`] implements the same `AgentTeamPort`; nothing in the Scheduler
+//! changes between them.
 
 use async_trait::async_trait;
 

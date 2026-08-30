@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/harness"]
+resolver = "3"
+
 [package]
 name = "broccoli-devops-agent"
 version = "0.1.0"
@@ -10,6 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 async-trait = "0.1.89"
+broccoli-agent-harness = { path = "crates/harness" }
 chrono = { version = "0.4.43", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
