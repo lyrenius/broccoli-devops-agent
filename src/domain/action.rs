@@ -15,9 +15,14 @@ use crate::error::{AgentError, AgentResult};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalState {
+    /// Scheduler policy has not yet evaluated whether the action needs human approval.
+    ///
+    /// Every ActionRun starts here so the audit trail distinguishes "nobody has looked yet" from
+    /// "a human is actively deciding".
+    Unevaluated,
     /// The current operation mode and policy do not require human approval.
     NotRequired,
-    /// Human approval is pending.
+    /// Policy requires approval and a human is actively deciding.
     Pending,
     /// A human has approved the action.
     Approved,
@@ -94,7 +99,7 @@ impl PlatformOperationResult {
 /// A recoverable and auditable system side effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionRun {
-    /// ActionRun ID。
+    /// ActionRun ID.
     pub action_run_id: ActionRunId,
     /// ID of the owning Issue.
     pub issue_id: IssueId,
@@ -139,9 +144,9 @@ pub struct ActionRun {
 impl ActionRun {
     /// Converts an Agent Team ActionProposal into an unexecuted ActionRun.
     ///
-    /// This function only copies the structured proposal and records the before Snapshot. Scheduler
-    /// policy computes approval requirements and writes them through `apply_approval`; a model cannot
-    /// decide whether approval is required.
+    /// This function only copies the structured proposal and records the before Snapshot. The
+    /// approval state starts as `Unevaluated`; Scheduler policy computes approval requirements and
+    /// writes them through `apply_approval`. A model cannot decide whether approval is required.
     pub fn from_proposal(
         issue_id: IssueId,
         originating_job_id: JobId,
@@ -160,7 +165,7 @@ impl ActionRun {
             target_ids: proposal.target_ids,
             arguments: proposal.arguments,
             status: ActionStatus::Proposed,
-            approval: ApprovalState::Pending,
+            approval: ApprovalState::Unevaluated,
             before_snapshot_id,
             after_snapshot_id: None,
             idempotency_key: idempotency_key.into(),
@@ -177,12 +182,18 @@ impl ActionRun {
     /// Applies an approval result produced by Scheduler policy or a human.
     ///
     /// `NotRequired` and `Approved` move the action to `Ready`; `Pending` waits; `Rejected`
-    /// cancels it. The caller will later record the approver and policy rationale.
+    /// cancels it. `Unevaluated` is the initial state, not a policy outcome, and is rejected here.
+    /// The caller will later record the approver and policy rationale.
     pub fn apply_approval(&mut self, approval: ApprovalState) -> AgentResult<()> {
         let next = match approval {
             ApprovalState::NotRequired | ApprovalState::Approved => ActionStatus::Ready,
             ApprovalState::Pending => ActionStatus::WaitingForApproval,
             ApprovalState::Rejected => ActionStatus::Cancelled,
+            ApprovalState::Unevaluated => {
+                return Err(AgentError::InvalidInput(
+                    "`Unevaluated` is the initial approval state, not a policy outcome".to_string(),
+                ));
+            }
         };
         self.transition_to(next)?;
         self.approval = approval;

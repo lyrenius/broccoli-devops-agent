@@ -57,7 +57,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 102,
       "version": 1,
       "versionNonce": 1002,
@@ -121,7 +123,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 104,
       "version": 1,
       "versionNonce": 1004,
@@ -185,7 +189,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 106,
       "version": 1,
       "versionNonce": 1006,
@@ -249,7 +255,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 108,
       "version": 1,
       "versionNonce": 1008,
@@ -313,7 +321,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 110,
       "version": 1,
       "versionNonce": 1010,
@@ -377,7 +387,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 112,
       "version": 1,
       "versionNonce": 1012,
@@ -441,7 +453,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 114,
       "version": 1,
       "versionNonce": 1014,
@@ -505,7 +519,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 116,
       "version": 1,
       "versionNonce": 1016,
@@ -534,21 +550,21 @@
       "frameId": null,
       "roundness": null,
       "seed": 117,
-      "version": 1,
+      "version": 2,
       "versionNonce": 1017,
       "isDeleted": false,
       "boundElements": null,
-      "updated": 1787800000000,
+      "updated": 1787900000000,
       "link": null,
       "locked": false,
       "fontSize": 20,
       "fontFamily": 2,
-      "text": "Judge\nAnomaly detection\nreads Snapshot N",
-      "rawText": "Judge\nAnomaly detection\nreads Snapshot N",
+      "text": "Judger Agent\nAnomaly detection\nreads sanitized Judge View",
+      "rawText": "Judger Agent\nAnomaly detection\nreads sanitized Judge View",
       "textAlign": "center",
       "verticalAlign": "middle",
       "containerId": null,
-      "originalText": "Judge\nAnomaly detection\nreads Snapshot N",
+      "originalText": "Judger Agent\nAnomaly detection\nreads sanitized Judge View",
       "autoResize": true,
       "lineHeight": 1.25
     },
@@ -569,7 +585,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 118,
       "version": 1,
       "versionNonce": 1018,
@@ -633,7 +651,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 120,
       "version": 1,
       "versionNonce": 1020,
@@ -662,21 +682,21 @@
       "frameId": null,
       "roundness": null,
       "seed": 121,
-      "version": 1,
+      "version": 2,
       "versionNonce": 1021,
       "isDeleted": false,
       "boundElements": null,
-      "updated": 1787800000000,
+      "updated": 1787900000000,
       "link": null,
       "locked": false,
       "fontSize": 19,
       "fontFamily": 2,
-      "text": "TOP SCHEDULER\n\nOwns global context and priority\nSnapshot-based dispatch\nFreeze / resume / recovery\nCallback and human choice aggregation\nWorktree / Bundle / operation conflicts",
-      "rawText": "TOP SCHEDULER\n\nOwns global context and priority\nSnapshot-based dispatch\nFreeze / resume / recovery\nCallback and human choice aggregation\nWorktree / Bundle / operation conflicts",
+      "text": "TOP SCHEDULER AGENT\n\nOwns global context and priority\nSnapshot-based dispatch\nFreeze / resume / recovery\nCallback and human choice aggregation\nWorktree / Bundle / operation conflicts",
+      "rawText": "TOP SCHEDULER AGENT\n\nOwns global context and priority\nSnapshot-based dispatch\nFreeze / resume / recovery\nCallback and human choice aggregation\nWorktree / Bundle / operation conflicts",
       "textAlign": "center",
       "verticalAlign": "middle",
       "containerId": null,
-      "originalText": "TOP SCHEDULER\n\nOwns global context and priority\nSnapshot-based dispatch\nFreeze / resume / recovery\nCallback and human choice aggregation\nWorktree / Bundle / operation conflicts",
+      "originalText": "TOP SCHEDULER AGENT\n\nOwns global context and priority\nSnapshot-based dispatch\nFreeze / resume / recovery\nCallback and human choice aggregation\nWorktree / Bundle / operation conflicts",
       "autoResize": true,
       "lineHeight": 1.25
     },
@@ -697,7 +717,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 122,
       "version": 1,
       "versionNonce": 1022,
@@ -761,7 +783,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 124,
       "version": 1,
       "versionNonce": 1024,
@@ -825,7 +849,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 126,
       "version": 1,
       "versionNonce": 1026,
@@ -889,7 +915,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 3 },
+      "roundness": {
+        "type": 3
+      },
       "seed": 128,
       "version": 1,
       "versionNonce": 1028,
@@ -953,7 +981,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 130,
       "version": 1,
       "versionNonce": 1030,
@@ -962,7 +992,16 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [90, 0]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          90,
+          0
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
@@ -987,7 +1026,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 131,
       "version": 1,
       "versionNonce": 1031,
@@ -996,7 +1037,16 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [20, -70]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          20,
+          -70
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
@@ -1021,7 +1071,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 132,
       "version": 1,
       "versionNonce": 1032,
@@ -1030,7 +1082,16 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [95, 0]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          95,
+          0
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
@@ -1092,7 +1153,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 134,
       "version": 1,
       "versionNonce": 1034,
@@ -1101,7 +1164,16 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [55, 0]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          55,
+          0
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
@@ -1126,7 +1198,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 135,
       "version": 1,
       "versionNonce": 1035,
@@ -1135,7 +1209,16 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [0, 65]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          65
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
@@ -1160,7 +1243,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 136,
       "version": 1,
       "versionNonce": 1036,
@@ -1169,7 +1254,16 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [-60, 90]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -60,
+          90
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
@@ -1231,7 +1325,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 138,
       "version": 1,
       "versionNonce": 1038,
@@ -1240,7 +1336,16 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [20, -90]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          20,
+          -90
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
@@ -1302,7 +1407,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 140,
       "version": 1,
       "versionNonce": 1040,
@@ -1311,7 +1418,16 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [0, 35]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          35
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
@@ -1336,7 +1452,9 @@
       "opacity": 100,
       "groupIds": [],
       "frameId": null,
-      "roundness": { "type": 2 },
+      "roundness": {
+        "type": 2
+      },
       "seed": 141,
       "version": 1,
       "versionNonce": 1041,
@@ -1345,13 +1463,223 @@
       "updated": 1787800000000,
       "link": null,
       "locked": false,
-      "points": [[0, 0], [-75, -120], [-140, -260]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -75,
+          -120
+        ],
+        [
+          -140,
+          -260
+        ]
+      ],
       "lastCommittedPoint": null,
       "startBinding": null,
       "endBinding": null,
       "startArrowhead": null,
       "endArrowhead": "arrow",
       "elbowed": false
+    },
+    {
+      "id": "reporter-box",
+      "type": "rectangle",
+      "x": 430,
+      "y": 560,
+      "width": 330,
+      "height": 110,
+      "angle": 0,
+      "strokeColor": "#16a34a",
+      "backgroundColor": "#dcfce7",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": {
+        "type": 3
+      },
+      "seed": 300,
+      "version": 1,
+      "versionNonce": 1200,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1787900000000,
+      "link": null,
+      "locked": false
+    },
+    {
+      "id": "reporter-text",
+      "type": "text",
+      "x": 455,
+      "y": 575,
+      "width": 290,
+      "height": 80,
+      "angle": 0,
+      "strokeColor": "#0f172a",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": null,
+      "seed": 301,
+      "version": 1,
+      "versionNonce": 1201,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1787900000000,
+      "link": null,
+      "locked": false,
+      "fontSize": 16,
+      "fontFamily": 2,
+      "text": "Reporter Agent\nSummarize status of machines\nto the human maintainer",
+      "rawText": "Reporter Agent\nSummarize status of machines\nto the human maintainer",
+      "textAlign": "left",
+      "verticalAlign": "middle",
+      "containerId": null,
+      "originalText": "Reporter Agent\nSummarize status of machines\nto the human maintainer",
+      "autoResize": true,
+      "lineHeight": 1.25
+    },
+    {
+      "id": "arrow-collector-reporter",
+      "type": "arrow",
+      "x": 530,
+      "y": 435,
+      "width": 0,
+      "height": 125,
+      "angle": 0,
+      "strokeColor": "#475569",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": {
+        "type": 2
+      },
+      "seed": 302,
+      "version": 1,
+      "versionNonce": 1202,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1787900000000,
+      "link": null,
+      "locked": false,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          125
+        ]
+      ],
+      "lastCommittedPoint": null,
+      "startBinding": null,
+      "endBinding": null,
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "elbowed": false
+    },
+    {
+      "id": "arrow-scheduler-collector",
+      "type": "arrow",
+      "x": 970,
+      "y": 285,
+      "width": 330,
+      "height": 50,
+      "angle": 0,
+      "strokeColor": "#475569",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": {
+        "type": 2
+      },
+      "seed": 303,
+      "version": 1,
+      "versionNonce": 1203,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1787900000000,
+      "link": null,
+      "locked": false,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -230,
+          -20
+        ],
+        [
+          -330,
+          30
+        ]
+      ],
+      "lastCommittedPoint": null,
+      "startBinding": null,
+      "endBinding": null,
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "elbowed": false
+    },
+    {
+      "id": "label-capture-requests",
+      "type": "text",
+      "x": 690,
+      "y": 235,
+      "width": 190,
+      "height": 20,
+      "angle": 0,
+      "strokeColor": "#334155",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "strokeStyle": "solid",
+      "roughness": 1,
+      "opacity": 100,
+      "groupIds": [],
+      "frameId": null,
+      "roundness": null,
+      "seed": 304,
+      "version": 1,
+      "versionNonce": 1204,
+      "isDeleted": false,
+      "boundElements": null,
+      "updated": 1787900000000,
+      "link": null,
+      "locked": false,
+      "fontSize": 13,
+      "fontFamily": 2,
+      "text": "capture / probe requests",
+      "rawText": "capture / probe requests",
+      "textAlign": "left",
+      "verticalAlign": "middle",
+      "containerId": null,
+      "originalText": "capture / probe requests",
+      "autoResize": true,
+      "lineHeight": 1.25
     }
   ],
   "appState": {

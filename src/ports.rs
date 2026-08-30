@@ -1,20 +1,23 @@
-//! Interfaces between the core domain and the Collector, model, Agent Team, Platform, and persistence.
+//! Interfaces between the core domain and the Collector, models, Agent Teams, Platform, Reporter,
+//! and persistence.
 //!
 //! Every port depends only on domain types. The initial version provides only an in-memory
 //! `StateStore`; the other ports deliberately have no placeholder implementations so callers cannot
 //! mistake them for available external capabilities.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActionRun, ActionRunId, Artifact, ArtifactId, DeploymentId, EventRecord, Issue, IssueCandidate,
-    IssueId, Job, JobId, NewEvent, OperationMode, PlatformOperationResult, ResourceId, Snapshot,
-    SnapshotCause, SnapshotId, SnapshotViewRef, TeamCallback, TeamKind, WorkOrder,
+    IssueId, IssuePriority, Job, JobId, JobResult, NewEvent, OperationMode,
+    PlatformOperationResult, ResourceId, Snapshot, SnapshotCause, SnapshotId, SnapshotViewRef,
+    TeamCallback, TeamKind, WorkOrder,
 };
 use crate::error::AgentResult;
 
 /// Describes one Snapshot capture request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureRequest {
     /// ID of the deployment instance to capture.
     pub deployment_id: DeploymentId,
@@ -67,13 +70,24 @@ pub trait CollectorPort: Send + Sync {
 }
 
 /// Snapshot Judge boundary that proposes potential problems from one Snapshot.
+///
+/// The Judge is hybrid: deterministic alert rules always run, and a model may additionally
+/// correlate evidence. Because model reasoning is involved, the Judge receives a sanitized Judge
+/// View built with its own redaction profile rather than the canonical Snapshot, so raw untrusted
+/// text never enters model context. The View Artifact is stored, making Judge input replayable
+/// exactly like Job input.
 #[async_trait]
 pub trait SnapshotJudgePort: Send + Sync {
-    /// Analyzes the given Snapshot and returns zero or more Issue Candidates.
+    /// Analyzes the sanitized Judge View of one Snapshot and returns zero or more Issue Candidates.
     ///
-    /// A Candidate is only a proposal and cannot directly create an Issue, assign priority, or
+    /// `snapshot_id` names the canonical Snapshot the View was built from so candidates reference
+    /// it. A Candidate is only a proposal and cannot directly create an Issue, assign priority, or
     /// execute an action. The Top Scheduler handles deduplication and acceptance.
-    async fn inspect_snapshot(&self, snapshot: &Snapshot) -> AgentResult<Vec<IssueCandidate>>;
+    async fn inspect_snapshot(
+        &self,
+        snapshot_id: SnapshotId,
+        judge_view: &Artifact,
+    ) -> AgentResult<Vec<IssueCandidate>>;
 }
 
 /// Boundary that converts a canonical Snapshot into a Job-visible View.
@@ -91,6 +105,76 @@ pub trait SnapshotViewBuilderPort: Send + Sync {
     ) -> AgentResult<SnapshotViewBuildResult>;
 }
 
+/// Creates a linked cancellation handle and signal.
+///
+/// The Scheduler keeps the handle; the signal travels with a running Job so supersession, freezing,
+/// or human cancellation can stop Team work cooperatively. Dropping the handle also cancels the
+/// signal so an abandoned Job cannot run forever unnoticed.
+pub fn cancel_pair() -> (CancelHandle, CancelSignal) {
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    (CancelHandle { sender }, CancelSignal { receiver })
+}
+
+/// Scheduler-side handle that requests cancellation of one running Job.
+#[derive(Debug)]
+pub struct CancelHandle {
+    sender: tokio::sync::watch::Sender<bool>,
+}
+
+impl CancelHandle {
+    /// Requests cooperative cancellation.
+    ///
+    /// Cancellation is a request, not preemption: the Team decides where it can safely stop and
+    /// should still deliver a final callback describing what was abandoned.
+    pub fn cancel(&self) {
+        let _ = self.sender.send(true);
+    }
+}
+
+/// Team-side signal observed while executing a Job.
+#[derive(Debug, Clone)]
+pub struct CancelSignal {
+    receiver: tokio::sync::watch::Receiver<bool>,
+}
+
+impl CancelSignal {
+    /// Returns whether cancellation has been requested.
+    ///
+    /// A dropped `CancelHandle` counts as cancelled so orphaned work stops rather than running
+    /// without an owner.
+    pub fn is_cancelled(&self) -> bool {
+        *self.receiver.borrow() || self.receiver.has_changed().is_err()
+    }
+
+    /// Waits until cancellation is requested.
+    ///
+    /// Long-running Team steps can race this future against their own work to react promptly.
+    pub async fn cancelled(&mut self) {
+        loop {
+            if *self.receiver.borrow_and_update() {
+                return;
+            }
+            if self.receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Receiver for the callbacks a Team emits while a Job runs.
+///
+/// The design requires multiple callbacks per Job (progress, probe requests, then a final result),
+/// so the Team pushes into a sink instead of returning one value. The Scheduler side of the sink
+/// records every callback in the EventLog before acting on it.
+#[async_trait]
+pub trait TeamCallbackSink: Send + Sync {
+    /// Delivers one callback to the Scheduler.
+    ///
+    /// Delivery must preserve per-Job order. An error tells the Team the Scheduler no longer
+    /// accepts callbacks for this Job (for example after supersession) and it should stop.
+    async fn deliver(&self, callback: TeamCallback) -> AgentResult<()>;
+}
+
 /// Agent Team boundary that executes a Develop or Operate Job.
 #[async_trait]
 pub trait AgentTeamPort: Send + Sync {
@@ -99,9 +183,17 @@ pub trait AgentTeamPort: Send + Sync {
 
     /// Executes one unit of Team work using the Job and exact Snapshot View Artifact.
     ///
-    /// The Team can only return results or request more evidence through a callback. It cannot replace
-    /// the Job Snapshot itself or bypass the Agents Platform to operate a machine directly.
-    async fn run_job(&self, job: &Job, snapshot_view: &Artifact) -> AgentResult<TeamCallback>;
+    /// The Team reports through the sink: zero or more interim callbacks, then exactly one callback
+    /// carrying `final_result`. It must watch `cancel` and stop cooperatively when signalled. It
+    /// cannot replace the Job Snapshot itself or bypass the Agents Platform to operate a machine
+    /// directly.
+    async fn run_job(
+        &self,
+        job: &Job,
+        snapshot_view: &Artifact,
+        sink: &dyn TeamCallbackSink,
+        cancel: CancelSignal,
+    ) -> AgentResult<()>;
 }
 
 /// Agents Platform boundary for controlled machine, repository, and build operations.
@@ -113,6 +205,129 @@ pub trait AgentsPlatformPort: Send + Sync {
     /// write complete output as an Artifact. Platform success does not mean the problem is resolved;
     /// the Scheduler still needs after-Snapshot verification.
     async fn execute_action(&self, action: &ActionRun) -> AgentResult<PlatformOperationResult>;
+}
+
+/// Input for one candidate-triage consultation with the Scheduler Policy model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriageRequest {
+    /// Candidate under triage.
+    pub candidate: IssueCandidate,
+    /// Currently open Issues, provided so the model can propose merges instead of duplicates.
+    pub open_issues: Vec<Issue>,
+}
+
+/// Model-proposed triage decision for one Issue Candidate.
+///
+/// Every variant is a proposal: the Scheduler harness clamps priorities, verifies referenced
+/// Issues, and may still refuse the decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "decision")]
+pub enum TriageDecision {
+    /// Accept the candidate as a new formal Issue at the given priority.
+    ///
+    /// The harness caps model-proposed priority below `HumanTop`; only humans reach that level.
+    Accept {
+        /// Proposed scheduling priority.
+        priority: IssuePriority,
+    },
+    /// Attach the candidate's evidence to an existing open Issue instead of opening a new one.
+    MergeInto {
+        /// ID of the open Issue that already covers this problem.
+        issue_id: IssueId,
+    },
+    /// Discard the candidate as noise or a duplicate not worth tracking.
+    Reject,
+}
+
+/// Input for drafting the Work Order of a new Job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkOrderDraftRequest {
+    /// Issue the Job will serve.
+    pub issue: Issue,
+    /// Team kind that will receive the Job.
+    pub team_kind: TeamKind,
+}
+
+/// Input for interpreting a Job's final result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallbackAdviceRequest {
+    /// Issue that owns the Job.
+    pub issue: Issue,
+    /// Job that finished the current stage.
+    pub job: Job,
+    /// Final result returned by the Team.
+    pub result: JobResult,
+}
+
+/// Model-proposed next step after a Job's final result.
+///
+/// The harness validates each variant before acting: probe IDs must be non-empty and registered,
+/// proposal indexes must exist in the `JobResult`, and terminal decisions must satisfy the Issue
+/// state machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "step")]
+pub enum NextStepDecision {
+    /// Capture a new Snapshot with the given Probes and dispatch a superseding Job.
+    Resnapshot {
+        /// Probe IDs to include in the new capture.
+        requested_probe_ids: Vec<String>,
+    },
+    /// Convert the listed proposals from the `JobResult` into ActionRuns.
+    CreateActions {
+        /// Zero-based indexes into `JobResult::proposed_actions`.
+        proposal_indexes: Vec<usize>,
+    },
+    /// Put the Issue in front of a human with a concrete question.
+    AskHuman {
+        /// Question the human must answer before automatic work continues.
+        question: String,
+    },
+    /// Consider the Issue resolved.
+    Resolve,
+    /// Record failure and stop automatic work on the Issue.
+    GiveUp,
+}
+
+/// A validated-or-rejected next-step proposal together with the model's rationale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextStep {
+    /// Proposed next step.
+    pub decision: NextStepDecision,
+    /// Model or fallback rationale, recorded for post-contest review.
+    pub rationale: String,
+}
+
+/// Scheduler Policy boundary: the model side of the AI-integrated Top Scheduler.
+///
+/// The Scheduler harness owns state machines, permissions, and invariants; this port is consulted
+/// only at fixed decision points with typed requests and responses. Every consultation must be
+/// recorded in the EventLog with its input and output so decisions can be replayed. When the model
+/// is unavailable the Scheduler falls back to conservative deterministic defaults instead of
+/// failing, so model downtime never breaks collection, persistence, or recovery.
+#[async_trait]
+pub trait SchedulerPolicyPort: Send + Sync {
+    /// Proposes how to triage one Issue Candidate against the currently open Issues.
+    async fn triage_candidate(&self, request: &TriageRequest) -> AgentResult<TriageDecision>;
+
+    /// Drafts the Work Order for a new Job on the given Issue.
+    ///
+    /// The harness may adjust or replace the draft; the model cannot widen capability or target
+    /// scope through the Work Order text.
+    async fn draft_work_order(&self, request: &WorkOrderDraftRequest) -> AgentResult<WorkOrder>;
+
+    /// Proposes the next step after a Job returns its final result.
+    async fn advise_next_step(&self, request: &CallbackAdviceRequest) -> AgentResult<NextStep>;
+}
+
+/// Reporter boundary that renders human-facing status reports from Snapshots.
+///
+/// The Reporter consumes Snapshots from the observation path and never dispatches work or mutates
+/// machines. The first implementation should render deterministically; model summarization is an
+/// optional layer on top.
+#[async_trait]
+pub trait ReporterPort: Send + Sync {
+    /// Renders a status report for one Snapshot and returns the report Artifact.
+    async fn render_status_report(&self, snapshot: &Snapshot) -> AgentResult<Artifact>;
 }
 
 /// Persistence boundary for domain objects and the append-only EventLog.

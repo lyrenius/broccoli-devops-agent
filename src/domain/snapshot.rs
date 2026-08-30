@@ -217,7 +217,7 @@ pub struct RevisionRef {
 /// Immutable system state used by an Agent for reasoning at a point in time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    /// Snapshot ID。
+    /// Snapshot ID.
     pub snapshot_id: SnapshotId,
     /// Parent Snapshot ID expressing supplemental collection or before/after relationships.
     pub parent_snapshot_id: Option<SnapshotId>,

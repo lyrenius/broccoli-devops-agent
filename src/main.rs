@@ -15,7 +15,8 @@ use broccoli_devops_agent::store::memory::InMemoryStateStore;
 ///
 /// This function only creates in-process objects. It does not read configuration, access the
 /// network, or cause external side effects. A later startup flow will wire concrete Collector,
-/// Agent Team, and Agents Platform implementations here.
+/// Snapshot View Builder, Agent Team, Agents Platform, and Scheduler Policy implementations here
+/// through the `TopScheduler::with_*` builder methods.
 #[tokio::main]
 async fn main() {
     let store = Arc::new(InMemoryStateStore::new());

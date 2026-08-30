@@ -39,11 +39,11 @@ pub enum IssuePriority {
 }
 
 impl IssuePriority {
-    /// Restricts a Judge-proposed priority to the Judge's authority.
+    /// Restricts a priority proposed by any model or the Judge to non-human authority.
     ///
-    /// Initially this only prevents the Judge from producing `HumanTop`. Contest phase,
+    /// Initially this only prevents non-human proposals from producing `HumanTop`. Contest phase,
     /// deduplication, alert source, and other effective-priority rules can be added here later.
-    fn judge_safe(self) -> Self {
+    pub fn model_safe(self) -> Self {
         match self {
             Self::HumanTop => Self::Critical,
             other => other,
@@ -106,6 +106,12 @@ pub struct HumanReport {
     pub title: String,
     /// Symptoms and context observed by the human.
     pub description: String,
+    /// Priority explicitly chosen by the reporter, or `None` to accept the `HumanTop` default.
+    ///
+    /// Only a human can put an Issue at `HumanTop`, but a human may deliberately file a low-urgency
+    /// report (for example a printer running low on ink) without preempting a critical detected
+    /// outage.
+    pub priority: Option<IssuePriority>,
     /// Resources the human believes may be affected.
     pub affected_resource_ids: Vec<ResourceId>,
     /// Artifact IDs attached to the report.
@@ -132,6 +138,7 @@ impl HumanReport {
             reporter: reporter.into(),
             title: title.into(),
             description: description.into(),
+            priority: None,
             affected_resource_ids: Vec::new(),
             attachment_artifact_ids: Vec::new(),
             requested_outcome: None,
@@ -196,7 +203,7 @@ impl IssueCandidate {
 /// A problem formally tracked by the Top Scheduler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
-    /// Issue ID。
+    /// Issue ID.
     pub issue_id: IssueId,
     /// Issue source.
     pub source: IssueSource,
@@ -227,10 +234,12 @@ pub struct Issue {
 }
 
 impl Issue {
-    /// Converts a Human Report into a formal highest-priority Issue.
+    /// Converts a Human Report into a formal Issue that defaults to the highest priority.
     ///
-    /// `source_event_id` must reference a human-report event already written to the EventLog. This
-    /// function always uses `HumanTop`, preventing a model or Judge from forging the same priority.
+    /// `source_event_id` must reference a human-report event already written to the EventLog. The
+    /// reporter may deliberately choose a lower priority; when none is chosen the Issue is
+    /// `HumanTop`. Only this human path can produce `HumanTop`, preventing a model or Judge from
+    /// forging the same priority.
     pub fn from_human_report(
         report: HumanReport,
         snapshot_id: SnapshotId,
@@ -243,7 +252,7 @@ impl Issue {
             source_event_id,
             title: report.title,
             description: report.description,
-            priority: IssuePriority::HumanTop,
+            priority: report.priority.unwrap_or(IssuePriority::HumanTop),
             status: IssueStatus::Open,
             opened_snapshot_id: snapshot_id,
             current_snapshot_id: snapshot_id,
@@ -267,7 +276,7 @@ impl Issue {
             source_event_id,
             title: candidate.title,
             description: candidate.summary,
-            priority: candidate.proposed_priority.judge_safe(),
+            priority: candidate.proposed_priority.model_safe(),
             status: IssueStatus::Open,
             opened_snapshot_id: candidate.snapshot_id,
             current_snapshot_id: candidate.snapshot_id,
@@ -286,6 +295,14 @@ impl Issue {
     pub fn update_current_snapshot(&mut self, snapshot_id: SnapshotId) {
         self.current_snapshot_id = snapshot_id;
         self.updated_at = Utc::now();
+    }
+
+    /// Returns whether the minimal state machine allows the given transition from the current state.
+    ///
+    /// The Scheduler uses this to apply optional lifecycle updates (for example after a Job result)
+    /// only when they are legal, without treating an inapplicable update as an error.
+    pub fn can_transition_to(&self, next: IssueStatus) -> bool {
+        is_valid_transition(self.status, next)
     }
 
     /// Transitions an Issue according to the minimal state machine.

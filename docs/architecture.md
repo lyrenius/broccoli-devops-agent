@@ -1,7 +1,7 @@
 # Broccoli DevOps Agent Architecture
 
-> Status: Draft v0.1  
-> Updated: 2026-08-28  
+> Status: Draft v0.2  
+> Updated: 2026-08-29  
 > Scope: Product and system architecture. This document does not yet prescribe a concrete OpenAI model, deployment host, or production permission policy.
 
 ## 1. Goal
@@ -29,7 +29,10 @@ Agent, the operator UI, or the OpenAI API becomes unavailable.
    Agents Platform. Neither the Scheduler nor model prompts directly hold
    credentials.
 4. **Human reports have the highest priority.** Human-reported problems bypass
-   anomaly detection and enter the Scheduler directly.
+   anomaly detection and enter the Scheduler directly. `HumanTop` priority is
+   the default for a human report and is reserved for humans: a reporter may
+   deliberately file at a lower priority, but no model or Judge output can ever
+   reach `HumanTop`.
 5. **Immutable evidence and replayability.** Snapshots, events, model inputs,
    callbacks, actions, and artifacts are recorded so that an incident can be
    replayed and reviewed after a contest.
@@ -55,10 +58,17 @@ The architecture has three main paths.
 Machines
    │ data / logs / status / events
    ▼
-Collector
+Collector  <── capture / probe requests ── Top Scheduler
    ├──> AutoLog DB / Snapshot Store
-   └──> Snapshot Judge
+   ├──> Snapshot Judge (sanitized Judge View)
+   └──> Reporter Agent
 ```
+
+The Collector runs its own periodic capture schedule. In addition, the Top
+Scheduler — and only the Top Scheduler — can request captures on demand: after
+a human report, when a Team requests additional Probes, and immediately before
+and after an ActionRun. This control edge is the only arrow pointing back into
+the observation path; nothing else drives the Collector.
 
 The Collector gathers information from:
 
@@ -88,17 +98,19 @@ Human Report ────> TOP PRIORITY ──> Top Scheduler
                                  Top Scheduler
 ```
 
-The component labelled `Judge` in the diagram is an anomaly-analysis component,
-not a Broccoli judge worker. This document calls it the **Snapshot Judge** to
-avoid that name collision.
+The component labelled `Judger Agent` in the diagram is an anomaly-analysis
+component, not a Broccoli judge worker. This document calls it the **Snapshot
+Judge** to avoid that name collision.
 
-The Snapshot Judge examines one immutable Snapshot and emits zero or more issue
-candidates. A candidate is not automatically a formal Issue. The Top Scheduler
-deduplicates it, compares it with active Issues, assigns priority, and decides
-whether work should be dispatched.
+The Snapshot Judge examines one immutable Snapshot — through a sanitized Judge
+View, see §4.3 — and emits zero or more issue candidates. A candidate is not
+automatically a formal Issue. The Top Scheduler deduplicates it, compares it
+with active Issues, assigns priority, and decides whether work should be
+dispatched.
 
 Human reports bypass the Snapshot Judge. The Scheduler attaches a recent or
-newly requested Snapshot before dispatching work for the report.
+newly requested Snapshot (via its capture-request edge to the Collector) before
+dispatching work for the report.
 
 ### 3.3 Execution path
 
@@ -119,6 +131,11 @@ The Agents Platform has the network reach and credentials needed to access all
 configured machines. Individual Jobs receive narrower capability and target
 scopes. All side effects are represented by an ActionRun and are written to the
 event log.
+
+Read-only scoped requests (inspection within the Job's capability and target
+scope) may flow from a Team to the Platform directly. Mutations may not: a
+Team returns an ActionProposal, and only the Scheduler converts it into an
+ActionRun and hands it to the Platform, checking the freeze mode at both steps.
 
 ## 4. Components
 
@@ -153,29 +170,94 @@ bundles stored as files referenced by content hash.
 
 ### 4.3 Snapshot Judge
 
+The Snapshot Judge is hybrid (decided; formerly OD-3): deterministic alert
+rules always run, and an LLM additionally correlates evidence across components
+and proposes issue candidates the rules cannot express.
+
 Responsibilities:
 
 - Examine one Snapshot at a time.
-- Combine deterministic rules with optional model reasoning.
-- Detect potential cross-component anomalies.
+- Run deterministic alert rules unconditionally; rule output does not depend on
+  model availability.
+- Use model reasoning for cross-component correlation on top of the rules.
 - Emit issue candidates with evidence references and a deduplication key.
 - Never dispatch teams or mutate machines directly.
 
-Whether the first implementation is rule-only or hybrid is an open decision.
+Because model reasoning is involved, the Judge does not read the canonical
+Snapshot. It consumes a **Judge View**: a sanitized rendering built by the
+Snapshot View Builder with the Judge's own redaction profile, stored as an
+Artifact exactly like a Job's Snapshot View. This keeps raw untrusted text
+(log excerpts, contestant-derived strings, alert bodies) out of model context
+and makes every Judge inspection replayable byte-for-byte.
 
 ### 4.4 Top Scheduler
 
 The Top Scheduler is the only component with global orchestration ownership.
+It is AI-integrated: a **deterministic harness** wrapped around a **Scheduler
+Policy model**. The harness owns every invariant; the model handles judgment
+calls, edge cases, and unforeseen situations — but only as proposals.
 
-Responsibilities:
+#### Control flow
+
+Every Scheduler cycle follows one explicit loop:
+
+```text
+input (snapshot | issue candidate | human report | team callback | human choice | timer)
+   │
+   ▼
+deterministic pre-checks        mode gates, state machines, dedup keys, scope
+   │
+   ▼
+policy consultation             ONLY at fixed decision points, typed request/response
+   │
+   ▼
+harness validation              clamp priorities, verify references and transitions,
+   │                            check conflicts; invalid proposals are errors
+   ▼
+apply + append events           model input and output stored for exact replay
+```
+
+The fixed decision points where the policy model is consulted:
+
+1. **Candidate triage.** Accept, merge into an existing Issue, or reject an
+   issue candidate, with a proposed priority. The harness clamps every
+   model-proposed priority below `HumanTop` and verifies merge targets exist
+   and are open.
+2. **Work Order drafting.** Draft the objective, expected outputs, and
+   constraints for a new Job. The model cannot widen capability or target scope
+   through Work Order text.
+3. **Callback interpretation.** After a Job's final result: request a
+   resnapshot with specific Probes, convert selected Team proposals into
+   ActionRuns, ask a human a concrete question, resolve, or give up. The
+   harness validates the proposal against the actual `JobResult` (probe lists
+   non-empty, proposal indexes in range) and refuses invalid decisions rather
+   than executing them.
+
+Hard invariants never route through the model: freeze modes, approval gates,
+state-machine transitions, capability and target scoping, `HumanTop`
+reservation, and idempotency. Every consultation is written to the EventLog
+with its exact input and output (mixed trust) so post-contest review can audit
+each model-influenced decision.
+
+**Fallback:** when the policy model is unavailable, decision points degrade to
+conservative deterministic defaults — candidates are recorded and deferred to a
+human, Work Orders are derived mechanically from the Issue, and next steps
+become a question for a human. Model downtime therefore never breaks
+collection, persistence, dispatch bookkeeping, or recovery.
+
+#### Responsibilities
 
 - Maintain formal Issues and their priorities.
-- Give Human Reports the highest effective priority.
+- Give Human Reports the highest effective priority by default.
+- Request on-demand Snapshot captures from the Collector (the only component
+  besides the Collector's own schedule that can).
 - Select a base Snapshot for every Job.
 - Generate a sanitized Snapshot View and Work Order.
 - Dispatch Develop or Operate Jobs.
 - Aggregate callbacks, options, artifacts, and blockers.
 - Manage human choices.
+- Act as the sole gateway that creates ActionRuns and hands them to the Agents
+  Platform (this is where freeze modes are enforced).
 - Detect Worktree, source, configuration, Bundle, target-machine, and operation
   conflicts.
 - Freeze, resume, checkpoint, and recover orchestration.
@@ -212,6 +294,16 @@ changes pass conflict checking before an artifact replacement ActionRun.
 The exact automatic-write boundary differs by operation mode and remains an
 open decision.
 
+#### Team contract
+
+A Team reports through a callback sink, not a single return value: zero or
+more interim callbacks (progress, probe requests, human questions) followed by
+exactly one callback carrying the final result. The callback's kind is derived
+from its content, so a Team cannot label a failure as success. Each running Job
+carries a cooperative cancellation signal; supersession, freezing, or human
+cancellation signals the Team, which stops at a safe point and still delivers a
+final callback describing what was abandoned.
+
 #### Internal parallelism
 
 An Agent Team may later use skills or subagents to investigate independent
@@ -233,6 +325,42 @@ Responsibilities:
 
 The Platform may internally use system OpenSSH or another transport, but that
 choice is not exposed to Agent prompts.
+
+### 4.7 Reporter Agent
+
+The Reporter (decided; formerly OD-6) is a first-class component fed by the
+Collector and Snapshot Store, matching the architecture diagram. It summarizes
+machine and service status for the human maintainer.
+
+Responsibilities:
+
+- Consume Snapshots from the observation path; never dispatch work or mutate
+  machines.
+- Render status reports deterministically first; model summarization is an
+  optional layer on top of the deterministic rendering.
+- Store each report as a `StatusReport` Artifact.
+
+The Reporter is not part of the v0.1 vertical slice, but its boundary
+(`ReporterPort`) is reserved now so the observation path does not need
+restructuring later.
+
+### 4.8 Registries
+
+Two allowlists back the capability model. They are enforcement points, not
+suggestions, and models cannot extend them:
+
+- **Probe Registry** (owned by the Collector): the set of valid `probe_id`
+  values. A Team or the Scheduler can only request observations that the
+  registry defines; each entry fixes what is collected, from where, and with
+  what redaction metadata.
+- **Runbook Registry** (owned by the Agents Platform): the set of valid
+  `runbook_id` values and their typed argument schemas. An ActionRun can only
+  name a registered Runbook, and the Platform validates arguments, capability,
+  and target scope against the registry entry before executing anything. This
+  is what makes "a model cannot send a free-form shell command" concrete.
+
+`allowed_capabilities` on a Job is interpreted against these registries: a
+capability names a subset of Probes and Runbooks the Job may request.
 
 ## 5. Core Domain Model
 
@@ -461,12 +589,18 @@ underlying command returned exit code zero.
 The initial priority ordering is:
 
 ```text
-Human Report
+Human Report (default)
   > critical detected issue
   > high detected issue
   > normal issue
   > background or maintenance work
 ```
+
+`HumanTop` is the *default* for a human report, not a forced value: a reporter
+may deliberately file at a lower priority (a printer running low on ink should
+not preempt a critical database outage). The reservation runs the other way —
+only the human-report path can produce `HumanTop`; every model- or
+Judge-proposed priority is clamped to `Critical` or below.
 
 The Scheduler computes effective priority. Models and Agent Teams cannot raise
 their own priority.
@@ -500,12 +634,20 @@ The Scheduler supports at least:
 
 ```text
 running
-dispatch_frozen       no new Jobs; active Jobs may checkpoint
+dispatch_frozen       no new Jobs; active Jobs may checkpoint and finish actions
 fully_frozen          no new work or side effects
 recovering            reconstructing control state after restart
 ```
 
 Broccoli and the Collector continue operating while dispatch is frozen.
+
+**Enforcement point:** the Scheduler is the sole gateway that creates
+ActionRuns and moves them to execution, and it checks the freeze mode
+immediately before both steps — `fully_frozen` and `recovering` refuse them.
+The Agents Platform additionally validates every request it receives, so a
+bypassed Scheduler check would still fail at the Platform. Every mode change,
+including the transitions inside recovery, is written to the EventLog, so the
+event stream alone reconstructs the mode history.
 
 ## 8. Security and Reliability Boundaries
 
@@ -513,6 +655,8 @@ Broccoli and the Collector continue operating while dispatch is frozen.
 - Machine, database, Redis, object-storage, and station secrets never enter
   model context.
 - The Agents Platform validates every target and capability request.
+- Every model consumer — Agent Teams, the Snapshot Judge, and the Scheduler
+  Policy — reads sanitized, artifact-stored views, never raw canonical state.
 - Raw logs and contestant-derived strings are untrusted evidence.
 - A model cannot send a free-form shell command directly to a machine in normal
   mode.
@@ -575,8 +719,10 @@ The next slices are:
 
 ## 11. Open Decisions
 
-These questions do not block writing the architecture document, but the first
-three should be decided before implementing the corresponding runtime paths.
+These questions do not block writing the architecture document, but OD-1 and
+OD-2 should be decided before implementing the corresponding runtime paths.
+OD-3 and OD-6 have been decided and are kept here with their outcomes so the
+numbering stays stable.
 
 ### OD-1: Control-plane host and OpenAI connectivity
 
@@ -592,12 +738,11 @@ Define separate matrices for deployment/rehearsal and live contest operation:
 - Which service, network, UFW, retry, or replacement actions require approval?
 - Which actions are always denied during a live contest?
 
-### OD-3: Snapshot Judge implementation
+### OD-3: Snapshot Judge implementation — DECIDED
 
-- Deterministic rules only.
-- LLM only.
-- Recommended candidate: deterministic alert rules plus an LLM that correlates
-  Snapshot evidence and proposes issue candidates.
+Resolved as hybrid: deterministic alert rules always run, plus an LLM that
+correlates Snapshot evidence and proposes issue candidates. The LLM consumes a
+sanitized Judge View, never the canonical Snapshot. See §4.3.
 
 ### OD-4: Snapshot cadence and retention
 
@@ -606,21 +751,22 @@ Define separate matrices for deployment/rehearsal and live contest operation:
 - Raw log retention and artifact size limits.
 - How long post-contest replay data is retained.
 
-### OD-5: Agent Team backend
+### OD-5: Agent Team and Scheduler Policy backend
 
 - Direct Responses API orchestration in the Rust harness.
 - Codex/subagent-backed development work.
 - A backend abstraction supporting both.
 
-### OD-6: Reporter
+Whatever is chosen also serves the Scheduler Policy model (§4.4) and the
+Snapshot Judge's LLM layer (§4.3): all three sit behind ports, so the backend
+decision is shared and swappable.
 
-Decide whether regular human-facing status reports are:
+### OD-6: Reporter — DECIDED
 
-- A distinct Reporter Agent consuming Snapshots.
-- A deterministic report rendered by the controller.
-- A Top Scheduler presentation concern.
-
-A separate Reporter is not required for the first vertical slice.
+Resolved as a distinct Reporter Agent consuming Snapshots from the observation
+path, with deterministic rendering first and optional model summarization. See
+§4.7. A Reporter implementation is still not required for the first vertical
+slice.
 
 ### OD-7: Conflict policy and artifact promotion
 

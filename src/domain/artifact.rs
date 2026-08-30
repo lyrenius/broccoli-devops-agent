@@ -39,7 +39,7 @@ pub enum ArtifactKind {
 /// `content_sha256` before making an Artifact available to the Scheduler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
-    /// Artifact ID。
+    /// Artifact ID.
     pub artifact_id: ArtifactId,
     /// Artifact content kind.
     pub kind: ArtifactKind,

@@ -130,7 +130,7 @@ impl NewEvent {
 pub struct EventRecord {
     /// Monotonically increasing sequence number assigned by the Store.
     pub sequence: u64,
-    /// Event ID。
+    /// Event ID.
     pub event_id: EventId,
     /// Time at which the event actually occurred.
     pub occurred_at: DateTime<Utc>,

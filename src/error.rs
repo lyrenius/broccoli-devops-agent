@@ -54,6 +54,19 @@ pub enum AgentError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
+    /// A required port implementation has not been wired into the scaffold yet.
+    ///
+    /// The scaffold deliberately ships no placeholder adapters, so operations that need the
+    /// Collector, View Builder, Platform, or Policy model fail explicitly instead of pretending an
+    /// external capability exists.
+    #[error("component `{component}` is not wired; cannot perform `{operation}`")]
+    MissingDependency {
+        /// Port that has no implementation wired in.
+        component: &'static str,
+        /// Operation that required the missing port.
+        operation: &'static str,
+    },
+
     /// Structured event or model-boundary data could not be serialized.
     #[error("JSON serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),

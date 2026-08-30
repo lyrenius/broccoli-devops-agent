@@ -208,6 +208,9 @@ impl JobResult {
 }
 
 /// Kind of callback sent from an Agent Team to the Scheduler.
+///
+/// The kind is derived from the callback content by `TeamCallback::kind` rather than stored, so a
+/// Team cannot send a label that contradicts its own result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TeamCallbackKind {
@@ -230,14 +233,12 @@ pub enum TeamCallbackKind {
 /// A callback returned by an Agent Team to the Top Scheduler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamCallback {
-    /// Callback ID。
+    /// Callback ID.
     pub callback_id: Uuid,
     /// Related Issue ID.
     pub issue_id: IssueId,
     /// Related Job ID.
     pub job_id: JobId,
-    /// Callback kind.
-    pub kind: TeamCallbackKind,
     /// Summary for the Scheduler and humans.
     pub summary: String,
     /// Event IDs referenced by the callback.
@@ -255,17 +256,11 @@ impl TeamCallback {
     ///
     /// A progress callback can use this value directly. A callback that ends the current Job stage
     /// should set `final_result` before sending so the Scheduler can call `Job::complete`.
-    pub fn new(
-        issue_id: IssueId,
-        job_id: JobId,
-        kind: TeamCallbackKind,
-        summary: impl Into<String>,
-    ) -> Self {
+    pub fn new(issue_id: IssueId, job_id: JobId, summary: impl Into<String>) -> Self {
         Self {
             callback_id: Uuid::now_v7(),
             issue_id,
             job_id,
-            kind,
             summary: summary.into(),
             evidence_ids: Vec::new(),
             artifact_ids: Vec::new(),
@@ -273,12 +268,39 @@ impl TeamCallback {
             created_at: Utc::now(),
         }
     }
+
+    /// Sets the final result that ends the current Job stage.
+    ///
+    /// This builder consumes and returns `self` so Teams can assemble a callback fluently.
+    pub fn with_final_result(mut self, result: JobResult) -> Self {
+        self.final_result = Some(result);
+        self
+    }
+
+    /// Derives the callback kind from its content.
+    ///
+    /// A callback with no final result reports progress; otherwise the kind follows the result's
+    /// outcome. Deriving instead of storing prevents a Team from labelling a failure as `Completed`
+    /// or vice versa.
+    pub fn kind(&self) -> TeamCallbackKind {
+        match &self.final_result {
+            None => TeamCallbackKind::Progress,
+            Some(result) => match result.outcome {
+                JobOutcome::NeedsMoreData => TeamCallbackKind::NeedMoreContext,
+                JobOutcome::NeedsHuman => TeamCallbackKind::NeedHumanInput,
+                JobOutcome::OptionsReady => TeamCallbackKind::OptionsReady,
+                JobOutcome::Blocked => TeamCallbackKind::Blocked,
+                JobOutcome::Failed => TeamCallbackKind::Failed,
+                JobOutcome::Solved | JobOutcome::DiagnosisOnly => TeamCallbackKind::Completed,
+            },
+        }
+    }
 }
 
 /// One unit of work performed by an Agent Team against a fixed Snapshot View.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
-    /// Job ID。
+    /// Job ID.
     pub job_id: JobId,
     /// ID of the owning Issue.
     pub issue_id: IssueId,
@@ -387,12 +409,16 @@ impl Job {
 
     /// Creates a new Job that replaces this Job with a new Snapshot View.
     ///
-    /// The current Job must not be terminal. This method first marks the old Job as `Superseded`,
-    /// then copies its Team, capability, and target scope. The Scheduler supplies the new Work Order.
+    /// The current Job must not be terminal. This method first marks the old Job as `Superseded`
+    /// and copies only its Team kind. The Scheduler supplies the new Work Order and re-derives the
+    /// capability and target scope explicitly, because a new Snapshot may justify a narrower scope
+    /// than the old Job held.
     pub fn supersede_with(
         &mut self,
         new_snapshot_view: SnapshotViewRef,
         new_work_order: WorkOrder,
+        allowed_capabilities: Vec<String>,
+        allowed_target_ids: Vec<ResourceId>,
     ) -> AgentResult<Self> {
         let previous_job_id = self.job_id;
         self.transition_to(JobStatus::Superseded)?;
@@ -402,8 +428,8 @@ impl Job {
             new_snapshot_view,
             self.team_kind,
             new_work_order,
-            self.allowed_capabilities.clone(),
-            self.allowed_target_ids.clone(),
+            allowed_capabilities,
+            allowed_target_ids,
         );
         next.supersedes_job_id = Some(previous_job_id);
         Ok(next)

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-labelledby="title desc">
   <title id="title">Broccoli DevOps Agent Architecture</title>
-  <desc id="desc">Machines report data to a collector. An immutable snapshot is judged for anomalies and dispatched by a top scheduler to develop or operate agent teams. Human reports have highest priority. The agents platform provides controlled SSH, firewall, service, worktree, build, and artifact capabilities.</desc>
+  <desc id="desc">Machines report data to a collector. An immutable snapshot is judged for anomalies and dispatched by a top scheduler agent to develop or operate agent teams. The scheduler can request captures and probes from the collector. A reporter agent summarizes machine status for the human maintainer. Human reports have highest priority. The agents platform provides controlled SSH, firewall, service, worktree, build, and artifact capabilities.</desc>
   <defs>
     <style>
       .bg { fill: #f8fafc; }
@@ -12,6 +12,7 @@
       .human { fill: #fee2e2; stroke: #dc2626; stroke-width: 2.5; }
       .scheduler { fill: #e0e7ff; stroke: #4f46e5; stroke-width: 3; }
       .team { fill: #ecfdf5; stroke: #059669; stroke-width: 2.5; }
+      .reporter { fill: #dcfce7; stroke: #16a34a; stroke-width: 2.5; }
       .develop { fill: #fff7ed; stroke: #ea580c; stroke-width: 2; }
       .operate { fill: #ecfeff; stroke: #0891b2; stroke-width: 2; }
       .platform { fill: #172033; stroke: #0f172a; stroke-width: 2.5; }
@@ -71,9 +72,14 @@
   <text class="small" x="590" y="220" text-anchor="middle">Recovery and post-contest review</text>
 
   <rect class="judge" x="750" y="315" width="200" height="125" rx="20"/>
-  <text class="h1" x="850" y="354" text-anchor="middle">Judge</text>
+  <text class="h1" x="850" y="354" text-anchor="middle">Judger Agent</text>
   <text class="body" x="850" y="385" text-anchor="middle">Anomaly detection</text>
-  <text class="small" x="850" y="411" text-anchor="middle">reads Snapshot N</text>
+  <text class="small" x="850" y="411" text-anchor="middle">reads sanitized Judge View</text>
+
+  <rect class="reporter" x="445" y="560" width="330" height="125" rx="20"/>
+  <text class="h1" x="610" y="602" text-anchor="middle">Reporter Agent</text>
+  <text class="body" x="610" y="633" text-anchor="middle">Summarize status of machines</text>
+  <text class="body" x="610" y="659" text-anchor="middle">to the human maintainer</text>
 
   <rect class="human" x="1040" y="100" width="335" height="120" rx="20"/>
   <text class="h1" x="1208" y="140" text-anchor="middle">Human Report</text>
@@ -81,7 +87,7 @@
   <text class="h2" x="1208" y="198" text-anchor="middle" fill="#b91c1c">Top Priority</text>
 
   <rect class="scheduler" x="1010" y="285" width="395" height="245" rx="26"/>
-  <text class="h1" x="1208" y="330" text-anchor="middle">Top Scheduler</text>
+  <text class="h1" x="1208" y="330" text-anchor="middle">Top Scheduler Agent</text>
   <text class="body" x="1045" y="369">• Owns global context and issue queue</text>
   <text class="body" x="1045" y="399">• Dispatches against an immutable snapshot</text>
   <text class="body" x="1045" y="429">• Freeze / resume / recovery</text>
@@ -118,6 +124,12 @@
 
   <path class="arrow" d="M 655 378 C 690 378, 710 378, 750 378"/>
   <text class="label" x="675" y="359">Snapshot N</text>
+
+  <path class="arrow" d="M 550 440 C 550 480, 560 520, 575 560"/>
+  <text class="label" x="455" y="505">status</text>
+
+  <path class="arrow" d="M 1010 305 C 900 268, 760 268, 645 315"/>
+  <text class="label" x="700" y="295">capture / probe requests</text>
 
   <path class="arrow" d="M 950 378 C 970 378, 985 378, 1010 378"/>
   <text class="label" x="955" y="359">issue</text>
