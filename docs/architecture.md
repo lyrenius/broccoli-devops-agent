@@ -728,10 +728,9 @@ The next slices are:
 
 ## 11. Open Decisions
 
-These questions do not block writing the architecture document. OD-1, OD-3,
-and OD-6 are decided and OD-2 is drafted; each is kept here with its outcome
-so the numbering stays stable. OD-2 must be approved before the ActionRun
-execution path is implemented.
+These questions do not block writing the architecture document. OD-1, OD-2,
+OD-3, and OD-6 are decided; each is kept here with its outcome so the
+numbering stays stable.
 
 ### OD-1: Control-plane host and model connectivity — DECIDED
 
@@ -743,15 +742,19 @@ variable holding the API key are set in `config/agent.toml`. When the relay is
 unreachable, every model-backed path fails closed to its deterministic fallback
 (§4.4) and collection, persistence, and recovery continue unaffected.
 
-### OD-2: Action authority by operation mode — DRAFT UNDER REVIEW
+### OD-2: Action authority by operation mode — DECIDED
 
-A first matrix covering 26 operation classes across `rehearsal`,
-`contest_locked`, and `post_contest` is in
-[`action-authority.md`](./action-authority.md), together with the rules that
-sit on top of it (deny is not approvable, mode changes are human-only, rate
-limits on automatic restarts). It awaits operator review before it is encoded
-as Scheduler approval policy and Runbook Registry classification. ActionRun
-execution stays blocked until then.
+The matrix in [`action-authority.md`](./action-authority.md) — 26 operation
+classes across `rehearsal`, `contest_locked`, and `post_contest`, plus the
+rules on top of it (deny is not approvable, mode changes are human-only, a
+repeated automatic action escalates to approval) — was approved by the
+operator and is encoded in `src/policy.rs` as the Scheduler's authority policy
+and Runbook Registry. Every Team proposal is classified and decided at ActionRun
+creation, the decision is evented, and the ActionRun execution path is open:
+`auto` actions execute and verify immediately, `approve` actions wait for a
+human, `deny` actions are cancelled. The Agents Platform runs runbooks as
+operator-configured commands (`src/platform.rs`) and stays in dry-run mode
+until the operator opts in.
 
 ### OD-3: Snapshot Judge implementation — DECIDED
 

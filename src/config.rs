@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::{AgentError, AgentResult};
+use crate::platform::PlatformConfig;
 
 /// Default environment variable holding the model API key.
 pub const DEFAULT_API_KEY_ENV: &str = "BROCCOLI_MODEL_API_KEY";
@@ -136,6 +137,8 @@ pub struct AppConfig {
     pub topology: TopologyConfig,
     /// Model relay; absent means only the deterministic Team is available.
     pub model: Option<ModelConfig>,
+    /// Agents Platform: runbook commands, dry-run, and classification lists.
+    pub platform: PlatformConfig,
 }
 
 impl AppConfig {

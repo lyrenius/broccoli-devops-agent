@@ -219,6 +219,20 @@ impl StateStore for InMemoryStateStore {
         Ok(actions)
     }
 
+    /// Returns every ActionRun in stable creation-time and ID order.
+    async fn list_action_runs(&self) -> AgentResult<Vec<ActionRun>> {
+        let mut actions: Vec<_> = self
+            .inner
+            .read()
+            .await
+            .action_runs
+            .values()
+            .cloned()
+            .collect();
+        actions.sort_by_key(|action| (action.created_at, action.action_run_id));
+        Ok(actions)
+    }
+
     /// Inserts immutable Artifact metadata; a duplicate ID returns Duplicate.
     async fn insert_artifact(&self, artifact: Artifact) -> AgentResult<()> {
         let mut state = self.inner.write().await;

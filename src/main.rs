@@ -3,8 +3,9 @@
 //! Read-only commands cover the v0.1 slice: `snapshot` captures and displays system state,
 //! `report` runs a human report through Issue, Job, and Team to a persisted result, `recover`
 //! rebuilds control state after a restart, and `events` prints the append-only log. `config show`
-//! exposes the effective configuration (key redacted) and `check-model` verifies the relay. No
-//! command mutates a machine; ActionRun execution stays out until the authority matrix is approved.
+//! exposes the effective configuration (key redacted) and `check-model` verifies the relay.
+//! `report` also runs the Job's proposed actions through the authority matrix, and `actions`
+//! lists, approves, or rejects them. The Platform is in dry-run mode until the operator opts in.
 
 #![forbid(unsafe_code)]
 
@@ -22,6 +23,7 @@ use broccoli_devops_agent::runner::{SliceRunner, TeamBackend};
 use broccoli_devops_agent::scheduler::TopScheduler;
 use broccoli_devops_agent::store::file::FileStateStore;
 use broccoli_devops_agent::topology::DeploymentTopology;
+use uuid::Uuid;
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
@@ -89,6 +91,28 @@ enum Command {
     },
     /// Send one trivial request to the configured model relay and report the result.
     CheckModel,
+    /// List, approve, or reject ActionRuns held by the authority matrix.
+    Actions {
+        #[command(subcommand)]
+        action: ActionsAction,
+    },
+}
+
+/// ActionRun subcommands.
+#[derive(Debug, Subcommand)]
+enum ActionsAction {
+    /// List every ActionRun with its status and approval state.
+    List,
+    /// Approve a waiting ActionRun; it executes and is verified immediately.
+    Approve {
+        /// ActionRun ID from `actions list`.
+        id: Uuid,
+    },
+    /// Reject a waiting ActionRun; it is cancelled and never executes.
+    Reject {
+        /// ActionRun ID from `actions list`.
+        id: Uuid,
+    },
 }
 
 /// Configuration subcommands.
@@ -154,7 +178,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Snapshot => {
             let topology = DeploymentTopology::load(&config.topology.path)?;
-            let runner = SliceRunner::wire(topology, &config.data.dir, TeamBackend::ReadOnly)?;
+            let runner = SliceRunner::wire(
+                topology,
+                &config.data.dir,
+                TeamBackend::ReadOnly,
+                config.platform.clone(),
+            )?;
             let snapshot = runner.capture(SnapshotCause::Manual).await?;
             print!("{}", runner.render_snapshot(&snapshot));
         }
@@ -167,12 +196,21 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let topology = DeploymentTopology::load(&config.topology.path)?;
             let backend = select_backend(&config, team)?;
-            let runner = SliceRunner::wire(topology, &config.data.dir, backend)?;
+            let runner =
+                SliceRunner::wire(topology, &config.data.dir, backend, config.platform.clone())?;
             println!("team backend: {}\n", runner.team_label());
             let mut report = HumanReport::new(reporter, title, description);
             report.priority = priority;
             let (issue, job) = runner.handle_report(report).await?;
             print!("{}", SliceRunner::render_report_outcome(&issue, &job));
+            let actions = runner.run_proposals(&job).await?;
+            if !actions.is_empty() {
+                println!("\nactions:");
+                print!(
+                    "{}",
+                    SliceRunner::render_actions(&actions, runner.dry_run())
+                );
+            }
         }
         Command::Recover => {
             // Recovery needs only the store; a missing topology file must not block it.
@@ -218,6 +256,38 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "{}",
                 serde_json::to_string_pretty(&config.effective_json()?)?
             );
+        }
+        Command::Actions { action } => {
+            let topology = DeploymentTopology::load(&config.topology.path)?;
+            let runner = SliceRunner::wire(
+                topology,
+                &config.data.dir,
+                TeamBackend::ReadOnly,
+                config.platform.clone(),
+            )?;
+            match action {
+                ActionsAction::List => {
+                    let actions = runner.list_actions().await?;
+                    print!(
+                        "{}",
+                        SliceRunner::render_actions(&actions, runner.dry_run())
+                    );
+                }
+                ActionsAction::Approve { id } => {
+                    let action = runner.approve_action(id).await?;
+                    print!(
+                        "{}",
+                        SliceRunner::render_actions(&[action], runner.dry_run())
+                    );
+                }
+                ActionsAction::Reject { id } => {
+                    let action = runner.reject_action(id).await?;
+                    print!(
+                        "{}",
+                        SliceRunner::render_actions(&[action], runner.dry_run())
+                    );
+                }
+            }
         }
         Command::CheckModel => {
             let model = config

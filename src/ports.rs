@@ -375,6 +375,9 @@ pub trait StateStore: Send + Sync {
     /// Lists non-terminal ActionRuns that recovery must still consider.
     async fn list_unfinished_action_runs(&self) -> AgentResult<Vec<ActionRun>>;
 
+    /// Lists every ActionRun in creation order, for operator views and the repeat-rate rule.
+    async fn list_action_runs(&self) -> AgentResult<Vec<ActionRun>>;
+
     /// Inserts immutable Artifact metadata; a duplicate ID must return an error.
     async fn insert_artifact(&self, artifact: Artifact) -> AgentResult<()>;
 

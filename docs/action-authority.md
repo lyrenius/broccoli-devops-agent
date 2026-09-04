@@ -1,6 +1,7 @@
-# Action Authority Matrix (OD-2) — DRAFT FOR REVIEW
+# Action Authority Matrix (OD-2) — APPROVED
 
-> Status: draft v0.1, awaiting operator review  
+> Status: approved 2026-09-03; encoded in `src/policy.rs` (matrix and Runbook
+> Registry) and enforced by the Scheduler at ActionRun creation  
 > Scope: which Agents Platform operations may run automatically, which need a human's
 > approval, and which are always denied — per operation mode.
 
@@ -88,6 +89,6 @@ Operation modes are the ones already in the domain model:
 - Anything printer-specific you want as `auto` during a contest (e.g. clearing
   a stuck print job) — I have no row for it yet.
 
-Once you have edited this file, the next step is encoding it as the Scheduler's
-approval policy plus the Runbook Registry classification, and the ActionRun
-execution path stays blocked until then.
+The open questions above remain open; the matrix is enforced as written until
+they are answered. Changing a row means changing `OperationClass::authority`
+in `src/policy.rs` and the corresponding test.

@@ -11,6 +11,8 @@ pub mod collector;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod platform;
+pub mod policy;
 pub mod ports;
 pub mod runner;
 pub mod scheduler;

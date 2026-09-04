@@ -22,6 +22,7 @@ use crate::domain::{
     ResourceId, Snapshot, SnapshotId, SnapshotViewRef, TeamCallback, TeamKind, WorkOrder,
 };
 use crate::error::{AgentError, AgentResult};
+use crate::policy::AuthorityPolicy;
 use crate::ports::{
     AgentsPlatformPort, CallbackAdviceRequest, CaptureRequest, CollectorPort, NextStep,
     NextStepDecision, SchedulerPolicyPort, SnapshotViewBuildRequest, SnapshotViewBuilderPort,
@@ -77,6 +78,7 @@ pub struct TopScheduler {
     view_builder: Option<Arc<dyn SnapshotViewBuilderPort>>,
     platform: Option<Arc<dyn AgentsPlatformPort>>,
     policy: Option<Arc<dyn SchedulerPolicyPort>>,
+    authority: AuthorityPolicy,
     mode: RwLock<SchedulerMode>,
 }
 
@@ -93,6 +95,7 @@ impl TopScheduler {
             view_builder: None,
             platform: None,
             policy: None,
+            authority: AuthorityPolicy::default(),
             mode: RwLock::new(SchedulerMode::Running),
         }
     }
@@ -121,6 +124,17 @@ impl TopScheduler {
     pub fn with_policy(mut self, policy: Arc<dyn SchedulerPolicyPort>) -> Self {
         self.policy = Some(policy);
         self
+    }
+
+    /// Replaces the default action authority policy (the encoded OD-2 matrix with empty lists).
+    pub fn with_authority(mut self, authority: AuthorityPolicy) -> Self {
+        self.authority = authority;
+        self
+    }
+
+    /// The action authority policy in force.
+    pub fn authority(&self) -> &AuthorityPolicy {
+        &self.authority
     }
 
     /// Returns the current Scheduler mode.
@@ -584,11 +598,14 @@ impl TopScheduler {
         }
     }
 
-    /// Converts a Team's ActionProposal into a persisted, unexecuted ActionRun.
+    /// Converts a Team's ActionProposal into a persisted ActionRun and applies the authority matrix.
     ///
     /// The before Snapshot is captured through the Collector so every side effect has an auditable
-    /// starting state. Creation is refused while the Scheduler is `FullyFrozen` or `Recovering`.
-    /// The idempotency key comes from the caller so retries of the same intent reuse the same key.
+    /// starting state, and its operation mode selects the matrix column. The decision — auto,
+    /// approve, or deny, with the repeat-rate escalation of rule 5 — is applied immediately and
+    /// recorded, so the returned ActionRun is already `Ready`, `WaitingForApproval`, or
+    /// `Cancelled`. Creation is refused while the Scheduler is `FullyFrozen` or `Recovering`. The
+    /// idempotency key comes from the caller so retries of the same intent reuse the same key.
     pub async fn create_action_run(
         &self,
         originating_job_id: JobId,
@@ -600,7 +617,7 @@ impl TopScheduler {
         let job = self.store.get_job(originating_job_id).await?;
 
         let before = self.request_snapshot(before_capture).await?;
-        let action = ActionRun::from_proposal(
+        let mut action = ActionRun::from_proposal(
             job.issue_id,
             originating_job_id,
             job.team_kind,
@@ -620,6 +637,43 @@ impl TopScheduler {
                 .with_job(originating_job_id)
                 .with_action(action.action_run_id)
                 .with_payload(serde_json::to_value(&action)?),
+            )
+            .await?;
+
+        // Rule 5: an automatic action that already ran on one of these targets inside the window
+        // escalates to approval instead of looping.
+        let window = chrono::Duration::from_std(self.authority.auto_repeat_window())
+            .unwrap_or_else(|_| chrono::Duration::minutes(10));
+        let cutoff = action.created_at - window;
+        let recent_auto_repeat = self.store.list_action_runs().await?.iter().any(|previous| {
+            previous.action_run_id != action.action_run_id
+                && previous.runbook_id == action.runbook_id
+                && previous.approval == ApprovalState::NotRequired
+                && previous.created_at >= cutoff
+                && previous
+                    .target_ids
+                    .iter()
+                    .any(|target| action.target_ids.contains(target))
+        });
+        let decision = self.authority.decide(
+            &action.runbook_id,
+            &action.arguments,
+            before.operation_mode,
+            recent_auto_repeat,
+        );
+        action.apply_approval(decision.approval)?;
+        self.store.update_action_run(action.clone()).await?;
+        self.store
+            .append_event(
+                NewEvent::new(
+                    "top-scheduler",
+                    "scheduler.action_authority_evaluated",
+                    decision.rationale.clone(),
+                )
+                .with_issue(job.issue_id)
+                .with_job(originating_job_id)
+                .with_action(action.action_run_id)
+                .with_payload(json!({ "decision": decision, "status": action.status })),
             )
             .await?;
         Ok(action)
@@ -718,6 +772,74 @@ impl TopScheduler {
                     .with_payload(json!({
                         "passed": passed,
                         "after_snapshot_id": after.snapshot_id,
+                        "status": action.status,
+                    })),
+            )
+            .await?;
+        Ok(action)
+    }
+
+    /// Captures the after Snapshot and verifies the action's expected effect deterministically.
+    ///
+    /// v0.1 verification is the rule "every target the action touched must be Healthy in the
+    /// after Snapshot". A target missing from the Snapshot counts as unverified, and a successful
+    /// command with no visible effect is still a verification failure — exit code zero is not
+    /// success. Later verifiers will evaluate the action's own verification Probes.
+    pub async fn verify_action(
+        &self,
+        action_run_id: ActionRunId,
+        after_capture: CaptureRequest,
+    ) -> AgentResult<ActionRun> {
+        let action = self.store.get_action_run(action_run_id).await?;
+        let after = self.request_snapshot(after_capture).await?;
+        let mut lines = Vec::new();
+        let mut passed = !action.target_ids.is_empty();
+        for target in &action.target_ids {
+            match after.resources.iter().find(|r| &r.resource_id == target) {
+                Some(resource) if resource.health == crate::domain::HealthState::Healthy => {
+                    lines.push(format!("`{target}` is Healthy"));
+                }
+                Some(resource) => {
+                    passed = false;
+                    lines.push(format!("`{target}` is {:?}", resource.health));
+                }
+                None => {
+                    passed = false;
+                    lines.push(format!("`{target}` is absent from the after Snapshot"));
+                }
+            }
+        }
+        let summary = format!(
+            "{}: {}",
+            if passed {
+                "expected effect observed"
+            } else {
+                "expected effect absent"
+            },
+            lines.join("; ")
+        );
+        self.record_verification_result(action, after.snapshot_id, passed, summary)
+            .await
+    }
+
+    /// Persists a verification conclusion for an action already in `Verifying`.
+    async fn record_verification_result(
+        &self,
+        mut action: ActionRun,
+        after_snapshot_id: SnapshotId,
+        passed: bool,
+        summary: String,
+    ) -> AgentResult<ActionRun> {
+        action.record_verification(after_snapshot_id, passed, summary.clone())?;
+        self.store.update_action_run(action.clone()).await?;
+        self.store
+            .append_event(
+                NewEvent::new("top-scheduler", "verification.recorded", summary)
+                    .with_issue(action.issue_id)
+                    .with_action(action.action_run_id)
+                    .with_payload(json!({
+                        "passed": passed,
+                        "after_snapshot_id": after_snapshot_id,
                         "status": action.status,
                     })),
             )

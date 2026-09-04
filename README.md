@@ -50,6 +50,18 @@ cargo run -- events --tail 20
 
 State lives under `./data/` (override with `--data`): one JSON document per Snapshot, Issue, Job, and Artifact record, artifact bodies under `data/artifact-bodies/`, and an append-only `data/events.jsonl`. Human reports default to the human-reserved top priority; pass `--priority low|normal|high|critical` to file lower.
 
+## Actions
+
+When a Job proposes operations, `report` runs each one through the approved authority matrix ([docs/action-authority.md](./docs/action-authority.md), encoded in `src/policy.rs`): `auto` rows execute through the Agents Platform and are verified against an after-Snapshot immediately, `approve` rows wait for a human, `deny` rows are cancelled with the reason in the event log.
+
+```bash
+cargo run -- actions list                 # every ActionRun with status and approval state
+cargo run -- actions approve <id>         # executes and verifies a waiting action
+cargo run -- actions reject <id>          # cancels it
+```
+
+The Platform executes runbooks as the commands you map in `config/agent.toml` under `[[platform.runbooks]]` (for example `ssh {target} sudo systemctl restart broccoli-worker`); credentials stay with your SSH agent. It starts in **dry-run** mode — commands are rendered and recorded as Artifacts, not executed — until you set `dry_run = false`. Verification treats a command's exit code zero as evidence only: the target must be Healthy in the after-Snapshot, or the action ends as `VerificationFailed`.
+
 ## Recommended Reading Order
 
 1. `src/domain/`: start with Snapshot, Issue, Job, ActionRun, Artifact, and EventLog.
@@ -72,7 +84,7 @@ The v0.1 slice deliberately does not implement:
   and the harness-backed Operate Team are implemented and wired to the relay,
   but the Scheduler Policy and Judger adapters are not, so every Scheduler
   decision point still runs its conservative deterministic fallback.
-- SSH, UFW, Docker, service, or configuration changes — no ActionRun executes.
+- Real machine mutation out of the box: the Platform executes only the runbook commands you configure, and stays in dry-run until you opt in.
 - Authenticated PostgreSQL, Redis, object-storage, or Broccoli API probes; the
   v0.1 Probe Registry is `tcp.connect` and plain-HTTP `http.status` only.
 - SQLite (the file-backed store keeps the same `StateStore` contract for a

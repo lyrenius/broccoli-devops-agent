@@ -17,3 +17,34 @@ wire_api = "responses"                  # "responses" (default) or "chat" if the
 timeout_secs = 120
 max_model_turns = 8                     # per agent run
 max_tool_calls = 16                     # per agent run, refused calls included
+
+[platform]
+dry_run = true                          # render and record commands without executing them
+command_timeout_secs = 60
+auto_repeat_window_secs = 600           # a repeated automatic action on the same target inside
+                                        # this window escalates to human approval (matrix rule 5)
+
+[platform.classification]               # rows 9–12 of docs/action-authority.md
+tunable_config_keys = ["worker.concurrency", "server.request_timeout_secs", "database.pool_size"]
+contest_config_keys = ["contest.freeze_at", "contest.end_at", "submission.time_limit_scale"]
+security_config_keys = ["auth.secret", "server.cors.allow_origins"]
+known_internal_address_prefixes = ["10.0.", "192.168."]
+
+# Runbook commands: how each registered runbook executes on YOUR deployment. `{target}` is the
+# resource ID from the topology; `{arg:name}` substitutes a proposal argument. Credentials stay
+# with the machine's SSH agent — never in this file. A runbook without a command is refused.
+[[platform.runbooks]]
+id = "service.status"
+command = "echo status {target}"
+
+[[platform.runbooks]]
+id = "worker.restart"
+command = "echo would-run: ssh {target} sudo systemctl restart broccoli-worker"
+
+[[platform.runbooks]]
+id = "server.restart"
+command = "echo would-run: ssh {target} sudo systemctl restart broccoli-server"
+
+[[platform.runbooks]]
+id = "station.restart"
+command = "echo would-run: ssh {target} sudo systemctl restart broccoli-station"
