@@ -11,7 +11,7 @@ use broccoli_devops_agent::domain::{
     OperationMode, SnapshotCause,
 };
 use broccoli_devops_agent::ports::{CaptureRequest, CollectorPort, StateStore};
-use broccoli_devops_agent::runner::SliceRunner;
+use broccoli_devops_agent::runner::{SliceRunner, TeamBackend};
 use broccoli_devops_agent::scheduler::TopScheduler;
 use broccoli_devops_agent::store::file::FileStateStore;
 use broccoli_devops_agent::topology::{
@@ -229,7 +229,8 @@ async fn human_report_flows_to_diagnosis_and_survives_restart() {
     let data_dir = tempfile::tempdir().unwrap();
 
     let (issue_id, job_id) = {
-        let runner = SliceRunner::wire(topology.clone(), data_dir.path()).unwrap();
+        let runner =
+            SliceRunner::wire(topology.clone(), data_dir.path(), TeamBackend::ReadOnly).unwrap();
         let (issue, job) = runner
             .handle_report(HumanReport::new(
                 "operator",

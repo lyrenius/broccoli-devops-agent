@@ -10,6 +10,10 @@
 //! - [`run_agent`], a bounded loop that lets a model call tools until it produces a terminal
 //!   result or hits a limit.
 //!
+//! With the `openai` feature, [`openai::OpenAiClient`] provides a [`ModelClient`] over any
+//! OpenAI-compatible endpoint (official API or a relay), in either the Responses or Chat wire
+//! format.
+//!
 //! The layering contract: the control plane's ports (`AgentTeamPort`, `SchedulerPolicyPort`, …)
 //! remain the backend-neutral seam. Adapters in the control plane translate those ports onto this
 //! harness; a future codex adapter implements the same ports without this crate. Nothing from
@@ -27,6 +31,8 @@ pub mod agent;
 pub mod client;
 pub mod conversation;
 pub mod error;
+#[cfg(feature = "openai")]
+pub mod openai;
 pub mod testing;
 pub mod tool;
 

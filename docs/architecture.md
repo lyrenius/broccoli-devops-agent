@@ -728,24 +728,30 @@ The next slices are:
 
 ## 11. Open Decisions
 
-These questions do not block writing the architecture document, but OD-1 and
-OD-2 should be decided before implementing the corresponding runtime paths.
-OD-3 and OD-6 have been decided and are kept here with their outcomes so the
-numbering stays stable.
+These questions do not block writing the architecture document. OD-1, OD-3,
+and OD-6 are decided and OD-2 is drafted; each is kept here with its outcome
+so the numbering stays stable. OD-2 must be approved before the ActionRun
+execution path is implemented.
 
-### OD-1: Control-plane host and OpenAI connectivity
+### OD-1: Control-plane host and model connectivity — DECIDED
 
-- Which machine runs the controller during a contest?
-- Which machine can reach both the contest LAN and `api.openai.com`?
-- What behavior is required when external connectivity is unavailable?
+The controller runs on the operator's workstation, which can reach both the
+contest LAN and the model relay (`api.thuics.icu`, a GPT-compatible sub2api
+endpoint) at the same time. Model access goes through the harness's
+OpenAI-compatible client; the relay base URL, model name, and the environment
+variable holding the API key are set in `config/agent.toml`. When the relay is
+unreachable, every model-backed path fails closed to its deterministic fallback
+(§4.4) and collection, persistence, and recovery continue unaffected.
 
-### OD-2: Action authority by operation mode
+### OD-2: Action authority by operation mode — DRAFT UNDER REVIEW
 
-Define separate matrices for deployment/rehearsal and live contest operation:
-
-- Which configuration changes may Operate Teams apply directly?
-- Which service, network, UFW, retry, or replacement actions require approval?
-- Which actions are always denied during a live contest?
+A first matrix covering 26 operation classes across `rehearsal`,
+`contest_locked`, and `post_contest` is in
+[`action-authority.md`](./action-authority.md), together with the rules that
+sit on top of it (deny is not approvable, mode changes are human-only, rate
+limits on automatic restarts). It awaits operator review before it is encoded
+as Scheduler approval policy and Runbook Registry classification. ActionRun
+execution stays blocked until then.
 
 ### OD-3: Snapshot Judge implementation — DECIDED
 

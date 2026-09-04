@@ -1,15 +1,18 @@
 //! Wiring and orchestration for the v0.1 vertical slice.
 //!
 //! The runner assembles the file store, topology Collector, redacting View Builder, Scheduler,
-//! and read-only Operate Team, then drives the three slice flows: capture-and-display, human
-//! report to completed Job, and restart recovery. No Scheduler Policy model is wired in v0.1, so
-//! every decision point exercises its conservative deterministic fallback — by design.
+//! and one Operate Team backend, then drives the three slice flows: capture-and-display, human
+//! report to completed Job, and restart recovery. The Team backend is chosen at wiring time —
+//! deterministic, or the model-backed harness Team over the configured relay — and nothing else
+//! in the runner changes between them. No Scheduler Policy model is wired yet, so every Scheduler
+//! decision point still exercises its conservative deterministic fallback — by design.
 
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use broccoli_agent_harness::{AgentConfig as HarnessBudget, ModelClient};
 
 use crate::collector::TopologyCollector;
 use crate::domain::{
@@ -22,7 +25,7 @@ use crate::ports::{
 };
 use crate::scheduler::TopScheduler;
 use crate::store::file::FileStateStore;
-use crate::team::ReadOnlyOperateTeam;
+use crate::team::{HarnessOperateTeam, ReadOnlyOperateTeam};
 use crate::topology::DeploymentTopology;
 use crate::view::{FileArtifactStore, PROFILE_OPERATE_READONLY, RedactingViewBuilder};
 
@@ -42,18 +45,38 @@ impl TeamCallbackSink for SchedulerSink {
     }
 }
 
+/// Which Operate Team implementation the runner dispatches to.
+pub enum TeamBackend {
+    /// Deterministic read-only diagnosis; needs no model.
+    ReadOnly,
+    /// Model-backed diagnosis through the agent harness over the given client.
+    Harness {
+        /// Model backend the harness talks to.
+        client: Arc<dyn ModelClient>,
+        /// Run budgets for each Job.
+        budget: HarnessBudget,
+        /// Human-readable backend name for operator output (e.g. the model name).
+        label: String,
+    },
+}
+
 /// Fully wired v0.1 control plane over one data directory and one topology.
 pub struct SliceRunner {
     topology: DeploymentTopology,
     store: Arc<FileStateStore>,
     scheduler: Arc<TopScheduler>,
-    team: ReadOnlyOperateTeam,
+    team: Box<dyn AgentTeamPort>,
+    team_label: String,
     view_builder: Arc<RedactingViewBuilder>,
 }
 
 impl SliceRunner {
-    /// Wires every v0.1 component over the given topology and data directory.
-    pub fn wire(topology: DeploymentTopology, data_dir: &Path) -> AgentResult<Self> {
+    /// Wires every component over the given topology, data directory, and Team backend.
+    pub fn wire(
+        topology: DeploymentTopology,
+        data_dir: &Path,
+        backend: TeamBackend,
+    ) -> AgentResult<Self> {
         let store = Arc::new(FileStateStore::open(data_dir)?);
         let artifacts = FileArtifactStore::new(data_dir.join("artifact-bodies"));
         let collector = Arc::new(TopologyCollector::new(
@@ -66,13 +89,40 @@ impl SliceRunner {
                 .with_collector(collector)
                 .with_view_builder(view_builder.clone()),
         );
+        let (team, team_label): (Box<dyn AgentTeamPort>, String) = match backend {
+            TeamBackend::ReadOnly => (
+                Box::new(ReadOnlyOperateTeam::new(artifacts)),
+                "readonly (deterministic)".to_string(),
+            ),
+            TeamBackend::Harness {
+                client,
+                budget,
+                label,
+            } => (
+                Box::new(
+                    HarnessOperateTeam::new(
+                        client,
+                        artifacts,
+                        store.clone() as Arc<dyn StateStore>,
+                    )
+                    .with_config(budget),
+                ),
+                format!("harness ({label})"),
+            ),
+        };
         Ok(Self {
             topology,
             store,
             scheduler,
-            team: ReadOnlyOperateTeam::new(artifacts),
+            team,
+            team_label,
             view_builder,
         })
+    }
+
+    /// Returns the human-readable name of the wired Team backend.
+    pub fn team_label(&self) -> &str {
+        &self.team_label
     }
 
     /// Returns the shared store, for inspection commands and tests.

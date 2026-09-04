@@ -4,3 +4,4 @@
 # Operator-local state: the file-backed store and deployment-specific topology.
 /data/
 /config/topology.toml
+/config/agent.toml

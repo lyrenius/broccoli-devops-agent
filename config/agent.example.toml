@@ -1,0 +1,19 @@
+# Broccoli DevOps Agent configuration.
+#
+# Copy to config/agent.toml. This file may be committed and shown to a frontend: it never holds
+# credentials. The model API key is read from the environment variable named in `api_key_env`.
+
+[data]
+dir = "data"                          # file-backed store, event log, artifact bodies
+
+[topology]
+path = "config/topology.toml"         # machines, endpoints, and probes (PostgreSQL, Redis, CephFS, ...)
+
+[model]
+base_url = "https://api.thuics.icu/v1"  # GPT relay (sub2api); adjust the prefix if the relay differs
+model = "gpt-5.6-sol"
+api_key_env = "BROCCOLI_MODEL_API_KEY"  # export BROCCOLI_MODEL_API_KEY=... before running
+wire_api = "responses"                  # "responses" (default) or "chat" if the relay lacks /responses
+timeout_secs = 120
+max_model_turns = 8                     # per agent run
+max_tool_calls = 16                     # per agent run, refused calls included

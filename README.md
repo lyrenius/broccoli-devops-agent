@@ -4,6 +4,15 @@ This is an agentic operations control plane for the Broccoli online judging syst
 
 See the [architecture document](./docs/architecture.md) for the complete design and the [Excalidraw source](./docs/broccoli-devops-agent-architecture.excalidraw) for the editable diagram.
 
+## Configuration
+
+Two files, both safe to commit — neither holds credentials:
+
+- `config/agent.toml` (copy from [`config/agent.example.toml`](./config/agent.example.toml)): data directory, topology path, and the model relay (`base_url`, `model`, `wire_api`) with the **name** of the environment variable that carries the API key. Export that variable before running a model-backed command.
+- `config/topology.toml` (copy from [`config/topology.example.toml`](./config/topology.example.toml)): every machine and endpoint — PostgreSQL, Redis, CephFS/object storage, the API server, frontend, judge workers, and stations — with the read-only probes used to observe them.
+
+`broccoli-devops-agent config show` prints the effective configuration as JSON (key redacted) for a frontend or for checking what the agent will actually use.
+
 ## Workspace Layout
 
 The repository is a Cargo workspace with two crates and a strict dependency direction:
@@ -22,9 +31,15 @@ cp config/topology.example.toml config/topology.toml
 # 2. Capture and display a Snapshot with its coverage gaps.
 cargo run -- snapshot
 
-# 3. File a human report; a read-only Operate Job diagnoses from the Snapshot View.
+# 3. File a human report; an Operate Job diagnoses from the Snapshot View.
+#    With a [model] section in config/agent.toml and the key exported, the harness-backed
+#    model Team is used; otherwise the deterministic Team runs. Force either with --team.
+cp config/agent.example.toml config/agent.toml       # once; edit base_url/model if needed
+export BROCCOLI_MODEL_API_KEY=...                     # never put the key in the file
+cargo run -- check-model                              # one round trip to the relay
 cargo run -- report --title "Contestants cannot submit" \
     --description "Web submissions time out since 10:12"
+cargo run -- report --team readonly --title "..." --description "..."
 
 # 4. Simulate a controller restart and recover control state.
 cargo run -- recover
@@ -53,10 +68,10 @@ Code identifiers and all documentation are written in English. Documentation com
 
 The v0.1 slice deliberately does not implement:
 
-- A wire-level model client: the agent harness and the harness-backed Operate
-  Team are implemented, but no `ModelClient` speaks to a real model API yet, so
-  every Scheduler decision point still runs its conservative deterministic
-  fallback.
+- Model-backed Scheduler decisions: the harness, its OpenAI-compatible client,
+  and the harness-backed Operate Team are implemented and wired to the relay,
+  but the Scheduler Policy and Judger adapters are not, so every Scheduler
+  decision point still runs its conservative deterministic fallback.
 - SSH, UFW, Docker, service, or configuration changes — no ActionRun executes.
 - Authenticated PostgreSQL, Redis, object-storage, or Broccoli API probes; the
   v0.1 Probe Registry is `tcp.connect` and plain-HTTP `http.status` only.

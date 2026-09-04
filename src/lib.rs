@@ -8,6 +8,7 @@
 #![deny(missing_docs)]
 
 pub mod collector;
+pub mod config;
 pub mod domain;
 pub mod error;
 pub mod ports;

@@ -2,7 +2,9 @@
 #
 # Copy this file to config/topology.toml and adjust hosts and ports for your deployment.
 # Endpoints below match the Broccoli development docker-compose (postgres on 5433, redis on
-# 6379, SeaweedFS master on 9333 / S3 on 8333) and the server default of 127.0.0.1:3000.
+# 6379) and the server default of 127.0.0.1:3000. Storage is modelled as CephFS: probe the Ceph
+# monitor (msgr2 on 3300, or 6789 for msgr1) and the RGW/S3 gateway if Broccoli's object storage
+# goes through it. For the SeaweedFS docker-compose instead, probe 9333 (master) and 8333 (S3).
 #
 # Probes are read-only reachability checks from the v0.1 Probe Registry:
 #   tcp.connect  — { probe = "tcp.connect", target = "host:port" }
@@ -30,12 +32,12 @@ node = "infra-1"
 probes = [{ probe = "tcp.connect", target = "127.0.0.1:6379" }]
 
 [[resources]]
-id = "seaweedfs-master"
+id = "cephfs-storage"
 kind = "object_storage"
-node = "infra-1"
+node = "storage-1"
 probes = [
-    { probe = "tcp.connect", target = "127.0.0.1:9333" },
-    { probe = "tcp.connect", target = "127.0.0.1:8333" },
+    { probe = "tcp.connect", target = "127.0.0.1:3300" },   # ceph-mon (msgr2)
+    { probe = "tcp.connect", target = "127.0.0.1:8333" },   # RGW / S3 gateway used by Broccoli
 ]
 
 [[resources]]
@@ -76,7 +78,7 @@ critical = true
 
 [[dependencies]]
 from = "broccoli-server"
-to = "seaweedfs-master"
+to = "cephfs-storage"
 relation = "s3_blob"
 critical = true
 
