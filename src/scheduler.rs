@@ -782,9 +782,10 @@ impl TopScheduler {
     /// Captures the after Snapshot and verifies the action's expected effect deterministically.
     ///
     /// v0.1 verification is the rule "every target the action touched must be Healthy in the
-    /// after Snapshot". A target missing from the Snapshot counts as unverified, and a successful
-    /// command with no visible effect is still a verification failure — exit code zero is not
-    /// success. Later verifiers will evaluate the action's own verification Probes.
+    /// after Snapshot", except for Observe-class actions, whose effect is the observation itself.
+    /// A target missing from the Snapshot counts as unverified, and a successful command with no
+    /// visible effect is still a verification failure — exit code zero is not success. Later
+    /// verifiers will evaluate the action's own verification Probes.
     pub async fn verify_action(
         &self,
         action_run_id: ActionRunId,
@@ -792,6 +793,25 @@ impl TopScheduler {
     ) -> AgentResult<ActionRun> {
         let action = self.store.get_action_run(action_run_id).await?;
         let after = self.request_snapshot(after_capture).await?;
+
+        // An Observe-class action changes nothing by design; its effect is the observation
+        // itself, so Platform success is the whole verification.
+        let observe_only = matches!(
+            self.authority
+                .registry()
+                .classify(&action.runbook_id, &action.arguments),
+            Some(crate::policy::OperationClass::Observe)
+        );
+        if observe_only {
+            let summary = format!(
+                "observation completed; no state change expected (after Snapshot {})",
+                after.snapshot_id
+            );
+            return self
+                .record_verification_result(action, after.snapshot_id, true, summary)
+                .await;
+        }
+
         let mut lines = Vec::new();
         let mut passed = !action.target_ids.is_empty();
         for target in &action.target_ids {
