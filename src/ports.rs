@@ -339,6 +339,9 @@ pub trait StateStore: Send + Sync {
     /// Reads a Snapshot by ID; returns NotFound when absent.
     async fn get_snapshot(&self, snapshot_id: SnapshotId) -> AgentResult<Snapshot>;
 
+    /// Lists every Snapshot in creation order, for operator views.
+    async fn list_snapshots(&self) -> AgentResult<Vec<Snapshot>>;
+
     /// Inserts a new Issue; a duplicate ID must return an error.
     async fn insert_issue(&self, issue: Issue) -> AgentResult<()>;
 
@@ -351,6 +354,9 @@ pub trait StateStore: Send + Sync {
     /// Lists non-terminal Issues that recovery must still consider.
     async fn list_unfinished_issues(&self) -> AgentResult<Vec<Issue>>;
 
+    /// Lists every Issue in creation order, for operator views.
+    async fn list_issues(&self) -> AgentResult<Vec<Issue>>;
+
     /// Inserts a new Job; a duplicate ID must return an error.
     async fn insert_job(&self, job: Job) -> AgentResult<()>;
 
@@ -362,6 +368,9 @@ pub trait StateStore: Send + Sync {
 
     /// Lists non-terminal Jobs that recovery must still consider.
     async fn list_unfinished_jobs(&self) -> AgentResult<Vec<Job>>;
+
+    /// Lists every Job in creation order, for operator views.
+    async fn list_jobs(&self) -> AgentResult<Vec<Job>>;
 
     /// Inserts a new ActionRun; a duplicate ID must return an error.
     async fn insert_action_run(&self, action: ActionRun) -> AgentResult<()>;

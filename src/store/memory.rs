@@ -233,6 +233,34 @@ impl StateStore for InMemoryStateStore {
         Ok(actions)
     }
 
+    /// Returns every Issue in stable creation-time and ID order.
+    async fn list_issues(&self) -> AgentResult<Vec<Issue>> {
+        let mut items: Vec<_> = self.inner.read().await.issues.values().cloned().collect();
+        items.sort_by_key(|item| (item.created_at, item.issue_id));
+        Ok(items)
+    }
+
+    /// Returns every Job in stable creation-time and ID order.
+    async fn list_jobs(&self) -> AgentResult<Vec<Job>> {
+        let mut items: Vec<_> = self.inner.read().await.jobs.values().cloned().collect();
+        items.sort_by_key(|item| (item.created_at, item.job_id));
+        Ok(items)
+    }
+
+    /// Returns every Snapshot in stable creation-time and ID order.
+    async fn list_snapshots(&self) -> AgentResult<Vec<Snapshot>> {
+        let mut items: Vec<_> = self
+            .inner
+            .read()
+            .await
+            .snapshots
+            .values()
+            .cloned()
+            .collect();
+        items.sort_by_key(|item| (item.created_at, item.snapshot_id));
+        Ok(items)
+    }
+
     /// Inserts immutable Artifact metadata; a duplicate ID returns Duplicate.
     async fn insert_artifact(&self, artifact: Artifact) -> AgentResult<()> {
         let mut state = self.inner.write().await;

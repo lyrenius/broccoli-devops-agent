@@ -75,6 +75,7 @@ pub struct SliceRunner {
     team: Box<dyn AgentTeamPort>,
     team_label: String,
     view_builder: Arc<RedactingViewBuilder>,
+    artifacts: FileArtifactStore,
     dry_run: bool,
 }
 
@@ -103,6 +104,7 @@ impl SliceRunner {
             artifacts.clone(),
             &topology,
         ));
+        let artifacts_for_api = artifacts.clone();
         let scheduler = Arc::new(
             TopScheduler::new(store.clone())
                 .with_collector(collector)
@@ -138,6 +140,7 @@ impl SliceRunner {
             team,
             team_label,
             view_builder,
+            artifacts: artifacts_for_api,
             dry_run,
         })
     }
@@ -150,6 +153,16 @@ impl SliceRunner {
     /// Whether the Platform records commands instead of executing them.
     pub fn dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    /// The artifact body store, for serving transcripts and Views to operator UIs.
+    pub fn artifacts(&self) -> &FileArtifactStore {
+        &self.artifacts
+    }
+
+    /// The deployment's topology.
+    pub fn topology(&self) -> &DeploymentTopology {
+        &self.topology
     }
 
     /// Returns the shared store, for inspection commands and tests.

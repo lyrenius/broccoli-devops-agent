@@ -115,6 +115,12 @@ pub struct ActionRun {
     pub target_ids: Vec<ResourceId>,
     /// Structured arguments passed to the Runbook.
     pub arguments: Vec<NamedValue>,
+    /// Why the Team proposed the action, shown to approving humans.
+    #[serde(default)]
+    pub reason: String,
+    /// Effect the Team expects, checked by verification.
+    #[serde(default)]
+    pub expected_effect: String,
     /// Current lifecycle state.
     pub status: ActionStatus,
     /// Current approval state.
@@ -164,6 +170,8 @@ impl ActionRun {
             runbook_id: proposal.runbook_id,
             target_ids: proposal.target_ids,
             arguments: proposal.arguments,
+            reason: proposal.reason,
+            expected_effect: proposal.expected_effect,
             status: ActionStatus::Proposed,
             approval: ApprovalState::Unevaluated,
             before_snapshot_id,

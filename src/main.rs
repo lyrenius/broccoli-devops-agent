@@ -96,6 +96,15 @@ enum Command {
         #[command(subcommand)]
         action: ActionsAction,
     },
+    /// Serve the HTTP + SSE API for the web console and the terminal UI.
+    Serve {
+        /// Override the bind address from the config file.
+        #[arg(long)]
+        bind: Option<String>,
+        /// Team backend for reports filed through the API.
+        #[arg(long, value_enum, default_value_t = TeamChoice::Auto)]
+        team: TeamChoice,
+    },
 }
 
 /// ActionRun subcommands.
@@ -288,6 +297,30 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
+        }
+        Command::Serve { bind, team } => {
+            let topology = DeploymentTopology::load(&config.topology.path)?;
+            let backend = select_backend(&config, team)?;
+            let runner = Arc::new(SliceRunner::wire(
+                topology,
+                &config.data.dir,
+                backend,
+                config.platform.clone(),
+            )?);
+            let bind = bind.unwrap_or_else(|| config.api.bind.clone());
+            println!(
+                "serving API on http://{bind} · team backend: {} · dry-run: {}",
+                runner.team_label(),
+                runner.dry_run()
+            );
+            if config.api.token.is_empty()
+                && !bind.starts_with("127.0.0.1")
+                && !bind.starts_with("localhost")
+            {
+                eprintln!("warning: binding beyond localhost without an API token");
+            }
+            let state = Arc::new(broccoli_devops_agent::api::ApiState::new(runner, config));
+            broccoli_devops_agent::api::serve(state, &bind).await?;
         }
         Command::CheckModel => {
             let model = config

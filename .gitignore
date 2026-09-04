@@ -5,3 +5,7 @@
 /data/
 /config/topology.toml
 /config/agent.toml
+
+# Web console build outputs and dependencies.
+/web/node_modules/
+/web/dist/

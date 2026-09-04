@@ -18,6 +18,10 @@ timeout_secs = 120
 max_model_turns = 8                     # per agent run
 max_tool_calls = 16                     # per agent run, refused calls included
 
+[api]
+bind = "127.0.0.1:4720"                 # the web console and TUI talk to this address
+token = ""                              # optional bearer token; set one before binding beyond localhost
+
 [platform]
 dry_run = true                          # render and record commands without executing them
 command_timeout_secs = 60

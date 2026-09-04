@@ -344,7 +344,21 @@ The Reporter is not part of the v0.1 vertical slice, but its boundary
 (`ReporterPort`) is reserved now so the observation path does not need
 restructuring later.
 
-### 4.8 Registries
+### 4.8 Operator interfaces
+
+The control plane exposes an HTTP + SSE API (`src/api.rs`) bound to localhost
+by default and optionally protected by a bearer token. Two consoles are pure
+clients of it and hold no state of their own: a web console (`web/`, plain
+React + Vite, deliberately independent of Broccoli's plugin system for now)
+and a terminal console (`crates/tui`, ratatui). Everything a console can do —
+file a report, approve or reject a held action, capture a Snapshot, freeze or
+resume the Scheduler — is an API call onto an existing runner operation, so the
+authority matrix and the event log apply to UI actions exactly as to CLI ones.
+The approval inbox is the console's centre: every `approve` row of the matrix
+is a human decision made with the Team's reason, the expected effect, and the
+before-Snapshot in view.
+
+### 4.9 Registries
 
 Two allowlists back the capability model. They are enforcement points, not
 suggestions, and models cannot extend them:

@@ -127,6 +127,26 @@ impl ModelConfig {
     }
 }
 
+/// HTTP API section of the agent config.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiConfig {
+    /// Socket address to bind; localhost by default so the console is not reachable from the LAN.
+    pub bind: String,
+    /// Optional bearer token every request must carry. Empty means no authentication — only
+    /// acceptable while bound to localhost.
+    pub token: String,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            bind: "127.0.0.1:4720".to_string(),
+            token: String::new(),
+        }
+    }
+}
+
 /// The complete agent configuration file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -139,6 +159,8 @@ pub struct AppConfig {
     pub model: Option<ModelConfig>,
     /// Agents Platform: runbook commands, dry-run, and classification lists.
     pub platform: PlatformConfig,
+    /// HTTP API for the web console and TUI.
+    pub api: ApiConfig,
 }
 
 impl AppConfig {
@@ -176,6 +198,7 @@ impl AppConfig {
         if let Some(model) = &self.model {
             value["model"]["api_key_present"] = json!(model.api_key_present());
         }
+        value["api"]["token"] = json!(if self.api.token.is_empty() { "" } else { "***" });
         Ok(value)
     }
 }

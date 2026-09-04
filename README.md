@@ -13,14 +13,33 @@ Two files, both safe to commit — neither holds credentials:
 
 `broccoli-devops-agent config show` prints the effective configuration as JSON (key redacted) for a frontend or for checking what the agent will actually use.
 
+## Operator UIs
+
+The control plane exposes an HTTP + SSE API (`serve`), and two user interfaces are pure clients of it — one process, two consoles, no UI-only state:
+
+```bash
+# Terminal 1: the control plane API (localhost:4720 by default; see [api] in config/agent.toml).
+cargo run -- serve
+
+# Terminal 2: the web console — plain React + Vite, no Broccoli dependencies.
+cd web && pnpm install && pnpm dev          # http://localhost:5180, /api proxied to :4720
+
+# Or the terminal console.
+cargo run -p broccoli-tui                   # --api http://127.0.0.1:4720 --token ...
+```
+
+The web console has the approval inbox (the `approve` rows of the matrix, with the model's reason and expected effect), the live Snapshot with coverage gaps, issues and jobs with transcript links, a live event stream, freeze/resume controls, and the human-report form. The TUI covers the same operations from a terminal: `1-4` screens, `j/k` select, `a`/`r` approve or reject, `s` snapshot, `f`/`F`/`u` freeze dispatch, freeze all, resume. Set `api.token` in the config (and pass `--token` to the TUI) before binding beyond localhost.
+
 ## Workspace Layout
 
-The repository is a Cargo workspace with two crates and a strict dependency direction:
+The repository is a Cargo workspace with three crates and a strict dependency direction:
 
-- **`broccoli-devops-agent`** (root) — the control plane: domain model, ports, Scheduler, Collector, stores, Teams, and CLI. Its ports (`AgentTeamPort`, `SchedulerPolicyPort`, `SnapshotJudgePort`) are the backend-neutral seam for model-backed work.
-- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call budgets, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (where an OpenAI Responses client plugs in) and knows nothing about Broccoli.
+- **`broccoli-devops-agent`** (root) — the control plane: domain model, ports, Scheduler, Collector, stores, Platform, authority policy, Teams, the HTTP API, and CLI. Its ports (`AgentTeamPort`, `SchedulerPolicyPort`, `SnapshotJudgePort`) are the backend-neutral seam for model-backed work.
+- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call budgets, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (the OpenAI-compatible relay client lives behind its `openai` feature) and knows nothing about Broccoli.
+- **[`crates/tui`](./crates/tui)** (`broccoli-tui`) — the terminal console, a pure HTTP client of the API.
+- **[`web/`](./web)** — the web console (React 19 + Vite + TypeScript), also a pure API client, served by Vite separately.
 
-The control plane depends on the harness, never the reverse. Model-backed integrations meet the Scheduler only at the ports: `team::HarnessOperateTeam` adapts `AgentTeamPort` onto the harness today, and a codex-backed Team implementing the same port directly is the planned second option — the Scheduler cannot tell any of them apart.
+The control plane depends on the harness, never the reverse; the UIs depend on nothing but the API. Model-backed integrations meet the Scheduler only at the ports: `team::HarnessOperateTeam` adapts `AgentTeamPort` onto the harness today, and a codex-backed Team implementing the same port directly is the planned second option — the Scheduler cannot tell any of them apart.
 
 ## Running the v0.1 slice
 
@@ -73,6 +92,7 @@ The Platform executes runbooks as the commands you map in `config/agent.toml` un
 7. `crates/harness/src/`: the agent loop (`agent.rs`), tool registry (`tool.rs`), and `ModelClient` boundary (`client.rs`).
 8. `src/store/file.rs`: the file-backed Store that makes restart recovery real (`src/store/memory.rs` remains for tests).
 9. `src/runner.rs` and `src/main.rs`: wiring and the operator CLI.
+10. `src/api.rs`, `crates/tui/`, and `web/src/`: the HTTP + SSE API and its two consoles.
 
 Code identifiers and all documentation are written in English. Documentation comments focus on why an item exists and where future decisions belong instead of merely repeating its name.
 
