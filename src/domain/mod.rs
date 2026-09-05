@@ -12,6 +12,7 @@ pub mod artifact;
 pub mod event;
 pub mod issue;
 pub mod job;
+pub mod review;
 pub mod snapshot;
 
 pub use action::*;
@@ -19,6 +20,7 @@ pub use artifact::*;
 pub use event::*;
 pub use issue::*;
 pub use job::*;
+pub use review::*;
 pub use snapshot::*;
 
 /// ID of a deployment instance.

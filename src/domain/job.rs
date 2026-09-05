@@ -1,10 +1,18 @@
-//! Work Orders, Jobs, callbacks, and final results for Agent Teams.
+//! Jobs, callbacks, and final results for Agent Teams.
+//!
+//! An Issue says what is wrong; a Job is one bounded pass by one Team over one Snapshot View.
+//! There is no separate work-order layer: the Team reads the problem statement from its View,
+//! and the Job carries only the scope the Scheduler granted plus any human feedback from earlier
+//! passes.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::{ArtifactId, EventId, IssueId, JobId, NamedValue, ResourceId, SnapshotViewRef};
+use crate::domain::{
+    ArtifactId, EventId, HumanFeedback, HumanReview, IssueId, JobId, NamedValue, ResourceId,
+    SnapshotViewRef,
+};
 use crate::error::{AgentError, AgentResult};
 
 /// Kind of Agent Team that handles a Job.
@@ -51,28 +59,45 @@ impl JobStatus {
     }
 }
 
-/// Explicit work instructions sent from the Scheduler to an Agent Team.
+/// What the Scheduler grants a Job: which Team, what it may touch, and what humans said about
+/// earlier passes on the same Issue.
+///
+/// This is a constructor argument, not a layer of its own: every field lands flat on the Job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkOrder {
-    /// Objective the Team must achieve.
-    pub objective: String,
-    /// Result kinds or content the Team must return.
-    pub expected_outputs: Vec<String>,
-    /// Additional constraints for investigation or implementation.
-    pub constraints: Vec<String>,
+pub struct JobBrief {
+    /// Kind of Team that will run the Job.
+    pub team_kind: TeamKind,
+    /// Agents Platform capabilities the Team may request.
+    pub allowed_capabilities: Vec<String>,
+    /// Target resources the Team may read or operate.
+    pub allowed_target_ids: Vec<ResourceId>,
+    /// Human feedback from earlier passes, oldest first.
+    pub feedback: Vec<HumanFeedback>,
+    /// The Job whose outcome a human sent back upstream, when this is a revision.
+    pub revises_job_id: Option<JobId>,
 }
 
-impl WorkOrder {
-    /// Creates a Work Order with only an objective and no output requirements or constraints yet.
-    ///
-    /// The Scheduler will complete the boundaries before actual dispatch. The initial version does
-    /// not derive work instructions automatically from an Issue.
-    pub fn new(objective: impl Into<String>) -> Self {
+impl JobBrief {
+    /// A first-pass brief with no feedback.
+    pub fn new(
+        team_kind: TeamKind,
+        allowed_capabilities: Vec<String>,
+        allowed_target_ids: Vec<ResourceId>,
+    ) -> Self {
         Self {
-            objective: objective.into(),
-            expected_outputs: Vec::new(),
-            constraints: Vec::new(),
+            team_kind,
+            allowed_capabilities,
+            allowed_target_ids,
+            feedback: Vec::new(),
+            revises_job_id: None,
         }
+    }
+
+    /// Turns the brief into a revision of an earlier Job, carrying the accumulated feedback.
+    pub fn revising(mut self, revises_job_id: JobId, feedback: Vec<HumanFeedback>) -> Self {
+        self.revises_job_id = Some(revises_job_id);
+        self.feedback = feedback;
+        self
     }
 }
 
@@ -312,12 +337,23 @@ pub struct Job {
     pub team_kind: TeamKind,
     /// Job lifecycle state.
     pub status: JobStatus,
-    /// Work instructions dispatched by the Scheduler.
-    pub work_order: WorkOrder,
     /// Agents Platform capabilities the Team may request.
     pub allowed_capabilities: Vec<String>,
     /// Target resources the Team may read or operate.
     pub allowed_target_ids: Vec<ResourceId>,
+    /// Human feedback from earlier passes on this Issue, oldest first.
+    ///
+    /// Copied into every revising Job so the Team sees the whole exchange, and rendered into the
+    /// Snapshot View so it is part of the replayable input.
+    #[serde(default)]
+    pub feedback: Vec<HumanFeedback>,
+    /// The Job a human sent back upstream, when this Job is the resulting revision.
+    #[serde(default)]
+    pub revises_job_id: Option<JobId>,
+    /// A human's review of this Job's failure, once given; a failed Job without one is in the
+    /// Failed Job inbox.
+    #[serde(default)]
+    pub review: Option<HumanReview>,
     /// Final result returned by the Team.
     pub result: Option<JobResult>,
     /// Time at which the Job was created.
@@ -333,29 +369,50 @@ impl Job {
     ///
     /// This function does not decide whether the Issue permits this Team kind or inspect Artifact
     /// content. The Scheduler and Snapshot View Builder perform those validations before calling it.
-    pub fn new(
-        issue_id: IssueId,
-        snapshot_view: SnapshotViewRef,
-        team_kind: TeamKind,
-        work_order: WorkOrder,
-        allowed_capabilities: Vec<String>,
-        allowed_target_ids: Vec<ResourceId>,
-    ) -> Self {
+    pub fn new(issue_id: IssueId, snapshot_view: SnapshotViewRef, brief: JobBrief) -> Self {
         Self {
             job_id: Uuid::now_v7(),
             issue_id,
             snapshot_view,
             supersedes_job_id: None,
-            team_kind,
+            team_kind: brief.team_kind,
             status: JobStatus::Queued,
-            work_order,
-            allowed_capabilities,
-            allowed_target_ids,
+            allowed_capabilities: brief.allowed_capabilities,
+            allowed_target_ids: brief.allowed_target_ids,
+            feedback: brief.feedback,
+            revises_job_id: brief.revises_job_id,
+            review: None,
             result: None,
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
         }
+    }
+
+    /// Records a human's review of a failed Job.
+    ///
+    /// Only a `Failed` Job is reviewable, and only once: the review is what takes the Job out of
+    /// the Failed Job inbox, so a second review would have nothing to act on.
+    pub fn record_review(&mut self, review: HumanReview) -> AgentResult<()> {
+        if self.status != JobStatus::Failed {
+            return Err(AgentError::InvalidInput(format!(
+                "Job `{}` is `{:?}`, not `Failed`; only failed Jobs are reviewed",
+                self.job_id, self.status
+            )));
+        }
+        if self.review.is_some() {
+            return Err(AgentError::InvalidInput(format!(
+                "Job `{}` has already been reviewed",
+                self.job_id
+            )));
+        }
+        self.review = Some(review);
+        Ok(())
+    }
+
+    /// Whether this Job sits in the Failed Job inbox: it failed and nobody has reviewed it.
+    pub fn needs_review(&self) -> bool {
+        self.status == JobStatus::Failed && self.review.is_none()
     }
 
     /// Returns the canonical Snapshot ID for this Job.
@@ -410,27 +467,17 @@ impl Job {
     /// Creates a new Job that replaces this Job with a new Snapshot View.
     ///
     /// The current Job must not be terminal. This method first marks the old Job as `Superseded`
-    /// and copies only its Team kind. The Scheduler supplies the new Work Order and re-derives the
-    /// capability and target scope explicitly, because a new Snapshot may justify a narrower scope
-    /// than the old Job held.
+    /// and copies nothing implicitly: the Scheduler supplies the whole brief again, because a new
+    /// Snapshot may justify a narrower scope than the old Job held.
     pub fn supersede_with(
         &mut self,
         new_snapshot_view: SnapshotViewRef,
-        new_work_order: WorkOrder,
-        allowed_capabilities: Vec<String>,
-        allowed_target_ids: Vec<ResourceId>,
+        brief: JobBrief,
     ) -> AgentResult<Self> {
         let previous_job_id = self.job_id;
         self.transition_to(JobStatus::Superseded)?;
 
-        let mut next = Self::new(
-            self.issue_id,
-            new_snapshot_view,
-            self.team_kind,
-            new_work_order,
-            allowed_capabilities,
-            allowed_target_ids,
-        );
+        let mut next = Self::new(self.issue_id, new_snapshot_view, brief);
         next.supersedes_job_id = Some(previous_job_id);
         Ok(next)
     }

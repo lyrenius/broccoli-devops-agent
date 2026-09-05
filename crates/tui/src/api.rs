@@ -1,7 +1,7 @@
 //! Minimal typed client for the control plane's HTTP API.
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// One row of `/api/status`.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -18,6 +18,9 @@ pub struct Status {
     /// Object counts.
     #[serde(default)]
     pub counts: Counts,
+    /// Inbox counts.
+    #[serde(default)]
+    pub inbox: InboxCounts,
 }
 
 /// Object counts inside `/api/status`.
@@ -32,15 +35,49 @@ pub struct Counts {
     /// Total ActionRuns.
     #[serde(default)]
     pub actions: usize,
-    /// ActionRuns waiting for a human.
-    #[serde(default)]
-    pub actions_waiting: usize,
     /// Total events.
     #[serde(default)]
     pub events: usize,
 }
 
-/// One ActionRun as served by `/api/actions`.
+/// Inbox counts inside `/api/status`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct InboxCounts {
+    /// Actions waiting for approval.
+    #[serde(default)]
+    pub permission_requests: usize,
+    /// Denied actions awaiting review.
+    #[serde(default)]
+    pub permission_denied: usize,
+    /// Failed Jobs awaiting review.
+    #[serde(default)]
+    pub failed_jobs: usize,
+    /// Failed actions awaiting review.
+    #[serde(default)]
+    pub failed_actions: usize,
+    /// Everything waiting for a human.
+    #[serde(default)]
+    pub total: usize,
+}
+
+/// Why an action was denied.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Denial {
+    /// `policy` or `human`.
+    #[serde(default)]
+    pub source: String,
+    /// The rule's rationale or the fixed human-rejection text.
+    #[serde(default)]
+    pub reason: String,
+    /// The human's comment, if any.
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// Who decided, for human denials.
+    #[serde(default)]
+    pub decided_by: Option<String>,
+}
+
+/// One ActionRun as served by `/api/actions` and `/api/inbox`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Action {
     /// ActionRun ID.
@@ -57,9 +94,56 @@ pub struct Action {
     /// Why the Team proposed it.
     #[serde(default)]
     pub reason: String,
+    /// Denial, when denied.
+    #[serde(default)]
+    pub denial: Option<Denial>,
+    /// Review, once given (rendered raw).
+    #[serde(default)]
+    pub review: Option<Value>,
     /// Verification conclusion, when reached.
     #[serde(default)]
     pub verification_summary: Option<String>,
+}
+
+/// One Job as served inside `/api/inbox`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JobRow {
+    /// Job ID.
+    pub job_id: String,
+    /// Owning Issue ID.
+    #[serde(default)]
+    pub issue_id: String,
+    /// Lifecycle status.
+    #[serde(default)]
+    pub status: String,
+    /// The Team's result, when any.
+    #[serde(default)]
+    pub result: Option<JobResultRow>,
+}
+
+/// The result summary of a Job.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JobResultRow {
+    /// Team summary.
+    #[serde(default)]
+    pub summary: String,
+}
+
+/// `/api/inbox`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Inbox {
+    /// Actions waiting for approval.
+    #[serde(default)]
+    pub permission_requests: Vec<Action>,
+    /// Denied actions awaiting review.
+    #[serde(default)]
+    pub permission_denied: Vec<Action>,
+    /// Failed Jobs awaiting review.
+    #[serde(default)]
+    pub failed_jobs: Vec<JobRow>,
+    /// Failed actions awaiting review.
+    #[serde(default)]
+    pub failed_actions: Vec<Action>,
 }
 
 /// One event record as served by `/api/events`.
@@ -139,12 +223,12 @@ impl ApiClient {
             .map_err(|e| e.to_string())
     }
 
-    async fn post_json(&self, path: &str) -> Result<Value, String> {
-        let response = self
-            .request(reqwest::Method::POST, path)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
+    async fn post_json(&self, path: &str, body: Option<Value>) -> Result<Value, String> {
+        let mut request = self.request(reqwest::Method::POST, path);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.map_err(|e| e.to_string())?;
         let status = response.status();
         let body: Value = response.json().await.unwrap_or(Value::Null);
         if status.is_success() {
@@ -161,9 +245,9 @@ impl ApiClient {
         self.get_json("/api/status").await
     }
 
-    /// Fetches every ActionRun.
-    pub async fn actions(&self) -> Result<Vec<Action>, String> {
-        self.get_json("/api/actions").await
+    /// Fetches the inbox.
+    pub async fn inbox(&self) -> Result<Inbox, String> {
+        self.get_json("/api/inbox").await
     }
 
     /// Fetches every Issue.
@@ -197,24 +281,62 @@ impl ApiClient {
             .unwrap_or_default())
     }
 
-    /// Approves an ActionRun.
-    pub async fn approve(&self, id: &str) -> Result<Value, String> {
-        self.post_json(&format!("/api/actions/{id}/approve")).await
+    /// Approves an ActionRun in the given operator's name.
+    pub async fn approve(&self, id: &str, by: &str) -> Result<Value, String> {
+        self.post_json(
+            &format!("/api/actions/{id}/approve"),
+            Some(json!({ "by": by })),
+        )
+        .await
     }
 
-    /// Rejects an ActionRun.
-    pub async fn reject(&self, id: &str) -> Result<Value, String> {
-        self.post_json(&format!("/api/actions/{id}/reject")).await
+    /// Rejects an ActionRun with a comment.
+    pub async fn reject(&self, id: &str, by: &str, comment: &str) -> Result<Value, String> {
+        self.post_json(
+            &format!("/api/actions/{id}/reject"),
+            Some(json!({ "by": by, "comment": comment })),
+        )
+        .await
+    }
+
+    /// Reviews a denied or failed ActionRun: `acknowledge` or `send_upstream`.
+    pub async fn review_action(
+        &self,
+        id: &str,
+        by: &str,
+        decision: &str,
+        comment: &str,
+    ) -> Result<Value, String> {
+        self.post_json(
+            &format!("/api/actions/{id}/review"),
+            Some(json!({ "by": by, "decision": decision, "comment": comment })),
+        )
+        .await
+    }
+
+    /// Reviews a failed Job: `acknowledge` or `send_upstream`.
+    pub async fn review_job(
+        &self,
+        id: &str,
+        by: &str,
+        decision: &str,
+        comment: &str,
+    ) -> Result<Value, String> {
+        self.post_json(
+            &format!("/api/jobs/{id}/review"),
+            Some(json!({ "by": by, "decision": decision, "comment": comment })),
+        )
+        .await
     }
 
     /// Requests a Scheduler transition: `freeze-dispatch`, `freeze-all`, or `resume`.
     pub async fn transition(&self, transition: &str) -> Result<Value, String> {
-        self.post_json(&format!("/api/scheduler/{transition}"))
+        self.post_json(&format!("/api/scheduler/{transition}"), None)
             .await
     }
 
     /// Captures a new Snapshot.
     pub async fn capture(&self) -> Result<Value, String> {
-        self.post_json("/api/snapshots").await
+        self.post_json("/api/snapshots", None).await
     }
 }

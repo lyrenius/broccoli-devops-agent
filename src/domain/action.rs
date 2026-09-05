@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::domain::job::{ActionProposal, TeamKind};
 use crate::domain::{
-    ActionRunId, ArtifactId, IssueId, JobId, NamedValue, PlatformOperationId, ResourceId,
-    SnapshotId,
+    ActionRunId, ArtifactId, Denial, HumanReview, IssueId, JobId, NamedValue, PlatformOperationId,
+    ResourceId, SnapshotId,
 };
 use crate::error::{AgentError, AgentResult};
 
@@ -125,6 +125,16 @@ pub struct ActionRun {
     pub status: ActionStatus,
     /// Current approval state.
     pub approval: ApprovalState,
+    /// Identity of the human who approved, when a human did.
+    #[serde(default)]
+    pub approved_by: Option<String>,
+    /// Why the action will not run, when it was denied by rule or by a human.
+    #[serde(default)]
+    pub denial: Option<Denial>,
+    /// A human's review of the denial or failure, once given. A denied or failed action without
+    /// one is in the inbox.
+    #[serde(default)]
+    pub review: Option<HumanReview>,
     /// Snapshot ID recorded before execution.
     pub before_snapshot_id: SnapshotId,
     /// Snapshot ID used for verification after execution.
@@ -174,6 +184,9 @@ impl ActionRun {
             expected_effect: proposal.expected_effect,
             status: ActionStatus::Proposed,
             approval: ApprovalState::Unevaluated,
+            approved_by: None,
+            denial: None,
+            review: None,
             before_snapshot_id,
             after_snapshot_id: None,
             idempotency_key: idempotency_key.into(),
@@ -206,6 +219,54 @@ impl ActionRun {
         self.transition_to(next)?;
         self.approval = approval;
         Ok(())
+    }
+
+    /// Records a human approval by name and moves the action to `Ready`.
+    pub fn approve(&mut self, approved_by: impl Into<String>) -> AgentResult<()> {
+        self.apply_approval(ApprovalState::Approved)?;
+        self.approved_by = Some(approved_by.into());
+        Ok(())
+    }
+
+    /// Records a denial — by rule or by a human — and cancels the action.
+    ///
+    /// The denial stays on the ActionRun so the Permission Denied inbox can show the reason and
+    /// comment, and so the reason can travel upstream if a human sends the item back.
+    pub fn deny(&mut self, denial: Denial) -> AgentResult<()> {
+        self.apply_approval(ApprovalState::Rejected)?;
+        self.denial = Some(denial);
+        Ok(())
+    }
+
+    /// Records a human's review of a denied or failed action.
+    ///
+    /// Only an action in the inbox can be reviewed, and only once: the review is what removes it.
+    pub fn record_review(&mut self, review: HumanReview) -> AgentResult<()> {
+        if !self.needs_review() {
+            return Err(AgentError::InvalidInput(format!(
+                "ActionRun `{}` is `{:?}` with{} a denial and {} review; only unreviewed denied \
+                 or failed actions are reviewed",
+                self.action_run_id,
+                self.status,
+                if self.denial.is_some() { "" } else { "out" },
+                if self.review.is_some() { "a" } else { "no" },
+            )));
+        }
+        self.review = Some(review);
+        Ok(())
+    }
+
+    /// Whether this action sits in the Permission Denied or Failed inbox.
+    pub fn needs_review(&self) -> bool {
+        self.review.is_none() && (self.denial.is_some() || self.has_failed())
+    }
+
+    /// Whether execution or verification failed.
+    pub fn has_failed(&self) -> bool {
+        matches!(
+            self.status,
+            ActionStatus::Failed | ActionStatus::VerificationFailed
+        )
     }
 
     /// Marks an action with satisfied approval and preconditions as running.

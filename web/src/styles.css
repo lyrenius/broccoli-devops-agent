@@ -167,7 +167,39 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var
 .tone-unknown { color: var(--unknown); }
 
 /* ---- inbox ---- */
+.inbox-toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; flex-wrap: wrap; }
+.inbox-toolbar label { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.inbox-toolbar input { width: 180px; }
+.inbox-toolbar .notice { margin: 0; flex: 1; }
+h2 .count {
+  display: inline-block;
+  min-width: 22px;
+  text-align: center;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
 .inbox-item { border-left: 3px solid var(--warn); }
+.inbox-item.denied { border-left-color: var(--bad); }
+.inbox-item.failed { border-left-color: var(--unknown); }
+.inbox-item .feedback { display: grid; gap: 4px; margin-top: 10px; font-size: 12.5px; }
+.tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.tag-rule { color: var(--bad); border-color: var(--bad); }
+.tag-human { color: var(--accent); border-color: var(--accent); }
+.notice.revision { border-left: 3px solid var(--accent); }
+.feedback-list { margin: 6px 0; padding-left: 18px; color: var(--muted); }
 .inbox-item .runbook { font-family: var(--mono); font-weight: 700; }
 .inbox-item .targets { font-family: var(--mono); color: var(--muted); }
 .inbox-item .actions { display: flex; gap: 8px; margin-top: 10px; }

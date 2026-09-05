@@ -12,7 +12,7 @@ type Tab = "overview" | "inbox" | "records" | "events" | "report";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
-  { id: "inbox", label: "Approval inbox" },
+  { id: "inbox", label: "Inbox" },
   { id: "records", label: "Issues & jobs" },
   { id: "events", label: "Events" },
   { id: "report", label: "File a report" },
@@ -47,8 +47,10 @@ export default function App() {
         {TABS.map((t) => (
           <button key={t.id} className={tab === t.id ? "active" : ""} onClick={() => setTab(t.id)}>
             {t.label}
-            {t.id === "inbox" && status && status.counts.actions_waiting > 0 && (
-              <span className="badge">{status.counts.actions_waiting}</span>
+            {t.id === "inbox" && status && status.inbox.total > 0 && (
+              <span className="badge" title={`${status.inbox.permission_requests} requests · ${status.inbox.permission_denied} denied · ${status.inbox.failed_jobs + status.inbox.failed_actions} failed`}>
+                {status.inbox.total}
+              </span>
             )}
           </button>
         ))}

@@ -7,8 +7,8 @@ use broccoli_agent_harness::AgentConfig;
 use broccoli_agent_harness::testing::{ScriptedModelClient, call, text};
 use broccoli_devops_agent::AgentResult;
 use broccoli_devops_agent::domain::{
-    ArtifactKind, HumanReport, Issue, Job, JobOutcome, JobStatus, OperationMode, Snapshot,
-    SnapshotCause, TeamCallback, TeamCallbackKind, TeamKind, WorkOrder,
+    ArtifactKind, HumanReport, Issue, Job, JobBrief, JobOutcome, JobStatus, OperationMode,
+    Snapshot, SnapshotCause, TeamCallback, TeamCallbackKind, TeamKind,
 };
 use broccoli_devops_agent::ports::{
     AgentTeamPort, SnapshotViewBuildRequest, SnapshotViewBuilderPort, StateStore, TeamCallbackSink,
@@ -57,11 +57,12 @@ async fn job_with_view(
     store.insert_issue(issue.clone()).await.unwrap();
 
     let request = SnapshotViewBuildRequest {
-        issue_id: issue.issue_id,
-        team_kind: TeamKind::Operate,
-        work_order: WorkOrder::new("Diagnose submit failures"),
-        allowed_capabilities: vec!["observe.readonly".into()],
-        allowed_target_ids: vec!["broccoli-server".into()],
+        issue: issue.clone(),
+        brief: JobBrief::new(
+            TeamKind::Operate,
+            vec!["observe.readonly".into()],
+            vec!["broccoli-server".into()],
+        ),
         redaction_profile: PROFILE_OPERATE_READONLY.into(),
     };
     let built = RedactingViewBuilder::new(artifacts.clone())
@@ -70,14 +71,7 @@ async fn job_with_view(
         .unwrap();
     store.insert_artifact(built.artifact.clone()).await.unwrap();
 
-    let mut job = Job::new(
-        issue.issue_id,
-        built.snapshot_view,
-        TeamKind::Operate,
-        request.work_order,
-        request.allowed_capabilities,
-        request.allowed_target_ids,
-    );
+    let mut job = Job::new(issue.issue_id, built.snapshot_view, request.brief);
     job.transition_to(JobStatus::Running).unwrap();
     store.insert_job(job.clone()).await.unwrap();
     (issue, job, built.artifact)
@@ -138,12 +132,18 @@ async fn harness_team_runs_a_job_through_the_same_port() {
     assert_eq!(transcript_artifact.produced_by_job_id, Some(job.job_id));
     let bytes = artifacts.read_verified(&transcript_artifact).unwrap();
     let transcript: broccoli_agent_harness::Transcript = serde_json::from_slice(&bytes).unwrap();
-    assert!(transcript.instructions.contains("Diagnose submit failures"));
-    assert!(transcript.entries.iter().any(|entry| {
-        serde_json::to_string(&entry.item)
-            .unwrap()
-            .contains("BEGIN UNTRUSTED DATA")
-    }));
+    assert!(transcript.instructions.contains("broccoli-server"));
+    // The problem statement reaches the model only inside the fenced View, never in the
+    // instructions: the reporter's words are data.
+    assert!(!transcript.instructions.contains("Submit errors"));
+    let view_output = transcript
+        .entries
+        .iter()
+        .map(|entry| serde_json::to_string(&entry.item).unwrap())
+        .find(|text| text.contains("BEGIN UNTRUSTED DATA"))
+        .expect("the model read the fenced View");
+    assert!(view_output.contains("Submit errors"));
+    assert!(view_output.contains("500s on submit"));
 }
 
 /// A model that ends with prose instead of the terminal tool produces a Failed result — the

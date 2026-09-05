@@ -1,4 +1,4 @@
-import type { ActionRun, EventRecord, Issue, Job, Snapshot, Status } from "./types";
+import type { ActionRun, EventRecord, Inbox, Issue, Job, ReviewOutcome, Snapshot, Status } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -18,23 +18,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+function post<T>(path: string, body?: unknown): Promise<T> {
+  return request<T>(path, { method: "POST", body: body === undefined ? undefined : JSON.stringify(body) });
+}
+
+export type ReviewChoice = "acknowledge" | "send_upstream";
+
 export const api = {
   status: () => request<Status>("/api/status"),
   latestSnapshot: () => request<Snapshot>("/api/snapshots/latest"),
-  capture: () => request<Snapshot>("/api/snapshots", { method: "POST" }),
+  capture: () => post<Snapshot>("/api/snapshots"),
   issues: () => request<Issue[]>("/api/issues"),
   jobs: () => request<Job[]>("/api/jobs"),
   actions: () => request<ActionRun[]>("/api/actions"),
-  approve: (id: string) => request<ActionRun>(`/api/actions/${id}/approve`, { method: "POST" }),
-  reject: (id: string) => request<ActionRun>(`/api/actions/${id}/reject`, { method: "POST" }),
+  inbox: () => request<Inbox>("/api/inbox"),
+  approve: (id: string, by: string) => post<ActionRun>(`/api/actions/${id}/approve`, { by }),
+  reject: (id: string, by: string, comment: string) => post<ActionRun>(`/api/actions/${id}/reject`, { by, comment }),
+  reviewAction: (id: string, by: string, decision: ReviewChoice, comment: string) =>
+    post<ReviewOutcome<ActionRun>>(`/api/actions/${id}/review`, { by, decision, comment }),
+  reviewJob: (id: string, by: string, decision: ReviewChoice, comment: string) =>
+    post<ReviewOutcome<Job>>(`/api/jobs/${id}/review`, { by, decision, comment }),
   events: (limit: number) => request<EventRecord[]>(`/api/events?limit=${limit}`),
-  transition: (name: "freeze-dispatch" | "freeze-all" | "resume") =>
-    request<{ mode: string }>(`/api/scheduler/${name}`, { method: "POST" }),
+  transition: (name: "freeze-dispatch" | "freeze-all" | "resume") => post<{ mode: string }>(`/api/scheduler/${name}`),
   report: (body: { title: string; description: string; reporter: string; priority?: string }) =>
-    request<{ issue: Issue; job: Job; actions: ActionRun[] }>("/api/reports", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
+    post<{ issue: Issue; job: Job; actions: ActionRun[] }>("/api/reports", body),
 };
 
 /** Subscribes to the live event stream after the given sequence. */

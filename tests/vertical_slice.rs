@@ -313,12 +313,18 @@ async fn snapshot_view_redacts_and_fences_untrusted_text() {
 
     let dir = tempfile::tempdir().unwrap();
     let builder = RedactingViewBuilder::new(FileArtifactStore::new(dir.path()));
+    let issue = broccoli_devops_agent::domain::Issue::from_human_report(
+        HumanReport::new("operator", "Redis slow", "commands time out"),
+        snapshot.snapshot_id,
+        Uuid::now_v7(),
+    );
     let request = SnapshotViewBuildRequest {
-        issue_id: Uuid::now_v7(),
-        team_kind: broccoli_devops_agent::domain::TeamKind::Operate,
-        work_order: broccoli_devops_agent::domain::WorkOrder::new("test"),
-        allowed_capabilities: Vec::new(),
-        allowed_target_ids: Vec::new(),
+        issue,
+        brief: broccoli_devops_agent::domain::JobBrief::new(
+            broccoli_devops_agent::domain::TeamKind::Operate,
+            Vec::new(),
+            Vec::new(),
+        ),
         redaction_profile: PROFILE_OPERATE_READONLY.to_string(),
     };
     let built = builder
@@ -331,6 +337,8 @@ async fn snapshot_view_redacts_and_fences_untrusted_text() {
     assert!(!body.contains("redis_password"));
     assert!(body.contains("untrusted_data"));
     assert!(body.contains("7.2"));
+    // The report's own words are in the View — fenced as untrusted, like probe output.
+    assert!(body.contains("commands time out"));
     assert_eq!(
         built.snapshot_view.content_sha256,
         built.artifact.content_sha256

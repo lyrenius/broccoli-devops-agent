@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
 
-use crate::App;
+use crate::{App, Category};
 
 /// Which screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -14,8 +14,8 @@ pub enum Screen {
     /// Status and latest Snapshot resources.
     #[default]
     Overview,
-    /// ActionRuns, with the approval inbox first.
-    Actions,
+    /// The inbox: permission requests, denials, failures.
+    Inbox,
     /// Issues.
     Issues,
     /// Event log tail.
@@ -26,7 +26,7 @@ impl Screen {
     /// All screens in tab order.
     pub const ALL: [Screen; 4] = [
         Screen::Overview,
-        Screen::Actions,
+        Screen::Inbox,
         Screen::Issues,
         Screen::Events,
     ];
@@ -35,7 +35,7 @@ impl Screen {
     pub fn title(self) -> &'static str {
         match self {
             Screen::Overview => "1 Overview",
-            Screen::Actions => "2 Actions",
+            Screen::Inbox => "2 Inbox",
             Screen::Issues => "3 Issues",
             Screen::Events => "4 Events",
         }
@@ -54,6 +54,15 @@ fn tone(value: &str) -> Color {
     }
 }
 
+/// Color for an inbox category.
+fn category_color(category: Category) -> Color {
+    match category {
+        Category::Request => Color::Yellow,
+        Category::Denied => Color::Red,
+        Category::FailedJob | Category::FailedAction => Color::Magenta,
+    }
+}
+
 /// Draws the whole frame.
 pub fn draw(frame: &mut Frame, app: &App) {
     let areas = Layout::default()
@@ -67,7 +76,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, areas[0], app);
     match app.screen {
         Screen::Overview => draw_overview(frame, areas[1], app),
-        Screen::Actions => draw_actions(frame, areas[1], app),
+        Screen::Inbox => draw_inbox(frame, areas[1], app),
         Screen::Issues => draw_issues(frame, areas[1], app),
         Screen::Events => draw_events(frame, areas[1], app),
     }
@@ -102,7 +111,13 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             "  · LIVE"
         }),
         Span::raw(format!("  · {}", app.status.team_backend)),
-        Span::raw(format!("  · inbox {}", app.status.counts.actions_waiting)),
+        Span::raw(format!(
+            "  · inbox {} ({} req · {} denied · {} failed)",
+            app.status.inbox.total,
+            app.status.inbox.permission_requests,
+            app.status.inbox.permission_denied,
+            app.status.inbox.failed_jobs + app.status.inbox.failed_actions
+        )),
     ]);
     let tabs = Tabs::new(titles)
         .select(selected)
@@ -151,50 +166,44 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(table, area);
 }
 
-fn draw_actions(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_inbox(frame: &mut Frame, area: Rect, app: &App) {
     let columns = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(area);
     let items: Vec<ListItem> = app
-        .actions
+        .inbox
         .iter()
         .enumerate()
-        .map(|(index, a)| {
+        .map(|(index, item)| {
             let marker = if index == app.selected { "▶ " } else { "  " };
-            let line = Line::from(vec![
+            ListItem::new(Line::from(vec![
                 Span::raw(marker),
                 Span::styled(
-                    format!("{:<18}", a.runbook_id),
+                    format!("{:<14}", item.category.label()),
+                    Style::default()
+                        .fg(category_color(item.category))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:<44}", item.title),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(format!("{:<28}", a.target_ids.join(","))),
                 Span::styled(
-                    format!("{:<22}", a.status),
-                    Style::default().fg(tone(&a.status)),
+                    format!("{:<22}", item.status),
+                    Style::default().fg(tone(&item.status)),
                 ),
-                Span::raw(a.approval.clone()),
-            ]);
-            ListItem::new(line)
+            ]))
         })
         .collect();
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" actions  (j/k select · a approve · r reject) "),
-    );
+    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(
+        " inbox  (j/k select · a approve · r reject · b send back upstream · x acknowledge) ",
+    ));
     frame.render_widget(list, columns[0]);
 
-    let detail = app.actions.get(app.selected).map_or_else(
-        || "no action selected".to_string(),
-        |a| {
-            format!(
-                "id: {}\nreason: {}\nverification: {}",
-                a.action_run_id,
-                a.reason,
-                a.verification_summary.as_deref().unwrap_or("—")
-            )
-        },
+    let detail = app.inbox.get(app.selected).map_or_else(
+        || "nothing waits for a human".to_string(),
+        |item| item.detail.clone(),
     );
     let paragraph = Paragraph::new(detail)
         .wrap(Wrap { trim: false })
@@ -262,8 +271,17 @@ fn draw_events(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+    if let Some(prompt) = &app.prompt {
+        let line = Line::from(vec![
+            Span::styled(prompt.label(), Style::default().fg(Color::Yellow)),
+            Span::raw(prompt.buffer.clone()),
+            Span::styled("▏", Style::default().fg(Color::Yellow)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
     let message = app.message.as_deref().unwrap_or(
-        "1-4 screens · j/k select · a approve · r reject · s snapshot · f freeze dispatch · F freeze all · u resume · q quit",
+        "1-4 screens · j/k select · a approve · r reject · b send upstream · x acknowledge · s snapshot · f/F freeze · u resume · q quit",
     );
     let style = if app.message.is_some() {
         Style::default().fg(Color::Yellow)

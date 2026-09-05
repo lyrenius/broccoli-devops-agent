@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActionRun, ActionRunId, Artifact, ArtifactId, DeploymentId, EventRecord, Issue, IssueCandidate,
-    IssueId, IssuePriority, Job, JobId, JobResult, NewEvent, OperationMode,
-    PlatformOperationResult, ResourceId, Snapshot, SnapshotCause, SnapshotId, SnapshotViewRef,
-    TeamCallback, TeamKind, WorkOrder,
+    IssueId, IssuePriority, Job, JobBrief, JobId, JobResult, NewEvent, OperationMode,
+    PlatformOperationResult, Snapshot, SnapshotCause, SnapshotId, SnapshotViewRef, TeamCallback,
+    TeamKind,
 };
 use crate::error::AgentResult;
 
@@ -34,18 +34,16 @@ pub struct CaptureRequest {
 }
 
 /// Describes the Snapshot View requested by the Scheduler for a Job.
+///
+/// The View is the Team's whole world: the problem statement comes from the Issue, the scope and
+/// any human feedback from the brief, and the evidence from the Snapshot. Nothing else is handed
+/// to a Team, so nothing else needs to be replayed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotViewBuildRequest {
-    /// ID of the Issue served by the View.
-    pub issue_id: IssueId,
-    /// Kind of Team that will receive the View.
-    pub team_kind: TeamKind,
-    /// Work Order dispatched with the View.
-    pub work_order: WorkOrder,
-    /// Platform capabilities the Job may request.
-    pub allowed_capabilities: Vec<String>,
-    /// Resources the Job may access.
-    pub allowed_target_ids: Vec<ResourceId>,
+    /// The Issue the Job serves; its title and description are the problem statement.
+    pub issue: Issue,
+    /// Team kind, scope, and human feedback the Job carries.
+    pub brief: JobBrief,
     /// Name of the redaction profile to use.
     pub redaction_profile: String,
 }
@@ -93,11 +91,12 @@ pub trait SnapshotJudgePort: Send + Sync {
 /// Boundary that converts a canonical Snapshot into a Job-visible View.
 #[async_trait]
 pub trait SnapshotViewBuilderPort: Send + Sync {
-    /// Builds a sanitized Snapshot View from the Team, Work Order, and capability scope.
+    /// Builds a sanitized Snapshot View for the Issue, Team, scope, and feedback in the request.
     ///
     /// The result contains both the Artifact and its stable reference. A concrete implementation must
-    /// remove credentials and untrusted instructions while retaining dependencies, revisions,
-    /// coverage gaps, and other information needed for cross-component reasoning.
+    /// remove credentials and fence untrusted text (the human report's own words included) while
+    /// retaining dependencies, revisions, coverage gaps, and other information needed for
+    /// cross-component reasoning.
     async fn build_snapshot_view(
         &self,
         snapshot: &Snapshot,
@@ -239,15 +238,6 @@ pub enum TriageDecision {
     Reject,
 }
 
-/// Input for drafting the Work Order of a new Job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkOrderDraftRequest {
-    /// Issue the Job will serve.
-    pub issue: Issue,
-    /// Team kind that will receive the Job.
-    pub team_kind: TeamKind,
-}
-
 /// Input for interpreting a Job's final result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CallbackAdviceRequest {
@@ -308,12 +298,6 @@ pub struct NextStep {
 pub trait SchedulerPolicyPort: Send + Sync {
     /// Proposes how to triage one Issue Candidate against the currently open Issues.
     async fn triage_candidate(&self, request: &TriageRequest) -> AgentResult<TriageDecision>;
-
-    /// Drafts the Work Order for a new Job on the given Issue.
-    ///
-    /// The harness may adjust or replace the draft; the model cannot widen capability or target
-    /// scope through the Work Order text.
-    async fn draft_work_order(&self, request: &WorkOrderDraftRequest) -> AgentResult<WorkOrder>;
 
     /// Proposes the next step after a Job returns its final result.
     async fn advise_next_step(&self, request: &CallbackAdviceRequest) -> AgentResult<NextStep>;

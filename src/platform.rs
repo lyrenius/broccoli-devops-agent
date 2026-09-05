@@ -9,14 +9,20 @@
 //!
 //! `dry_run` (the default) renders and records the commands without executing them, so the whole
 //! pipeline can be rehearsed before a deployment exists.
+//!
+//! Inside the Platform sits the execution block the architecture diagram calls "DevOps Agents &
+//! Scheduler": the per-target executors that run one runbook on one host, and the lane scheduler
+//! that serializes them so two approved actions never operate on the same resource at once.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use crate::domain::{ActionRun, ArtifactKind, PlatformOperationResult, ResourceId};
 use crate::error::AgentResult;
@@ -63,11 +69,48 @@ impl Default for PlatformConfig {
     }
 }
 
+/// Serializes execution per target resource.
+///
+/// Approvals can arrive concurrently from several consoles; a restart and a status query for the
+/// same worker must still run one after the other, in the order they were admitted. Lanes are
+/// acquired in sorted target order so multi-target actions cannot deadlock each other.
+#[derive(Default)]
+struct ExecutionLanes {
+    lanes: std::sync::Mutex<HashMap<ResourceId, Arc<Mutex<()>>>>,
+}
+
+impl ExecutionLanes {
+    /// Returns the lane for one target, creating it on first use.
+    fn lane(&self, target: &str) -> Arc<Mutex<()>> {
+        let mut lanes = self
+            .lanes
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        lanes
+            .entry(target.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Holds every lane the action needs until the returned guards drop.
+    async fn acquire(&self, targets: &[ResourceId]) -> Vec<tokio::sync::OwnedMutexGuard<()>> {
+        let mut sorted: Vec<&ResourceId> = targets.iter().collect();
+        sorted.sort();
+        sorted.dedup();
+        let mut guards = Vec::with_capacity(sorted.len());
+        for target in sorted {
+            guards.push(self.lane(target).lock_owned().await);
+        }
+        guards
+    }
+}
+
 /// Command-executing Platform over the operator's runbook templates.
 pub struct LocalCommandPlatform {
     config: PlatformConfig,
     artifacts: FileArtifactStore,
     known_targets: HashSet<ResourceId>,
+    lanes: ExecutionLanes,
 }
 
 impl LocalCommandPlatform {
@@ -85,6 +128,7 @@ impl LocalCommandPlatform {
                 .iter()
                 .map(|resource| resource.id.clone())
                 .collect(),
+            lanes: ExecutionLanes::default(),
         }
     }
 
@@ -206,6 +250,9 @@ impl AgentsPlatformPort for LocalCommandPlatform {
             );
         }
 
+        // The execution block proper: hold the lanes for every target, then run the
+        // per-target executors in order.
+        let _lanes = self.lanes.acquire(&action.target_ids).await;
         let mut runs = Vec::new();
         let mut all_ok = true;
         for (target, command) in &commands {

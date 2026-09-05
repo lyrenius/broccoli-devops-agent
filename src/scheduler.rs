@@ -8,7 +8,10 @@
 //! model downtime never breaks collection, persistence, or recovery.
 //!
 //! The Scheduler is also the only component that requests Snapshot captures outside the Collector's
-//! own periodic schedule, and the sole gateway that moves ActionRuns to execution.
+//! own periodic schedule, and the sole gateway that moves ActionRuns to execution. Whatever it
+//! refuses or sees fail is parked for a human: denials keep their reason on the ActionRun, failed
+//! Jobs and actions wait for a review, and a review can send the item back upstream as a revising
+//! Job that carries the human's feedback.
 
 use std::sync::Arc;
 
@@ -17,16 +20,17 @@ use serde_json::json;
 use tokio::sync::RwLock;
 
 use crate::domain::{
-    ActionProposal, ActionRun, ActionRunId, ApprovalState, ArtifactKind, ContentTrust, EventRecord,
-    HumanReport, Issue, IssueCandidate, IssueId, IssueStatus, Job, JobId, JobOutcome, NewEvent,
-    ResourceId, Snapshot, SnapshotId, SnapshotViewRef, TeamCallback, TeamKind, WorkOrder,
+    ActionProposal, ActionRun, ActionRunId, ApprovalState, Artifact, ArtifactKind, ContentTrust,
+    Denial, EventRecord, HumanReport, HumanReview, Issue, IssueCandidate, IssueId, IssueStatus,
+    Job, JobBrief, JobId, JobOutcome, NewEvent, Snapshot, SnapshotId, SnapshotViewRef,
+    TeamCallback,
 };
 use crate::error::{AgentError, AgentResult};
 use crate::policy::AuthorityPolicy;
 use crate::ports::{
     AgentsPlatformPort, CallbackAdviceRequest, CaptureRequest, CollectorPort, NextStep,
     NextStepDecision, SchedulerPolicyPort, SnapshotViewBuildRequest, SnapshotViewBuilderPort,
-    StateStore, TriageDecision, TriageRequest, WorkOrderDraftRequest,
+    StateStore, TriageDecision, TriageRequest,
 };
 
 /// Whether the Top Scheduler currently permits dispatch or execution work.
@@ -312,64 +316,66 @@ impl TopScheduler {
         }
     }
 
-    /// Drafts a Work Order for a new Job on the given Issue.
+    /// Builds the sanitized Snapshot View for an Issue and dispatches a Job over it.
     ///
-    /// With a policy model the draft is consulted, recorded, and validated (an empty objective is
-    /// replaced by the deterministic fallback). Without one, a minimal deterministic Work Order is
-    /// derived from the Issue itself.
-    pub async fn draft_work_order(
+    /// This is the one path from "there is an Issue and a Snapshot" to "a Team has work": the
+    /// View is built from the Issue's problem statement, the brief's scope, and the brief's
+    /// feedback, stored as an Artifact, and bound into a running Job. The View Artifact is
+    /// returned alongside the Job because it is exactly what the Team must be handed.
+    pub async fn dispatch_job(
         &self,
         issue_id: IssueId,
-        team_kind: TeamKind,
-    ) -> AgentResult<WorkOrder> {
+        snapshot_id: SnapshotId,
+        brief: JobBrief,
+        redaction_profile: impl Into<String>,
+    ) -> AgentResult<(Job, Artifact)> {
+        self.ensure_dispatch_allowed("dispatch_job").await?;
+        let view_builder = self.require_view_builder("dispatch_job")?;
         let issue = self.store.get_issue(issue_id).await?;
-        let fallback = WorkOrder::new(format!("Investigate: {}", issue.title));
-
-        let Some(policy) = &self.policy else {
-            return Ok(fallback);
-        };
-
-        let request = WorkOrderDraftRequest {
-            issue: issue.clone(),
-            team_kind,
-        };
-        let draft = policy.draft_work_order(&request).await?;
-        self.record_policy_consultation("draft_work_order", &request, &draft, Some(issue_id), None)
-            .await?;
-        if draft.objective.trim().is_empty() {
-            return Ok(fallback);
+        let snapshot = self.store.get_snapshot(snapshot_id).await?;
+        if let Some(revised) = brief.revises_job_id {
+            let previous = self.store.get_job(revised).await?;
+            if previous.issue_id != issue_id {
+                return Err(AgentError::InvalidInput(format!(
+                    "Job `{revised}` belongs to Issue `{}`, not `{issue_id}`",
+                    previous.issue_id
+                )));
+            }
         }
-        Ok(draft)
+
+        let request = SnapshotViewBuildRequest {
+            issue,
+            brief,
+            redaction_profile: redaction_profile.into(),
+        };
+        let built = view_builder
+            .build_snapshot_view(&snapshot, &request)
+            .await?;
+        self.store.insert_artifact(built.artifact.clone()).await?;
+        let job = self
+            .create_job(issue_id, built.snapshot_view, request.brief)
+            .await?;
+        Ok((job, built.artifact))
     }
 
     /// Creates and dispatches a Job bound to an immutable Snapshot View for the given Issue.
     ///
     /// The method verifies that the Issue, canonical Snapshot, Snapshot View Artifact, and content
-    /// hash all exist and agree, and moves an `Open` Issue to `Investigating`. The initial version
-    /// neither selects nor invokes a Team automatically; the caller supplies the Work Order and
-    /// scope explicitly.
-    #[allow(clippy::too_many_arguments)]
+    /// hash all exist and agree, and moves an `Open` or `WaitingForHuman` Issue to
+    /// `Investigating`. A revision (a brief with `revises_job_id`) is recorded as such so the
+    /// event log shows which human review caused the new pass.
     pub async fn create_job(
         &self,
         issue_id: IssueId,
         snapshot_view: SnapshotViewRef,
-        team_kind: TeamKind,
-        work_order: WorkOrder,
-        allowed_capabilities: Vec<String>,
-        allowed_target_ids: Vec<ResourceId>,
+        brief: JobBrief,
     ) -> AgentResult<Job> {
         self.ensure_dispatch_allowed("create_job").await?;
         let mut issue = self.store.get_issue(issue_id).await?;
         self.validate_snapshot_view(&snapshot_view).await?;
 
-        let mut job = Job::new(
-            issue_id,
-            snapshot_view,
-            team_kind,
-            work_order,
-            allowed_capabilities,
-            allowed_target_ids,
-        );
+        let revision = brief.revises_job_id.is_some();
+        let mut job = Job::new(issue_id, snapshot_view, brief);
         job.transition_to(crate::domain::JobStatus::Running)?;
         self.store.insert_job(job.clone()).await?;
 
@@ -378,40 +384,42 @@ impl TopScheduler {
             self.store.update_issue(issue).await?;
         }
 
-        self.record_job_event(
-            &job,
-            "scheduler.job_dispatched",
-            "The Scheduler created and dispatched a Job",
-        )
-        .await?;
+        if revision {
+            self.record_job_event(
+                &job,
+                "scheduler.job_revised",
+                "The Scheduler dispatched a revising Job carrying human feedback",
+            )
+            .await?;
+        } else {
+            self.record_job_event(
+                &job,
+                "scheduler.job_dispatched",
+                "The Scheduler created and dispatched a Job",
+            )
+            .await?;
+        }
         Ok(job)
     }
 
     /// Creates a Job that replaces an older Job using a new Snapshot View.
     ///
     /// The method does not modify the old Job's Snapshot. It marks the old Job as `Superseded` and
-    /// creates a new ID. The caller re-derives capability and target scope explicitly, because a
-    /// new Snapshot may justify a narrower scope than the old Job held. The current in-memory Store
-    /// has no transactions; a future persistence implementation must commit the old Job, new Job,
-    /// and event atomically.
+    /// creates a new ID. The caller supplies the whole brief again, because a new Snapshot may
+    /// justify a narrower scope than the old Job held. The current in-memory Store has no
+    /// transactions; a future persistence implementation must commit the old Job, new Job, and
+    /// event atomically.
     pub async fn supersede_job(
         &self,
         previous_job_id: JobId,
         new_snapshot_view: SnapshotViewRef,
-        new_work_order: WorkOrder,
-        allowed_capabilities: Vec<String>,
-        allowed_target_ids: Vec<ResourceId>,
+        brief: JobBrief,
     ) -> AgentResult<Job> {
         self.ensure_dispatch_allowed("supersede_job").await?;
         self.validate_snapshot_view(&new_snapshot_view).await?;
 
         let mut previous = self.store.get_job(previous_job_id).await?;
-        let mut next = previous.supersede_with(
-            new_snapshot_view,
-            new_work_order,
-            allowed_capabilities,
-            allowed_target_ids,
-        )?;
+        let mut next = previous.supersede_with(new_snapshot_view, brief)?;
         next.transition_to(crate::domain::JobStatus::Running)?;
         self.store.update_job(previous).await?;
         self.store.insert_job(next.clone()).await?;
@@ -426,31 +434,26 @@ impl TopScheduler {
 
     /// Serves a Team's probe request: capture a new Snapshot, build its View, and supersede the Job.
     ///
-    /// This is the `NeedsMoreData` flow from the architecture document. The redaction profile,
-    /// Work Order, and scope come from the caller (usually derived from the old Job plus the
-    /// requested Probes in `capture.requested_probe_ids`).
-    #[allow(clippy::too_many_arguments)]
+    /// This is the `NeedsMoreData` flow from the architecture document. The redaction profile and
+    /// brief come from the caller (usually derived from the old Job plus the requested Probes in
+    /// `capture.requested_probe_ids`).
     pub async fn resnapshot_and_supersede(
         &self,
         previous_job_id: JobId,
         capture: CaptureRequest,
         redaction_profile: impl Into<String>,
-        new_work_order: WorkOrder,
-        allowed_capabilities: Vec<String>,
-        allowed_target_ids: Vec<ResourceId>,
+        brief: JobBrief,
     ) -> AgentResult<Job> {
         self.ensure_dispatch_allowed("resnapshot_and_supersede")
             .await?;
         let view_builder = self.require_view_builder("resnapshot_and_supersede")?;
         let previous = self.store.get_job(previous_job_id).await?;
+        let issue = self.store.get_issue(previous.issue_id).await?;
 
         let snapshot = self.request_snapshot(capture).await?;
         let view_request = SnapshotViewBuildRequest {
-            issue_id: previous.issue_id,
-            team_kind: previous.team_kind,
-            work_order: new_work_order.clone(),
-            allowed_capabilities: allowed_capabilities.clone(),
-            allowed_target_ids: allowed_target_ids.clone(),
+            issue,
+            brief,
             redaction_profile: redaction_profile.into(),
         };
         let built = view_builder
@@ -458,14 +461,8 @@ impl TopScheduler {
             .await?;
         self.store.insert_artifact(built.artifact).await?;
 
-        self.supersede_job(
-            previous_job_id,
-            built.snapshot_view,
-            new_work_order,
-            allowed_capabilities,
-            allowed_target_ids,
-        )
-        .await
+        self.supersede_job(previous_job_id, built.snapshot_view, view_request.brief)
+            .await
     }
 
     /// Accepts an Agent Team callback and updates the Job and Issue when a final result is present.
@@ -473,8 +470,10 @@ impl TopScheduler {
     /// A callback for a terminal Job is rejected before anything is written, so supersession or
     /// completion cannot leave orphan callback events in the log. When `final_result` is present,
     /// the Job state machine decides the Job's next state and the owning Issue receives the
-    /// corresponding lifecycle update where the Issue state machine allows it. A future database
-    /// implementation must place the event and both updates in one transaction.
+    /// corresponding lifecycle update where the Issue state machine allows it: a failed or
+    /// blocked Job parks the Issue with a human, since the failed Job now sits in the Failed Job
+    /// inbox. A future database implementation must place the event and both updates in one
+    /// transaction.
     pub async fn handle_callback(&self, callback: TeamCallback) -> AgentResult<Job> {
         let mut job = self.store.get_job(callback.job_id).await?;
         if job.issue_id != callback.issue_id {
@@ -504,18 +503,33 @@ impl TopScheduler {
 
         if let Some(result) = callback.final_result {
             let issue_next = match result.outcome {
-                JobOutcome::NeedsHuman | JobOutcome::OptionsReady => {
-                    Some(IssueStatus::WaitingForHuman)
-                }
-                JobOutcome::Solved => Some(IssueStatus::Resolved),
-                JobOutcome::DiagnosisOnly
-                | JobOutcome::NeedsMoreData
+                JobOutcome::NeedsHuman
+                | JobOutcome::OptionsReady
                 | JobOutcome::Blocked
-                | JobOutcome::Failed => None,
+                | JobOutcome::Failed => Some(IssueStatus::WaitingForHuman),
+                JobOutcome::Solved => Some(IssueStatus::Resolved),
+                JobOutcome::DiagnosisOnly | JobOutcome::NeedsMoreData => None,
             };
+            let failed = result.outcome == JobOutcome::Failed;
+            let failure_summary = result.summary.clone();
 
             job.complete(result)?;
             self.store.update_job(job.clone()).await?;
+
+            if failed {
+                self.store
+                    .append_event(
+                        NewEvent::new(
+                            "top-scheduler",
+                            "scheduler.job_failed",
+                            format!("The Job failed and awaits human review: {failure_summary}"),
+                        )
+                        .with_issue(job.issue_id)
+                        .with_job(job.job_id)
+                        .with_trust(ContentTrust::Mixed),
+                    )
+                    .await?;
+            }
 
             if let Some(next) = issue_next {
                 let mut issue = self.store.get_issue(job.issue_id).await?;
@@ -604,8 +618,10 @@ impl TopScheduler {
     /// starting state, and its operation mode selects the matrix column. The decision — auto,
     /// approve, or deny, with the repeat-rate escalation of rule 5 — is applied immediately and
     /// recorded, so the returned ActionRun is already `Ready`, `WaitingForApproval`, or
-    /// `Cancelled`. Creation is refused while the Scheduler is `FullyFrozen` or `Recovering`. The
-    /// idempotency key comes from the caller so retries of the same intent reuse the same key.
+    /// `Cancelled`. A denial keeps the rule's rationale on the ActionRun and parks the Issue with
+    /// a human: the item is in the Permission Denied inbox. Creation is refused while the
+    /// Scheduler is `FullyFrozen` or `Recovering`. The idempotency key comes from the caller so
+    /// retries of the same intent reuse the same key.
     pub async fn create_action_run(
         &self,
         originating_job_id: JobId,
@@ -661,7 +677,12 @@ impl TopScheduler {
             before.operation_mode,
             recent_auto_repeat,
         );
-        action.apply_approval(decision.approval)?;
+        let denied = decision.approval == ApprovalState::Rejected;
+        if denied {
+            action.deny(Denial::by_policy(decision.rationale.clone()))?;
+        } else {
+            action.apply_approval(decision.approval)?;
+        }
         self.store.update_action_run(action.clone()).await?;
         self.store
             .append_event(
@@ -676,34 +697,123 @@ impl TopScheduler {
                 .with_payload(json!({ "decision": decision, "status": action.status })),
             )
             .await?;
+        if denied {
+            self.store
+                .append_event(
+                    NewEvent::new(
+                        "top-scheduler",
+                        "scheduler.action_denied",
+                        format!(
+                            "Denied by rule; awaiting human review: {}",
+                            decision.rationale
+                        ),
+                    )
+                    .with_issue(job.issue_id)
+                    .with_job(originating_job_id)
+                    .with_action(action.action_run_id),
+                )
+                .await?;
+            self.park_issue_for_human(job.issue_id).await?;
+        }
         Ok(action)
     }
 
-    /// Applies an approval result computed by Scheduler policy or given by a human.
+    /// Records a human's approval of a waiting ActionRun; it becomes `Ready`.
     ///
     /// The domain object enforces the state machine; this method persists the result and records
-    /// who-approved-what in the EventLog.
-    pub async fn apply_action_approval(
+    /// who approved what in the EventLog. Execution is a separate step (`execute_action`).
+    pub async fn approve_action(
         &self,
         action_run_id: ActionRunId,
-        approval: ApprovalState,
+        approved_by: impl Into<String>,
     ) -> AgentResult<ActionRun> {
+        let approved_by = approved_by.into();
         let mut action = self.store.get_action_run(action_run_id).await?;
-        action.apply_approval(approval)?;
+        action.approve(approved_by.clone())?;
         self.store.update_action_run(action.clone()).await?;
         self.store
             .append_event(
                 NewEvent::new(
-                    "top-scheduler",
-                    "scheduler.action_approval_applied",
-                    "The Scheduler applied an approval decision to an ActionRun",
+                    "human",
+                    "human.action_approved",
+                    format!("{approved_by} approved the action"),
                 )
                 .with_issue(action.issue_id)
+                .with_job(action.originating_job_id)
                 .with_action(action_run_id)
-                .with_payload(json!({ "approval": approval, "status": action.status })),
+                .with_payload(json!({ "approved_by": approved_by, "status": action.status })),
             )
             .await?;
         Ok(action)
+    }
+
+    /// Records a human's rejection of a waiting ActionRun, with their comment.
+    ///
+    /// The action is cancelled and never executes; the denial stays on it, so it appears in the
+    /// Permission Denied inbox where the same or another human decides whether the reason should
+    /// go back upstream. The Issue is parked with a human meanwhile.
+    pub async fn reject_action(
+        &self,
+        action_run_id: ActionRunId,
+        rejected_by: impl Into<String>,
+        comment: Option<String>,
+    ) -> AgentResult<ActionRun> {
+        let rejected_by = rejected_by.into();
+        let mut action = self.store.get_action_run(action_run_id).await?;
+        let denial = Denial::by_human(rejected_by.clone(), comment);
+        action.deny(denial.clone())?;
+        self.store.update_action_run(action.clone()).await?;
+        self.store
+            .append_event(
+                NewEvent::new(
+                    "human",
+                    "human.action_rejected",
+                    match &denial.comment {
+                        Some(comment) => format!("{rejected_by} rejected the action: {comment}"),
+                        None => format!("{rejected_by} rejected the action"),
+                    },
+                )
+                .with_issue(action.issue_id)
+                .with_job(action.originating_job_id)
+                .with_action(action_run_id)
+                .with_payload(json!({ "denial": denial, "status": action.status }))
+                .with_trust(ContentTrust::Mixed),
+            )
+            .await?;
+        self.park_issue_for_human(action.issue_id).await?;
+        Ok(action)
+    }
+
+    /// Records a human's review of a denied or failed ActionRun, taking it out of the inbox.
+    ///
+    /// Sending the item upstream is the caller's job (a revising Job must exist first, so the
+    /// review can name it); this method only persists and events the decision.
+    pub async fn review_action(
+        &self,
+        action_run_id: ActionRunId,
+        review: HumanReview,
+    ) -> AgentResult<ActionRun> {
+        let mut action = self.store.get_action_run(action_run_id).await?;
+        action.record_review(review.clone())?;
+        self.store.update_action_run(action.clone()).await?;
+        self.record_review_event(
+            &review,
+            action.issue_id,
+            Some(action.originating_job_id),
+            Some(action_run_id),
+        )
+        .await?;
+        Ok(action)
+    }
+
+    /// Records a human's review of a failed Job, taking it out of the Failed Job inbox.
+    pub async fn review_job(&self, job_id: JobId, review: HumanReview) -> AgentResult<Job> {
+        let mut job = self.store.get_job(job_id).await?;
+        job.record_review(review.clone())?;
+        self.store.update_job(job.clone()).await?;
+        self.record_review_event(&review, job.issue_id, Some(job_id), None)
+            .await?;
+        Ok(job)
     }
 
     /// Executes a `Ready` ActionRun through the Agents Platform.
@@ -744,6 +854,10 @@ impl TopScheduler {
                     .with_trust(ContentTrust::Mixed),
             )
             .await?;
+        if !result.succeeded {
+            // Execution failures are the Failed inbox's business, not something to retry blindly.
+            self.park_issue_for_human(action.issue_id).await?;
+        }
         Ok(action)
     }
 
@@ -759,24 +873,11 @@ impl TopScheduler {
         passed: bool,
         summary: impl Into<String>,
     ) -> AgentResult<ActionRun> {
-        let mut action = self.store.get_action_run(action_run_id).await?;
+        let action = self.store.get_action_run(action_run_id).await?;
         let after = self.request_snapshot(after_capture).await?;
         let summary = summary.into();
-        action.record_verification(after.snapshot_id, passed, summary.clone())?;
-        self.store.update_action_run(action.clone()).await?;
-        self.store
-            .append_event(
-                NewEvent::new("top-scheduler", "verification.recorded", summary)
-                    .with_issue(action.issue_id)
-                    .with_action(action_run_id)
-                    .with_payload(json!({
-                        "passed": passed,
-                        "after_snapshot_id": after.snapshot_id,
-                        "status": action.status,
-                    })),
-            )
-            .await?;
-        Ok(action)
+        self.record_verification_result(action, after.snapshot_id, passed, summary)
+            .await
     }
 
     /// Captures the after Snapshot and verifies the action's expected effect deterministically.
@@ -864,7 +965,56 @@ impl TopScheduler {
                     })),
             )
             .await?;
+        if !passed {
+            self.park_issue_for_human(action.issue_id).await?;
+        }
         Ok(action)
+    }
+
+    /// Moves an Issue to `WaitingForHuman` when its state machine allows it.
+    ///
+    /// Called whenever something lands in an inbox — a denial, a failed Job, a failed or
+    /// unverified action — so the Issue's status says what the inbox says: a human decides next.
+    async fn park_issue_for_human(&self, issue_id: IssueId) -> AgentResult<()> {
+        let mut issue = self.store.get_issue(issue_id).await?;
+        if issue.can_transition_to(IssueStatus::WaitingForHuman) {
+            issue.transition_to(IssueStatus::WaitingForHuman)?;
+            self.store.update_issue(issue).await?;
+        }
+        Ok(())
+    }
+
+    /// Records a human review in the EventLog.
+    async fn record_review_event(
+        &self,
+        review: &HumanReview,
+        issue_id: IssueId,
+        job_id: Option<JobId>,
+        action_run_id: Option<ActionRunId>,
+    ) -> AgentResult<EventRecord> {
+        let summary = match &review.decision {
+            crate::domain::ReviewDecision::Acknowledged => {
+                format!(
+                    "{} acknowledged the item; no further automatic work",
+                    review.reviewer
+                )
+            }
+            crate::domain::ReviewDecision::SentUpstream { job_id } => format!(
+                "{} sent the item back upstream as Job {job_id}",
+                review.reviewer
+            ),
+        };
+        let mut event = NewEvent::new("human", "human.review_recorded", summary)
+            .with_issue(issue_id)
+            .with_payload(serde_json::to_value(review)?)
+            .with_trust(ContentTrust::Mixed);
+        if let Some(job_id) = job_id {
+            event = event.with_job(job_id);
+        }
+        if let Some(action_run_id) = action_run_id {
+            event = event.with_action(action_run_id);
+        }
+        self.store.append_event(event).await
     }
 
     /// Stops creating new Jobs while allowing running work to continue producing callbacks.
@@ -1068,10 +1218,10 @@ impl TopScheduler {
             .await
     }
 
-    /// Records a Job creation or supersession event.
+    /// Records a Job creation, revision, or supersession event.
     ///
     /// This helper records the exact Job structure so post-contest review can reconstruct the
-    /// Snapshot View and Work Order used at the time.
+    /// Snapshot View, scope, and feedback used at the time.
     async fn record_job_event(
         &self,
         job: &Job,

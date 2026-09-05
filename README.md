@@ -1,6 +1,6 @@
 # Broccoli DevOps Agent
 
-This is an agentic operations control plane for the Broccoli online judging system. The repository implements the **v0.1 vertical slice**: it loads a static deployment topology, probes real endpoints, builds immutable Snapshots, accepts human reports, dispatches a read-only Operate Job over an exact sanitized Snapshot View, persists everything to disk, and recovers control state after a restart. It does not modify any machine — ActionRun execution, model-backed agents, and SSH stay behind ports for later slices.
+This is an agentic operations control plane for the Broccoli online judging system. It loads a static deployment topology, probes real endpoints, builds immutable Snapshots, accepts human reports, dispatches an Operate Job over an exact sanitized Snapshot View (through a deterministic Team or a model-backed one), runs the Job's proposed actions through an approved authority matrix into the Agents Platform, verifies their effect, parks every denial and failure in a three-category inbox for a human, sends human feedback back upstream as a revising Job, persists everything to disk, and recovers control state after a restart. Machines are touched only through the runbook commands you configure, and only once you leave dry-run.
 
 See the [architecture document](./docs/architecture.md) for the complete design and the [Excalidraw source](./docs/broccoli-devops-agent-architecture.excalidraw) for the editable diagram.
 
@@ -28,7 +28,14 @@ cd web && pnpm install && pnpm dev          # http://localhost:5180, /api proxie
 cargo run -p broccoli-tui                   # --api http://127.0.0.1:4720 --token ...
 ```
 
-The web console has the approval inbox (the `approve` rows of the matrix, with the model's reason and expected effect), the live Snapshot with coverage gaps, issues and jobs with transcript links, a live event stream, freeze/resume controls, and the human-report form. The TUI covers the same operations from a terminal: `1-4` screens, `j/k` select, `a`/`r` approve or reject, `s` snapshot, `f`/`F`/`u` freeze dispatch, freeze all, resume. Set `api.token` in the config (and pass `--token` to the TUI) before binding beyond localhost.
+The web console has the inbox in its three categories — permission requests (approve, or reject with a comment), permission denials (who refused and why; send back upstream or acknowledge), and failures (jobs and actions; the same two decisions) — plus the live Snapshot with coverage gaps, issues and jobs with their feedback and transcript links, a live event stream, freeze/resume controls, and the human-report form. Every decision records the operator's name. The TUI covers the same operations from a terminal: `1-4` screens, `j/k` select, `a` approve, `r` reject, `b` send back upstream, `x` acknowledge (the last three prompt for a comment), `s` snapshot, `f`/`F`/`u` freeze dispatch, freeze all, resume; `--as NAME` sets the recorded operator. Set `api.token` in the config (and pass `--token` to the TUI) before binding beyond localhost.
+
+To try the consoles without a model or a deployment, seed a demo data directory that already holds one item of each inbox category, then serve it with the deterministic Team:
+
+```bash
+cargo run --example seed_demo -- data-demo
+cargo run -- serve --data data-demo --topology data-demo/topology.toml --team readonly
+```
 
 ## Workspace Layout
 
@@ -69,21 +76,24 @@ cargo run -- events --tail 20
 
 State lives under `./data/` (override with `--data`): one JSON document per Snapshot, Issue, Job, and Artifact record, artifact bodies under `data/artifact-bodies/`, and an append-only `data/events.jsonl`. Human reports default to the human-reserved top priority; pass `--priority low|normal|high|critical` to file lower.
 
-## Actions
+## Actions and the inbox
 
-When a Job proposes operations, `report` runs each one through the approved authority matrix ([docs/action-authority.md](./docs/action-authority.md), encoded in `src/policy.rs`): `auto` rows execute through the Agents Platform and are verified against an after-Snapshot immediately, `approve` rows wait for a human, `deny` rows are cancelled with the reason in the event log.
+When a Job proposes operations, `report` runs each one through the approved authority matrix ([docs/action-authority.md](./docs/action-authority.md), encoded in `src/policy.rs`): `auto` rows execute through the Agents Platform and are verified against an after-Snapshot immediately, `approve` rows wait in the **Permission Request** inbox, `deny` rows are cancelled with the rule's rationale kept on the ActionRun and wait in the **Permission Denied** inbox. A human rejection lands in the same denied inbox with the human's comment. Jobs that fail, and actions whose execution or verification fails, wait in the **Failed** inbox. A denied or failed item is reviewed in one of two ways: *acknowledge* it, or *send it back upstream* — the agent then runs a revising Job over a fresh Snapshot with the denial reason, the failure summary, and your comments in front of it, and its new proposals go through the matrix again ([docs/architecture.md §4.10](./docs/architecture.md)).
 
 ```bash
-cargo run -- actions list                 # every ActionRun with status and approval state
-cargo run -- actions approve <id>         # executes and verifies a waiting action
-cargo run -- actions reject <id>          # cancels it
+cargo run -- inbox                                            # the three categories
+cargo run -- actions approve <id> --as alice                  # executes and verifies a waiting action
+cargo run -- actions reject <id> --as alice --comment "..."   # cancels it; comment travels with it
+cargo run -- review action <id> --upstream --comment "..."    # revising Job runs now with the feedback
+cargo run -- review job <id> --acknowledge                    # recorded; no further automatic work
+cargo run -- actions list                                     # every ActionRun with denial and review
 ```
 
 The Platform executes runbooks as the commands you map in `config/agent.toml` under `[[platform.runbooks]]` (for example `ssh {target} sudo systemctl restart broccoli-worker`); credentials stay with your SSH agent. It starts in **dry-run** mode — commands are rendered and recorded as Artifacts, not executed — until you set `dry_run = false`. Verification treats a command's exit code zero as evidence only: the target must be Healthy in the after-Snapshot, or the action ends as `VerificationFailed`.
 
 ## Recommended Reading Order
 
-1. `src/domain/`: start with Snapshot, Issue, Job, ActionRun, Artifact, and EventLog.
+1. `src/domain/`: start with Snapshot, Issue, Job, ActionRun, Artifact, and EventLog; `review.rs` holds denials, reviews, and the feedback that travels upstream.
 2. `src/ports.rs`: learn the boundaries around the Collector, Snapshot Judge, Agent Team (callback sink and cancellation), Agents Platform, Scheduler Policy, Reporter, and Store.
 3. `src/scheduler.rs`: see how the AI-integrated Top Scheduler accepts human reports, requests Snapshot captures, triages candidates through the policy model with deterministic fallbacks, creates and supersedes Jobs, handles callbacks, gates ActionRuns, and manages freeze/recovery.
 4. `src/topology.rs` and `src/collector.rs`: the static deployment map and the probe-driven Collector behind `CollectorPort`.
@@ -91,7 +101,7 @@ The Platform executes runbooks as the commands you map in `config/agent.toml` un
 6. `src/team/`: the deterministic read-only Operate Team and the harness-backed `HarnessOperateTeam` — two backends behind one `AgentTeamPort`.
 7. `crates/harness/src/`: the agent loop (`agent.rs`), tool registry (`tool.rs`), and `ModelClient` boundary (`client.rs`).
 8. `src/store/file.rs`: the file-backed Store that makes restart recovery real (`src/store/memory.rs` remains for tests).
-9. `src/runner.rs` and `src/main.rs`: wiring and the operator CLI.
+9. `src/runner.rs` and `src/main.rs`: wiring, the inbox projection, the review flows, and the operator CLI.
 10. `src/api.rs`, `crates/tui/`, and `web/src/`: the HTTP + SSE API and its two consoles.
 
 Code identifiers and all documentation are written in English. Documentation comments focus on why an item exists and where future decisions belong instead of merely repeating its name.
@@ -105,6 +115,7 @@ The v0.1 slice deliberately does not implement:
   but the Scheduler Policy and Judger adapters are not, so every Scheduler
   decision point still runs its conservative deterministic fallback.
 - Real machine mutation out of the box: the Platform executes only the runbook commands you configure, and stays in dry-run until you opt in.
+- Deciding an Issue's fate from the inbox: acknowledging a denial or failure records the review and stops, but does not resolve or cancel the Issue.
 - Authenticated PostgreSQL, Redis, object-storage, or Broccoli API probes; the
   v0.1 Probe Registry is `tcp.connect` and plain-HTTP `http.status` only.
 - SQLite (the file-backed store keeps the same `StateStore` contract for a

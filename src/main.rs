@@ -4,8 +4,10 @@
 //! `report` runs a human report through Issue, Job, and Team to a persisted result, `recover`
 //! rebuilds control state after a restart, and `events` prints the append-only log. `config show`
 //! exposes the effective configuration (key redacted) and `check-model` verifies the relay.
-//! `report` also runs the Job's proposed actions through the authority matrix, and `actions`
-//! lists, approves, or rejects them. The Platform is in dry-run mode until the operator opts in.
+//! `report` also runs the Job's proposed actions through the authority matrix; `inbox` shows what
+//! waits for a human, `actions` approves or rejects held actions, and `review` acknowledges a
+//! denied or failed item or sends it back upstream with feedback. The Platform is in dry-run mode
+//! until the operator opts in.
 
 #![forbid(unsafe_code)]
 
@@ -19,7 +21,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use broccoli_devops_agent::config::AppConfig;
 use broccoli_devops_agent::domain::{HumanReport, IssuePriority, SnapshotCause};
 use broccoli_devops_agent::ports::StateStore;
-use broccoli_devops_agent::runner::{SliceRunner, TeamBackend};
+use broccoli_devops_agent::runner::{InboxDecision, SliceRunner, TeamBackend};
 use broccoli_devops_agent::scheduler::TopScheduler;
 use broccoli_devops_agent::store::file::FileStateStore;
 use broccoli_devops_agent::topology::DeploymentTopology;
@@ -91,10 +93,17 @@ enum Command {
     },
     /// Send one trivial request to the configured model relay and report the result.
     CheckModel,
+    /// Show everything waiting for a human: permission requests, denials, and failures.
+    Inbox,
     /// List, approve, or reject ActionRuns held by the authority matrix.
     Actions {
         #[command(subcommand)]
         action: ActionsAction,
+    },
+    /// Review a denied or failed inbox item: acknowledge it, or send it back upstream.
+    Review {
+        #[command(subcommand)]
+        item: ReviewItem,
     },
     /// Serve the HTTP + SSE API for the web console and the terminal UI.
     Serve {
@@ -116,12 +125,70 @@ enum ActionsAction {
     Approve {
         /// ActionRun ID from `actions list`.
         id: Uuid,
+        /// Your name, recorded with the approval.
+        #[arg(long = "as", default_value = "operator")]
+        by: String,
     },
-    /// Reject a waiting ActionRun; it is cancelled and never executes.
+    /// Reject a waiting ActionRun; it is cancelled and lands in the Permission Denied inbox.
     Reject {
         /// ActionRun ID from `actions list`.
         id: Uuid,
+        /// Why you rejected it; travels upstream if the denial is later sent back.
+        #[arg(long)]
+        comment: Option<String>,
+        /// Your name, recorded with the rejection.
+        #[arg(long = "as", default_value = "operator")]
+        by: String,
     },
+}
+
+/// What kind of inbox item a review targets.
+#[derive(Debug, Subcommand)]
+enum ReviewItem {
+    /// A denied or failed ActionRun.
+    Action {
+        /// ActionRun ID from `inbox`.
+        id: Uuid,
+        #[command(flatten)]
+        decision: ReviewArgs,
+    },
+    /// A failed Job.
+    Job {
+        /// Job ID from `inbox`.
+        id: Uuid,
+        #[command(flatten)]
+        decision: ReviewArgs,
+    },
+}
+
+/// The human's decision on an inbox item.
+#[derive(Debug, clap::Args)]
+struct ReviewArgs {
+    /// Take note and stop; nothing further happens automatically.
+    #[arg(long, conflicts_with = "upstream")]
+    acknowledge: bool,
+    /// Send the reason and your comment back upstream: a revising Job runs now.
+    #[arg(long, conflicts_with = "acknowledge")]
+    upstream: bool,
+    /// Your feedback for the next pass.
+    #[arg(long)]
+    comment: Option<String>,
+    /// Your name, recorded with the review.
+    #[arg(long = "as", default_value = "operator")]
+    by: String,
+    /// Team backend for a revising Job.
+    #[arg(long, value_enum, default_value_t = TeamChoice::Auto)]
+    team: TeamChoice,
+}
+
+impl ReviewArgs {
+    fn decision(&self) -> Result<InboxDecision, Box<dyn std::error::Error>> {
+        match (self.acknowledge, self.upstream) {
+            (true, false) => Ok(InboxDecision::Acknowledge),
+            (false, true) => Ok(InboxDecision::SendUpstream),
+            _ => Err("choose exactly one of --acknowledge or --upstream".into()),
+        }
+    }
 }
 
 /// Configuration subcommands.
@@ -282,18 +349,67 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         SliceRunner::render_actions(&actions, runner.dry_run())
                     );
                 }
-                ActionsAction::Approve { id } => {
-                    let action = runner.approve_action(id).await?;
+                ActionsAction::Approve { id, by } => {
+                    let action = runner.approve_action(id, &by).await?;
                     print!(
                         "{}",
                         SliceRunner::render_actions(&[action], runner.dry_run())
                     );
                 }
-                ActionsAction::Reject { id } => {
-                    let action = runner.reject_action(id).await?;
+                ActionsAction::Reject { id, comment, by } => {
+                    let action = runner.reject_action(id, &by, comment).await?;
                     print!(
                         "{}",
                         SliceRunner::render_actions(&[action], runner.dry_run())
+                    );
+                }
+            }
+        }
+        Command::Inbox => {
+            let topology = DeploymentTopology::load(&config.topology.path)?;
+            let runner = SliceRunner::wire(
+                topology,
+                &config.data.dir,
+                TeamBackend::ReadOnly,
+                config.platform.clone(),
+            )?;
+            print!("{}", SliceRunner::render_inbox(&runner.inbox().await?));
+        }
+        Command::Review { item } => {
+            let (args, is_job, id) = match &item {
+                ReviewItem::Action { id, decision } => (decision, false, *id),
+                ReviewItem::Job { id, decision } => (decision, true, *id),
+            };
+            let decision = args.decision()?;
+            let topology = DeploymentTopology::load(&config.topology.path)?;
+            let backend = select_backend(&config, args.team)?;
+            let runner =
+                SliceRunner::wire(topology, &config.data.dir, backend, config.platform.clone())?;
+            let revision = if is_job {
+                let outcome = runner
+                    .review_job(id, &args.by, decision, args.comment.clone())
+                    .await?;
+                println!("reviewed job {} · {:?}", id, outcome.reviewed.review);
+                outcome.revision
+            } else {
+                let outcome = runner
+                    .review_action(id, &args.by, decision, args.comment.clone())
+                    .await?;
+                println!("reviewed action {} · {:?}", id, outcome.reviewed.review);
+                outcome.revision
+            };
+            if let Some(revision) = revision {
+                let issue = runner.store().get_issue(revision.job.issue_id).await?;
+                println!("\nrevision · team backend: {}\n", runner.team_label());
+                print!(
+                    "{}",
+                    SliceRunner::render_report_outcome(&issue, &revision.job)
+                );
+                if !revision.actions.is_empty() {
+                    println!("\nactions:");
+                    print!(
+                        "{}",
+                        SliceRunner::render_actions(&revision.actions, runner.dry_run())
                     );
                 }
             }

@@ -1,8 +1,9 @@
 # Broccoli DevOps Agent Architecture
 
-> Status: Draft v0.2  
-> Updated: 2026-08-29  
-> Scope: Product and system architecture. This document does not yet prescribe a concrete OpenAI model, deployment host, or production permission policy.
+> Status: Draft v0.3  
+> Updated: 2026-09-05  
+> Scope: Product and system architecture. This document does not yet prescribe a concrete OpenAI model, deployment host, or production permission policy.  
+> v0.3 applies the first design-feedback round (`docs/fable-design-feedback.md`): the separate Work Order layer is gone, the inbox has three categories, denials carry reasons and comments, and a human review can send an item back upstream as a revising Job.
 
 ## 1. Goal
 
@@ -24,7 +25,9 @@ Agent, the operator UI, or the OpenAI API becomes unavailable.
    state.
 2. **Global coordination, scoped execution.** The Top Scheduler owns global
    priority, issue, job, conflict, and callback context. Agent Teams receive a
-   bounded work order and a sanitized view of a specific Snapshot.
+   sanitized view of a specific Snapshot that carries the problem statement,
+   the scope they were granted, and any human feedback from earlier passes —
+   nothing else.
 3. **One execution gateway.** SSH credentials and machine mutation live in the
    Agents Platform. Neither the Scheduler nor model prompts directly hold
    credentials.
@@ -89,14 +92,24 @@ Snapshot Judge ──> issue candidate ──┐
                                      ▼
 Human Report ────> TOP PRIORITY ──> Top Scheduler
                                      │
-                                     │ Snapshot View + Work Order
+                                     │ Snapshot View (problem, scope, feedback)
                                      ▼
                                   Agent Team
                                      │
                                      │ callback / options / artifacts / blockers
                                      ▼
                                  Top Scheduler
+                                     │
+                                     │ denial / failure ──> Inbox ──> human review
+                                     │                                   │
+                                     └──────── revising Job <── feedback ┘
 ```
+
+There is no separate work-order layer. An Issue says what is wrong; a Job is
+one bounded pass by one Team over one Snapshot View. The View itself carries
+the problem statement (the report's title and description, fenced as untrusted
+text), the Job's scope, and the human feedback that reached the Issue so far,
+so the Team's whole input is one replayable Artifact.
 
 The component labelled `Judger Agent` in the diagram is an anomaly-analysis
 component, not a Broccoli judge worker. This document calls it the **Snapshot
@@ -136,6 +149,14 @@ Read-only scoped requests (inspection within the Job's capability and target
 scope) may flow from a Team to the Platform directly. Mutations may not: a
 Team returns an ActionProposal, and only the Scheduler converts it into an
 ActionRun and hands it to the Platform, checking the freeze mode at both steps.
+
+Inside the Agents Platform sits the execution block the diagram labels
+**DevOps Agents & Scheduler**: the per-target executors that run one Runbook
+on one host, and the lane scheduler that serializes executions per resource so
+two approved actions never operate on the same machine at once. Approved and
+automatically allowed actions enter that block; its normal result is recorded
+as the execution outcome, and its failures are routed to the Failed inbox
+(§4.10), separately from permission requests and denials.
 
 ## 4. Components
 
@@ -223,10 +244,7 @@ The fixed decision points where the policy model is consulted:
    issue candidate, with a proposed priority. The harness clamps every
    model-proposed priority below `HumanTop` and verifies merge targets exist
    and are open.
-2. **Work Order drafting.** Draft the objective, expected outputs, and
-   constraints for a new Job. The model cannot widen capability or target scope
-   through Work Order text.
-3. **Callback interpretation.** After a Job's final result: request a
+2. **Callback interpretation.** After a Job's final result: request a
    resnapshot with specific Probes, convert selected Team proposals into
    ActionRuns, ask a human a concrete question, resolve, or give up. The
    harness validates the proposal against the actual `JobResult` (probe lists
@@ -241,9 +259,14 @@ each model-influenced decision.
 
 **Fallback:** when the policy model is unavailable, decision points degrade to
 conservative deterministic defaults — candidates are recorded and deferred to a
-human, Work Orders are derived mechanically from the Issue, and next steps
-become a question for a human. Model downtime therefore never breaks
-collection, persistence, dispatch bookkeeping, or recovery.
+human, and next steps become a question for a human. Model downtime therefore
+never breaks collection, persistence, dispatch bookkeeping, or recovery.
+
+The human report path itself involves no policy consultation: a report
+triggers a Snapshot capture, the Issue and Job are created, the selected Team
+backend runs, and the diagnosis and proposals are saved in `JobResult`. If
+there are no proposals the pass ends there; if there are, each becomes an
+ActionRun and the authority matrix decides its fate (§4.10).
 
 #### Responsibilities
 
@@ -252,10 +275,12 @@ collection, persistence, dispatch bookkeeping, or recovery.
 - Request on-demand Snapshot captures from the Collector (the only component
   besides the Collector's own schedule that can).
 - Select a base Snapshot for every Job.
-- Generate a sanitized Snapshot View and Work Order.
+- Generate a sanitized Snapshot View.
 - Dispatch Develop or Operate Jobs.
 - Aggregate callbacks, options, artifacts, and blockers.
-- Manage human choices.
+- Manage human choices, including the inbox: park denied and failed work for
+  review and turn a human's "send back upstream" into a revising Job that
+  carries the feedback.
 - Act as the sole gateway that creates ActionRuns and hands them to the Agents
   Platform (this is where freeze modes are enforced).
 - Detect Worktree, source, configuration, Bundle, target-machine, and operation
@@ -302,7 +327,18 @@ exactly one callback carrying the final result. The callback's kind is derived
 from its content, so a Team cannot label a failure as success. Each running Job
 carries a cooperative cancellation signal; supersession, freezing, or human
 cancellation signals the Team, which stops at a safe point and still delivers a
-final callback describing what was abandoned.
+final callback describing what was abandoned. A Team backend that errors out
+without a final callback is not left running: the runtime records the error as
+a `Failed` result, so the Job lands in the Failed inbox.
+
+Two backends implement the Operate contract today: the **read-only backend**
+(rule-based diagnosis from the View, never proposes) and the **harness
+backend** (a model-and-tool loop that produces a diagnosis and action
+proposals). Both receive human feedback the same way — it is in the View — and
+both must visibly take it into account on a revision pass: the read-only
+backend prefixes its diagnosis with the feedback it saw, the harness backend
+presents it to the model as trusted operator direction alongside the fenced
+View.
 
 #### Internal parallelism
 
@@ -325,6 +361,16 @@ Responsibilities:
 
 The Platform may internally use system OpenSSH or another transport, but that
 choice is not exposed to Agent prompts.
+
+The Platform's execution block (the diagram's **DevOps Agents & Scheduler**)
+is explicit in the implementation: `LocalCommandPlatform` renders one command
+per target from the operator's Runbook templates, holds a per-resource
+execution lane for every target (acquired in sorted order, so multi-target
+actions cannot deadlock), runs the per-target executors in sequence, and
+stores the complete output as an `ActionOutput` Artifact. A refusal — unknown
+target, unconfigured Runbook, an argument with shell metacharacters — is a
+failed result, never an exception, so it reaches the Failed inbox with its
+reason.
 
 ### 4.7 Reporter Agent
 
@@ -354,9 +400,11 @@ and a terminal console (`crates/tui`, ratatui). Everything a console can do —
 file a report, approve or reject a held action, capture a Snapshot, freeze or
 resume the Scheduler — is an API call onto an existing runner operation, so the
 authority matrix and the event log apply to UI actions exactly as to CLI ones.
-The approval inbox is the console's centre: every `approve` row of the matrix
-is a human decision made with the Team's reason, the expected effect, and the
-before-Snapshot in view.
+The inbox is the console's centre, in its three categories (§4.10): permission
+requests are decided with the Team's reason and expected effect in view;
+denials show who refused and why, take a comment, and can be sent back
+upstream or acknowledged; failures show the Job's or Platform's summary and
+take the same two decisions. Every decision records the human's name.
 
 ### 4.9 Registries
 
@@ -375,6 +423,73 @@ suggestions, and models cannot extend them:
 
 `allowed_capabilities` on a Job is interpreted against these registries: a
 capability names a subset of Probes and Runbooks the Job may request.
+
+### 4.10 Inbox and feedback loop
+
+Everything that waits for a human is in one inbox with three categories. The
+inbox is a projection over the store — an item is in it because of what its
+record says, and it leaves only through a recorded human decision.
+
+| Category | What belongs in it | Human interaction |
+| --- | --- | --- |
+| **Permission Request** | ActionRuns the matrix holds for approval (`approve` rows, and `auto` rows escalated by the repeat rule). | Approve, or reject with a comment. |
+| **Permission Denied** | ActionRuns refused by rule (`deny` and `human-only` rows, unknown Runbooks) or rejected by a human, not yet reviewed. The denial's source, reason, and comment stay on the ActionRun. | Review the reason, add feedback, then either send it back upstream or acknowledge it. |
+| **Failed** | Jobs that failed (a Team that returned `Failed`, answered without its terminal tool, ran out of budget, or crashed) and ActionRuns whose execution or verification failed, not yet reviewed. | Review the failure, add feedback, then either send it back upstream or acknowledge it. |
+
+Permission decisions have three paths. Automatically allowed actions proceed
+to execution. Actions that need approval enter the Permission Request inbox;
+approval proceeds to execution, and a rejection — with the human's comment —
+enters the Permission Denied inbox. Actions denied by rule enter the Permission
+Denied inbox directly, with the rule's rationale as the reason. Denials and
+failures are distinct states: a denied action is `Cancelled` with a `denial`,
+a failed one is `Failed` or `VerificationFailed`; the inbox category, not a
+shared status, is what groups them.
+
+**Sending an item back upstream** is what makes feedback participate rather
+than sit in history. The Scheduler captures a fresh Snapshot, builds a View
+whose `human_feedback` section carries every earlier feedback item on the
+Issue plus this one — the denial's reason and comment, or the failure summary,
+and the reviewer's own words — dispatches a **revising Job** (`revises_job_id`
+names the reviewed pass), runs the selected Team backend, and evaluates the
+new proposals through the matrix again. The review on the original item names
+the revising Job. Acknowledging records the review and stops; it does not
+decide the Issue's fate. Whenever something lands in the inbox, the owning
+Issue is parked at `WaitingForHuman`; a revision moves it back to
+`Investigating`.
+
+```mermaid
+flowchart TD
+    Report["Human report"] --> Snapshot["Collector captures and persists a Snapshot"]
+    Snapshot --> Task["Create Issue and Job"]
+    Task --> Backend{"Team backend"}
+    Backend -->|read-only| Readonly["Rule-based diagnosis"]
+    Backend -->|harness| Harness["Model-and-tool loop: diagnosis and proposals"]
+    Readonly --> Result["Save JobResult"]
+    Harness --> Result
+    Readonly -->|Job fails| FailedInbox
+    Harness -->|Job fails| FailedInbox
+    Result --> HasActions{"Any proposals?"}
+    HasActions -->|no| End["End this pass"]
+    HasActions -->|yes| Action["Create ActionRun"]
+    Action --> Permission{"Authority matrix"}
+    Permission -->|auto| Platform["Agents Platform"]
+    Permission -->|approve| RequestInbox["Permission Request inbox"]
+    Permission -->|deny| Denial["Record denial reason"]
+    RequestInbox -->|approve| Platform
+    RequestInbox -->|reject with comment| Denial
+    Denial --> DeniedInbox["Permission Denied inbox"]
+    DeniedInbox --> Review["Human reviews and adds feedback"]
+    Review -->|send back upstream| Feedback["Revising Job carries reason and comments"]
+    Review -->|acknowledge| Stop["Recorded; no further automatic work"]
+    Feedback --> Backend
+    Platform --> Execution["DevOps Agents & Scheduler (execution lanes)"]
+    Execution -->|normal result| Outcome["Record and verify the outcome"]
+    Execution -->|fails| FailedInbox["Failed inbox"]
+    Outcome -->|verification fails| FailedInbox
+    FailedInbox --> Review
+    classDef inbox fill:#eef4ff,stroke:#456aab,color:#172b4d;
+    class RequestInbox,DeniedInbox,FailedInbox inbox;
+```
 
 ## 5. Core Domain Model
 
@@ -469,9 +584,11 @@ struct Job {
     supersedes_job_id: Option<JobId>,
     team_kind: TeamKind,              // develop | operate
     status: JobStatus,
-    work_order: WorkOrder,
     allowed_capabilities: Vec<String>,
     allowed_target_ids: Vec<ResourceId>,
+    feedback: Vec<HumanFeedback>,     // every human feedback item on the Issue so far
+    revises_job_id: Option<JobId>,    // the pass a human sent back, when this is a revision
+    review: Option<HumanReview>,      // a failed Job leaves the inbox through this
     result: Option<JobResult>,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -479,11 +596,15 @@ struct Job {
 }
 ```
 
+The Scheduler creates a Job from a `JobBrief` (team kind, scope, feedback,
+revised Job) — a constructor argument, not a layer: every field lands flat on
+the Job, and the problem statement lives in the View, not on the Job.
+
 Invariants:
 
 - `base_snapshot_id` and Snapshot View do not change during a Job.
 - New evidence that changes the reasoning base creates a new Snapshot and a
-  superseding Job.
+  superseding Job; human feedback creates a new Snapshot and a revising Job.
 - Progress, requests, options, and blockers are append-only events.
 - Final scheduler-relevant output is stored in `JobResult`.
 
@@ -501,6 +622,9 @@ struct ActionRun {
     arguments: Vec<NamedValue>,
     status: ActionStatus,
     approval: ApprovalState,
+    approved_by: Option<String>,      // the human, when a human approved
+    denial: Option<Denial>,           // source (policy | human), reason, comment
+    review: Option<HumanReview>,      // a denied or failed action leaves the inbox through this
     before_snapshot_id: SnapshotId,
     after_snapshot_id: Option<SnapshotId>,
     idempotency_key: String,
@@ -595,6 +719,23 @@ Before-action Snapshot
 
 The absence of an expected effect is a verification failure even when the
 underlying command returned exit code zero.
+
+### 6.4 Denial and failure feedback
+
+```text
+ActionRun denied (rule or human) | Job failed | ActionRun failed
+   -> inbox item, Issue parked at WaitingForHuman
+   -> human review: acknowledge, or send back upstream with comments
+   -> fresh Snapshot N+1
+   -> Snapshot View N+1 with the accumulated human_feedback
+   -> revising Job (revises_job_id = the reviewed pass)
+   -> Team runs with the feedback in front of it
+   -> new proposals through the authority matrix
+```
+
+The reviewed Job or ActionRun keeps the review, naming the revising Job, so
+the chain from a refusal to the pass that answered it is walkable in both
+directions.
 
 ## 7. Scheduling and Conflict Rules
 
@@ -719,11 +860,15 @@ The first vertical slice is implemented and exercised by the CLI and the
 4. Display a Snapshot and its coverage gaps (`cargo run -- snapshot`).
 5. Accept a Human Report and create its Issue, defaulting to `HumanTop`
    (`cargo run -- report`).
-6. Dispatch one read-only Operate Job based on an exact, hash-verified Snapshot
-   View built with the `operate-readonly-v1` redaction profile (`src/view.rs`,
-   `src/team.rs`).
+6. Dispatch one Operate Job based on an exact, hash-verified Snapshot View
+   built with the `operate-readonly-v1` redaction profile (`src/view.rs`),
+   through either the read-only or the harness Team backend (`src/team/`).
 7. Receive structured callbacks through the sink and persist the Job result.
-8. Restart the controller and recover Issue and Job state, with event
+8. Run proposals through the authority matrix into ActionRuns, execute them
+   through the Platform, verify them against an after-Snapshot, and route
+   denials and failures to the inbox, where a review can send them back
+   upstream as a revising Job (`src/runner.rs`, `src/api.rs`, the consoles).
+9. Restart the controller and recover Issue and Job state, with event
    sequencing continuing from the persisted log (`cargo run -- recover`).
 
 The slice proves the Snapshot, Scheduler, Team, and recovery boundaries without
@@ -735,7 +880,6 @@ The next slices are:
 
 - Hybrid Snapshot Judge and automatic Issue candidates.
 - Read-only troubleshooting with additional-probe/superseding-Job flow.
-- Approved Operate ActionRuns with before/after verification.
 - Develop worktrees, tests, options, artifacts, and conflict detection.
 - Bundle/WASM promotion and rollback.
 - Optional Team-internal parallel agents.

@@ -16,8 +16,8 @@ rows below are stricter than your operations actually need.
 | Value | Meaning in code |
 |---|---|
 | **auto** | `ApprovalState::NotRequired` — the Scheduler moves the ActionRun straight to `Ready`; still evented, still before/after-verified |
-| **approve** | `ApprovalState::Pending` — a named human must approve in the operator UI/CLI before execution |
-| **deny** | `ApprovalState::Rejected` — the Scheduler refuses the proposal; the Team gets the refusal as data |
+| **approve** | `ApprovalState::Pending` — the ActionRun waits in the Permission Request inbox; a named human approves or rejects (with a comment) before anything executes |
+| **deny** | `ApprovalState::Rejected` — the Scheduler refuses the proposal; the rationale stays on the ActionRun as its `denial`, and the item waits in the Permission Denied inbox, where a human can acknowledge it or send the reason back upstream to the Team as feedback |
 
 Operation modes are the ones already in the domain model:
 `rehearsal` (deployment and dry runs), `contest_locked` (a live contest), and

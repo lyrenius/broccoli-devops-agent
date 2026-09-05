@@ -5,14 +5,13 @@ use std::sync::Arc;
 
 use broccoli_devops_agent::domain::{
     ActionProposal, ActionRun, ActionStatus, ApprovalState, Artifact, ArtifactKind, Confidence,
-    HumanReport, Issue, IssueCandidate, IssuePriority, IssueStatus, Job, JobOutcome, JobResult,
-    JobStatus, NamedValue, NewEvent, OperationMode, PlatformOperationResult, Snapshot,
-    SnapshotCause, SnapshotViewRef, TeamCallback, TeamCallbackKind, TeamKind, WorkOrder,
+    HumanReport, Issue, IssueCandidate, IssuePriority, IssueStatus, Job, JobBrief, JobOutcome,
+    JobResult, JobStatus, NamedValue, NewEvent, OperationMode, PlatformOperationResult, Snapshot,
+    SnapshotCause, SnapshotViewRef, TeamCallback, TeamCallbackKind, TeamKind,
 };
 use broccoli_devops_agent::ports::{
     AgentTeamPort, CallbackAdviceRequest, CancelSignal, CaptureRequest, NextStep, NextStepDecision,
-    SchedulerPolicyPort, StateStore, TeamCallbackSink, TriageDecision, TriageRequest,
-    WorkOrderDraftRequest, cancel_pair,
+    SchedulerPolicyPort, StateStore, TeamCallbackSink, TriageDecision, TriageRequest, cancel_pair,
 };
 use broccoli_devops_agent::scheduler::{SchedulerMode, TopScheduler, TriageOutcome};
 use broccoli_devops_agent::store::memory::InMemoryStateStore;
@@ -89,10 +88,11 @@ async fn domain_objects_roundtrip_through_json() {
     let job = Job::new(
         issue.issue_id,
         view,
-        TeamKind::Operate,
-        WorkOrder::new("Analyze submission latency"),
-        vec!["machine.inspect".to_string()],
-        vec!["worker-1".to_string()],
+        JobBrief::new(
+            TeamKind::Operate,
+            vec!["machine.inspect".to_string()],
+            vec!["worker-1".to_string()],
+        ),
     );
     let action = ActionRun::from_proposal(
         issue.issue_id,
@@ -142,10 +142,7 @@ fn job_uses_superseding_job_for_a_new_snapshot() {
     let mut old_job = Job::new(
         issue.issue_id,
         old_view,
-        TeamKind::Operate,
-        WorkOrder::new("Investigate the old Snapshot"),
-        Vec::new(),
-        Vec::new(),
+        JobBrief::new(TeamKind::Operate, Vec::new(), Vec::new()),
     );
     old_job
         .transition_to(JobStatus::Running)
@@ -160,9 +157,11 @@ fn job_uses_superseding_job_for_a_new_snapshot() {
     let next = old_job
         .supersede_with(
             new_view,
-            WorkOrder::new("Continue investigation with the new Snapshot"),
-            vec!["machine.inspect".to_string()],
-            vec!["object-storage-1".to_string()],
+            JobBrief::new(
+                TeamKind::Operate,
+                vec!["machine.inspect".to_string()],
+                vec!["object-storage-1".to_string()],
+            ),
         )
         .expect("a Job waiting for a new Snapshot should be supersedable");
 
@@ -181,10 +180,7 @@ fn invalid_state_transitions_are_rejected() {
     let mut job = Job::new(
         issue.issue_id,
         view,
-        TeamKind::Operate,
-        WorkOrder::new("State transition test"),
-        Vec::new(),
-        Vec::new(),
+        JobBrief::new(TeamKind::Operate, Vec::new(), Vec::new()),
     );
     let mut action = ActionRun::from_proposal(
         issue.issue_id,
@@ -219,10 +215,7 @@ fn action_run_requires_execution_and_verification() {
     let job = Job::new(
         issue.issue_id,
         view,
-        TeamKind::Operate,
-        WorkOrder::new("Restart the Worker"),
-        Vec::new(),
-        Vec::new(),
+        JobBrief::new(TeamKind::Operate, Vec::new(), Vec::new()),
     );
     let mut action = ActionRun::from_proposal(
         issue.issue_id,
@@ -265,10 +258,7 @@ async fn memory_store_roundtrips_entities_and_rejects_bad_ids() {
     let job = Job::new(
         issue.issue_id,
         view,
-        TeamKind::Operate,
-        WorkOrder::new("Store test"),
-        Vec::new(),
-        Vec::new(),
+        JobBrief::new(TeamKind::Operate, Vec::new(), Vec::new()),
     );
     let action = ActionRun::from_proposal(
         issue.issue_id,
@@ -392,10 +382,11 @@ async fn scheduler_exposes_the_minimum_readable_flow() {
         .create_job(
             issue.issue_id,
             view.clone(),
-            TeamKind::Operate,
-            WorkOrder::new("Investigate the Worker fleet and queue"),
-            vec!["machine.inspect".to_string()],
-            vec!["worker-1".to_string()],
+            JobBrief::new(
+                TeamKind::Operate,
+                vec!["machine.inspect".to_string()],
+                vec!["worker-1".to_string()],
+            ),
         )
         .await
         .expect("a Job should be creatable while the Scheduler is running");
@@ -422,10 +413,7 @@ async fn scheduler_exposes_the_minimum_readable_flow() {
             .create_job(
                 issue.issue_id,
                 view,
-                TeamKind::Operate,
-                WorkOrder::new("This Job must not be created while frozen"),
-                Vec::new(),
-                Vec::new(),
+                JobBrief::new(TeamKind::Operate, Vec::new(), Vec::new()),
             )
             .await,
         Err(AgentError::SchedulerFrozen { .. })
@@ -566,10 +554,7 @@ async fn callback_for_terminal_job_is_rejected_without_orphan_event() {
         .create_job(
             issue.issue_id,
             view,
-            TeamKind::Operate,
-            WorkOrder::new("Investigate"),
-            Vec::new(),
-            Vec::new(),
+            JobBrief::new(TeamKind::Operate, Vec::new(), Vec::new()),
         )
         .await
         .unwrap();
@@ -614,10 +599,7 @@ async fn callbacks_update_the_owning_issue() {
         .create_job(
             issue.issue_id,
             view,
-            TeamKind::Operate,
-            WorkOrder::new("Investigate the frontend"),
-            Vec::new(),
-            Vec::new(),
+            JobBrief::new(TeamKind::Operate, Vec::new(), Vec::new()),
         )
         .await
         .unwrap();
@@ -734,13 +716,6 @@ async fn policy_triage_is_clamped_and_recorded() {
             })
         }
 
-        async fn draft_work_order(
-            &self,
-            request: &WorkOrderDraftRequest,
-        ) -> AgentResult<WorkOrder> {
-            Ok(WorkOrder::new(format!("Handle: {}", request.issue.title)))
-        }
-
         async fn advise_next_step(
             &self,
             _request: &CallbackAdviceRequest,
@@ -844,10 +819,7 @@ async fn team_port_streams_callbacks_and_honors_cancellation() {
     let job = Job::new(
         issue.issue_id,
         view,
-        TeamKind::Operate,
-        WorkOrder::new("Stream test"),
-        Vec::new(),
-        Vec::new(),
+        JobBrief::new(TeamKind::Operate, Vec::new(), Vec::new()),
     );
 
     let sink = CollectingSink::default();

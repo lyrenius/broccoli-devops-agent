@@ -34,7 +34,35 @@ export function Records({ tick }: { tick: number }) {
                   <span className="mono muted">job {job.job_id.slice(0, 8)}…</span> · {job.team_kind} ·{" "}
                   <span className="pill">{job.status}</span>
                   {job.result && <span className="pill">{job.result.outcome}</span>}
+                  {job.revises_job_id && <span className="pill">revises {job.revises_job_id.slice(0, 8)}…</span>}
+                  {job.review && (
+                    <span className="pill">
+                      reviewed by {job.review.reviewer}: {job.review.decision.decision === "sent_upstream" ? "sent upstream" : "acknowledged"}
+                    </span>
+                  )}
                 </div>
+                {job.feedback.length > 0 && (
+                  <ul className="feedback-list">
+                    {job.feedback.map((f) => (
+                      <li key={f.feedback_id}>
+                        <span className="tag tag-human">feedback from {f.reviewer}</span>{" "}
+                        {f.origin.kind === "denied_action" && (
+                          <>
+                            <span className="mono">{f.origin.runbook_id}</span> was denied: {f.origin.denial.reason}
+                            {f.origin.denial.comment && <> — {f.origin.denial.comment}</>}
+                          </>
+                        )}
+                        {f.origin.kind === "failed_action" && (
+                          <>
+                            <span className="mono">{f.origin.runbook_id}</span> failed: {f.origin.summary}
+                          </>
+                        )}
+                        {f.origin.kind === "failed_job" && <>the previous job failed: {f.origin.summary}</>}
+                        {f.comment && <> · "{f.comment}"</>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {job.result && (
                   <>
                     <p style={{ margin: "6px 0" }}>{job.result.summary}</p>

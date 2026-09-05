@@ -156,7 +156,7 @@ async fn matrix_drives_auto_approve_deny_and_rate_limit() {
     // Human approval runs the purge; the after Snapshot still shows Redis down, so the command's
     // exit code zero is not accepted as success.
     let purged = runner
-        .approve_action(actions[1].action_run_id)
+        .approve_action(actions[1].action_run_id, "op")
         .await
         .unwrap();
     assert_eq!(purged.approval, ApprovalState::Approved);
@@ -170,8 +170,15 @@ async fn matrix_drives_auto_approve_deny_and_rate_limit() {
     let again = runner.run_proposals(&job2).await.unwrap();
     assert_eq!(again.len(), 1);
     assert_eq!(again[0].status, ActionStatus::WaitingForApproval);
-    let rejected = runner.reject_action(again[0].action_run_id).await.unwrap();
+    let rejected = runner
+        .reject_action(again[0].action_run_id, "op", Some("once was enough".into()))
+        .await
+        .unwrap();
     assert_eq!(rejected.status, ActionStatus::Cancelled);
+    assert_eq!(
+        rejected.denial.as_ref().unwrap().comment.as_deref(),
+        Some("once was enough")
+    );
 
     let all = runner.list_actions().await.unwrap();
     assert_eq!(all.len(), 4);

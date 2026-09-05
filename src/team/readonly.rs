@@ -2,9 +2,10 @@
 //!
 //! This Team diagnoses from its Snapshot View alone: it verifies the View's content hash, reads
 //! the sanitized document, and reports unhealthy resources, threatened critical dependencies, and
-//! coverage gaps. It proposes no actions and touches no machine. The model-backed
-//! [`super::HarnessOperateTeam`] implements the same `AgentTeamPort`; nothing in the Scheduler
-//! changes between them.
+//! coverage gaps. It proposes no actions and touches no machine. Human feedback carried by the
+//! View is acknowledged in the diagnosis so a revision pass visibly took it into account. The
+//! model-backed [`super::HarnessOperateTeam`] implements the same `AgentTeamPort`; nothing in the
+//! Scheduler changes between them.
 
 use async_trait::async_trait;
 
@@ -90,6 +91,18 @@ impl AgentTeamPort for ReadOnlyOperateTeam {
         }
 
         let mut lines = Vec::new();
+        let feedback = view["human_feedback"].as_array().unwrap_or(&empty);
+        if !feedback.is_empty() {
+            lines.push(format!(
+                "Revision pass after {} human feedback item(s): {}",
+                feedback.len(),
+                feedback
+                    .iter()
+                    .filter_map(|item| item["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
         if unhealthy.is_empty() {
             lines.push("All probed resources report healthy.".to_string());
         } else {

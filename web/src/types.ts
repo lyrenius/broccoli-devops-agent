@@ -4,8 +4,15 @@ export interface Counts {
   issues: number;
   jobs: number;
   actions: number;
-  actions_waiting: number;
   events: number;
+}
+
+export interface InboxCounts {
+  permission_requests: number;
+  permission_denied: number;
+  failed_jobs: number;
+  failed_actions: number;
+  total: number;
 }
 
 export interface Status {
@@ -15,6 +22,7 @@ export interface Status {
   uptime_secs: number;
   deployment: { name: string; topology_revision: string; operation_mode: string };
   counts: Counts;
+  inbox: InboxCounts;
 }
 
 export interface Metric {
@@ -72,26 +80,80 @@ export interface JobResult {
   artifact_ids: string[];
 }
 
+export interface Denial {
+  source: "policy" | "human";
+  reason: string;
+  comment: string | null;
+  decided_by: string | null;
+  decided_at: string;
+}
+
+export type ReviewDecision = { decision: "acknowledged" } | { decision: "sent_upstream"; job_id: string };
+
+export interface HumanReview {
+  reviewer: string;
+  decision: ReviewDecision;
+  comment: string | null;
+  reviewed_at: string;
+}
+
+export type FeedbackOrigin =
+  | { kind: "denied_action"; action_run_id: string; runbook_id: string; target_ids: string[]; denial: Denial }
+  | { kind: "failed_action"; action_run_id: string; runbook_id: string; target_ids: string[]; summary: string }
+  | { kind: "failed_job"; job_id: string; summary: string };
+
+export interface HumanFeedback {
+  feedback_id: string;
+  origin: FeedbackOrigin;
+  reviewer: string;
+  comment: string | null;
+  recorded_at: string;
+}
+
 export interface Job {
   job_id: string;
   issue_id: string;
   team_kind: string;
   status: string;
   created_at: string;
+  feedback: HumanFeedback[];
+  revises_job_id: string | null;
+  review: HumanReview | null;
   result: JobResult | null;
 }
 
 export interface ActionRun {
   action_run_id: string;
   issue_id: string;
+  originating_job_id: string;
   runbook_id: string;
   target_ids: string[];
   reason: string;
   expected_effect: string;
   status: string;
   approval: string;
+  approved_by: string | null;
+  denial: Denial | null;
+  review: HumanReview | null;
   verification_summary: string | null;
   created_at: string;
+}
+
+export interface Inbox {
+  permission_requests: ActionRun[];
+  permission_denied: ActionRun[];
+  failed_jobs: Job[];
+  failed_actions: ActionRun[];
+}
+
+export interface Revision {
+  job: Job;
+  actions: ActionRun[];
+}
+
+export interface ReviewOutcome<T> {
+  reviewed: T;
+  revision: Revision | null;
 }
 
 export interface EventRecord {

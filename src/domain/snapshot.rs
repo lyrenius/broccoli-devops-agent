@@ -22,6 +22,8 @@ pub enum SnapshotCause {
     JudgeEvaluation,
     /// Snapshot captured immediately after a human reports a problem.
     HumanReport,
+    /// Snapshot captured when a human sends a denied or failed item back upstream for another pass.
+    HumanFeedback,
     /// Snapshot produced after an Agent Team requests additional evidence.
     AgentProbeRequest,
     /// Snapshot recorded before executing an ActionRun.

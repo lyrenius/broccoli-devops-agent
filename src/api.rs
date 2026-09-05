@@ -3,8 +3,10 @@
 //! The web console and the terminal UI are pure clients of this API; the control plane stays one
 //! process. Every route maps onto a runner or store operation that already exists, so the API adds
 //! no semantics of its own — it cannot approve an action the matrix denied, and it records nothing
-//! the CLI would not. It binds to localhost by default; an optional bearer token protects it when
-//! an operator chooses to bind wider.
+//! the CLI would not. The inbox route serves the three categories a human decides on (permission
+//! requests, permission denials, failures), and the review routes carry those decisions — with
+//! the human's name and comment — back into the runner. It binds to localhost by default; an
+//! optional bearer token protects it when an operator chooses to bind wider.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -27,7 +29,7 @@ use crate::config::AppConfig;
 use crate::domain::{HumanReport, IssuePriority, SnapshotCause};
 use crate::error::AgentError;
 use crate::ports::StateStore;
-use crate::runner::SliceRunner;
+use crate::runner::{InboxDecision, SliceRunner};
 
 /// Shared state behind every route.
 pub struct ApiState {
@@ -99,10 +101,13 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/snapshots/latest", get(latest_snapshot))
         .route("/api/issues", get(issues))
         .route("/api/jobs", get(jobs))
+        .route("/api/jobs/{id}/review", post(review_job))
         .route("/api/reports", post(report))
+        .route("/api/inbox", get(inbox))
         .route("/api/actions", get(actions))
         .route("/api/actions/{id}/approve", post(approve))
         .route("/api/actions/{id}/reject", post(reject))
+        .route("/api/actions/{id}/review", post(review_action))
         .route("/api/events", get(events))
         .route("/api/events/stream", get(events_stream))
         .route("/api/artifacts/{id}", get(artifact))
@@ -157,11 +162,7 @@ struct TokenQuery {
 
 async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
     let store = state.runner.store();
-    let actions = store.list_action_runs().await?;
-    let waiting = actions
-        .iter()
-        .filter(|a| a.status == crate::domain::ActionStatus::WaitingForApproval)
-        .count();
+    let inbox = state.runner.inbox().await?;
     Ok(Json(json!({
         "mode": state.runner.scheduler().mode().await,
         "team_backend": state.runner.team_label(),
@@ -171,9 +172,15 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
         "counts": {
             "issues": store.list_issues().await?.len(),
             "jobs": store.list_jobs().await?.len(),
-            "actions": actions.len(),
-            "actions_waiting": waiting,
+            "actions": store.list_action_runs().await?.len(),
             "events": store.list_events().await?.len(),
+        },
+        "inbox": {
+            "permission_requests": inbox.permission_requests.len(),
+            "permission_denied": inbox.permission_denied.len(),
+            "failed_jobs": inbox.failed_jobs.len(),
+            "failed_actions": inbox.failed_actions.len(),
+            "total": inbox.total(),
         },
     })))
 }
@@ -251,15 +258,102 @@ async fn actions(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
     )?))
 }
 
-async fn approve(State(state): State<Arc<ApiState>>, Path(id): Path<Uuid>) -> ApiResult<Value> {
+async fn inbox(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
+    Ok(Json(serde_json::to_value(state.runner.inbox().await?)?))
+}
+
+/// Who is deciding, and what they said. Both are optional on the wire: an unnamed decision is
+/// recorded as `console`, and a comment is only required by the UI, never by the API.
+#[derive(Debug, Default, Deserialize)]
+struct DecisionRequest {
+    #[serde(default, alias = "approver", alias = "reviewer")]
+    by: Option<String>,
+    #[serde(default)]
+    comment: Option<String>,
+}
+
+impl DecisionRequest {
+    fn who(&self) -> &str {
+        self.by
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("console")
+    }
+}
+
+async fn approve(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<DecisionRequest>>,
+) -> ApiResult<Value> {
+    let request = body.map(|Json(body)| body).unwrap_or_default();
     Ok(Json(serde_json::to_value(
-        state.runner.approve_action(id).await?,
+        state.runner.approve_action(id, request.who()).await?,
     )?))
 }
 
-async fn reject(State(state): State<Arc<ApiState>>, Path(id): Path<Uuid>) -> ApiResult<Value> {
+async fn reject(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<DecisionRequest>>,
+) -> ApiResult<Value> {
+    let request = body.map(|Json(body)| body).unwrap_or_default();
     Ok(Json(serde_json::to_value(
-        state.runner.reject_action(id).await?,
+        state
+            .runner
+            .reject_action(id, request.who(), request.comment.clone())
+            .await?,
+    )?))
+}
+
+/// A review of a denied or failed inbox item.
+#[derive(Debug, Deserialize)]
+struct ReviewRequest {
+    /// `acknowledge` or `send_upstream`.
+    decision: String,
+    #[serde(flatten)]
+    who: DecisionRequest,
+}
+
+impl ReviewRequest {
+    fn decision(&self) -> Result<InboxDecision, ApiError> {
+        match self.decision.as_str() {
+            "acknowledge" => Ok(InboxDecision::Acknowledge),
+            "send_upstream" => Ok(InboxDecision::SendUpstream),
+            other => Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("unknown decision `{other}`; use acknowledge or send_upstream"),
+            )),
+        }
+    }
+}
+
+async fn review_action(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ReviewRequest>,
+) -> ApiResult<Value> {
+    let decision = request.decision()?;
+    Ok(Json(serde_json::to_value(
+        state
+            .runner
+            .review_action(id, request.who.who(), decision, request.who.comment.clone())
+            .await?,
+    )?))
+}
+
+async fn review_job(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<ReviewRequest>,
+) -> ApiResult<Value> {
+    let decision = request.decision()?;
+    Ok(Json(serde_json::to_value(
+        state
+            .runner
+            .review_job(id, request.who.who(), decision, request.who.comment.clone())
+            .await?,
     )?))
 }
 
