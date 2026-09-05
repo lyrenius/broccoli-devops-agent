@@ -185,10 +185,19 @@ the topology file:
 | `tcp.connect` | reachability and latency of `host:port` | `probe.tcp.connect.latency`; `Degraded` above `degraded_above_ms` |
 | `http.status` | status code of a plain-HTTP `GET` | latency as above |
 | `redis.llen` | the length of one Redis list (queue backlog) over the plain protocol | the metric named by `metric` (default `queue.depth`); `Degraded` outside `[min, max]` |
-| `http.json` | one value at a JSON `pointer` in a plain-HTTP `GET` response (worker heartbeats, judging counters, mode) | the numeric value as a metric; `expect` for exact matches; `Degraded` outside `[min, max]` |
+| `http.json` | one value at a JSON `pointer` in a plain-HTTP `GET` response | the numeric value as a metric; `expect` for exact matches; `Degraded` outside `[min, max]` |
+| `broccoli.worker` | one worker's heartbeat from Broccoli's admin API (`/api/v1/admin/system/workers`, the admin dashboard's data), matched by `worker_id` (default: the resource ID) | `Healthy` on a live heartbeat, `Degraded` when stale, `Down` when absent; `worker.in_flight`, `worker.heartbeat_age`, `worker.max_concurrency`; version and host as fenced facts |
+| `broccoli.queue` | one MQ queue's depth from the admin overview (`/api/v1/admin/system/overview`) | `queue.depth` (or `metric`), plus `broccoli.submissions_in_progress` and `broccoli.dlq_unresolved`; `Degraded` outside `[min, max]` |
 
-"Reachable but backed up" is therefore a visible state, and verification can
-require a business postcondition (§6.3) rather than an open port.
+Four probes are unauthenticated reads. The two Broccoli probes need a login
+with `system:view`: the topology names the environment variable (`login_env`,
+default `BROCCOLI_PROBE_LOGIN`, value `username:password`) and the Collector
+logs in once per server, caching the JWT and re-logging in on a 401. A worker
+has no inbound port, so its heartbeat — written to Redis every 5 s and read by
+the server — is the only honest observation of it; without the probe it is
+`Unknown` with a coverage gap, never assumed healthy. "Reachable but backed
+up" is therefore a visible state, and verification can require a business
+postcondition (§6.3) rather than an open port.
 
 ### 4.2 AutoLog DB / Snapshot Store
 

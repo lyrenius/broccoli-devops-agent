@@ -246,3 +246,4 @@ pre.evidence {
 .tag.evidence-strong { color: var(--good); border-color: var(--good); margin-left: 6px; }
 .tag.evidence-weak { color: var(--warn); border-color: var(--warn); margin-left: 6px; }
 .tag.evidence-dry_run { color: var(--unknown); border-color: var(--unknown); margin-left: 6px; }
+td.signals { font-size: 12px; }

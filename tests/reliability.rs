@@ -1058,3 +1058,196 @@ async fn file_store_writes_are_atomic() {
     ));
     let _ = TopScheduler::new(Arc::new(reopened));
 }
+
+/// Finding 6, Broccoli probes: a worker is observed through the admin API's heartbeat list and
+/// a queue through the overview, logging in with credentials that never touch the topology.
+#[tokio::test]
+async fn broccoli_probes_read_heartbeats_and_queues() {
+    use broccoli_devops_agent::collector::DEFAULT_LOGIN_ENV;
+
+    // A fake Broccoli server: login issues a token; admin routes require it.
+    let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_port = api.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = api.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0_u8; 8192];
+                let read = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]).to_string();
+                let line = request.lines().next().unwrap_or("").to_string();
+                let authorized = request.contains("authorization: Bearer jwt-1")
+                    || request.contains("Authorization: Bearer jwt-1");
+                let (status, body) = if line.starts_with("POST /api/v1/auth/login") {
+                    if request.contains("\"username\":\"probe\"")
+                        && request.contains("\"password\":\"s3cret\"")
+                    {
+                        ("200 OK", r#"{"token":"jwt-1","id":1,"username":"probe","roles":["admin"],"permissions":["system:view"]}"#.to_string())
+                    } else {
+                        (
+                            "401 Unauthorized",
+                            r#"{"code":"INVALID_CREDENTIALS"}"#.to_string(),
+                        )
+                    }
+                } else if !authorized {
+                    (
+                        "401 Unauthorized",
+                        r#"{"code":"TOKEN_MISSING"}"#.to_string(),
+                    )
+                } else if line.starts_with("GET /api/v1/admin/system/workers") {
+                    ("200 OK", r#"{"workers":[
+                        {"id":"worker-1","started_at":"2026-09-05T00:00:00Z","last_seen":"2026-09-05T00:00:03Z","seconds_since_last_seen":3,"stale":false,"in_flight":2,"max_concurrency":4,"sandbox_backend":"isolate","version":"0.3.0","hostname":"judge-1"},
+                        {"id":"worker-2","started_at":"2026-09-05T00:00:00Z","last_seen":"2026-09-05T00:00:00Z","seconds_since_last_seen":12,"stale":true,"in_flight":0,"max_concurrency":4,"sandbox_backend":"isolate","version":"0.3.0","hostname":"judge-2"}
+                    ]}"#.to_string())
+                } else if line.starts_with("GET /api/v1/admin/system/overview") {
+                    ("200 OK", r#"{"workers":[],"queues":[{"name":"operation_tasks","depth":7,"breakdown":{"queued":5,"processing":2}}],"submissions_in_progress":2,"dlq_unresolved_count":1}"#.to_string())
+                } else {
+                    ("404 Not Found", "{}".to_string())
+                };
+                let _ = stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+
+    let base = format!("http://127.0.0.1:{api_port}");
+    let topology = DeploymentTopology {
+        deployment: DeploymentInfo {
+            id: Uuid::now_v7(),
+            name: "broccoli-probes".into(),
+            topology_revision: "t1".into(),
+            operation_mode: OperationMode::Rehearsal,
+        },
+        resources: vec![
+            TopologyResource {
+                id: "worker-1".into(),
+                kind: ResourceKind::Worker,
+                node: None,
+                probes: vec![ProbeSpec {
+                    url: Some(base.clone()),
+                    ..ProbeSpec::new("broccoli.worker")
+                }],
+            },
+            TopologyResource {
+                id: "worker-2".into(),
+                kind: ResourceKind::Worker,
+                node: None,
+                probes: vec![ProbeSpec {
+                    url: Some(base.clone()),
+                    ..ProbeSpec::new("broccoli.worker")
+                }],
+            },
+            TopologyResource {
+                id: "worker-3".into(),
+                kind: ResourceKind::Worker,
+                node: None,
+                probes: vec![ProbeSpec {
+                    url: Some(base.clone()),
+                    ..ProbeSpec::new("broccoli.worker")
+                }],
+            },
+            TopologyResource {
+                id: "redis-mq".into(),
+                kind: ResourceKind::Redis,
+                node: None,
+                probes: vec![ProbeSpec {
+                    url: Some(base.clone()),
+                    queue: Some("operation_tasks".into()),
+                    metric: Some("queue.depth".into()),
+                    max: Some(5.0),
+                    ..ProbeSpec::new("broccoli.queue")
+                }],
+            },
+        ],
+        dependencies: Vec::new(),
+    };
+    let capture = CaptureRequest {
+        deployment_id: topology.deployment.id,
+        topology_revision: "t1".into(),
+        cause: SnapshotCause::Manual,
+        operation_mode: OperationMode::Rehearsal,
+        parent_snapshot_id: None,
+        requested_probe_ids: Vec::new(),
+    };
+
+    // Without the login, every Broccoli probe fails with the variable's name, never a panic.
+    let store = Arc::new(broccoli_devops_agent::store::memory::InMemoryStateStore::new());
+    let blind = TopologyCollector::new(topology.clone(), store.clone());
+    let snapshot = blind.capture_snapshot(capture.clone()).await.unwrap();
+    let worker = snapshot
+        .resources
+        .iter()
+        .find(|r| r.resource_id == "worker-1")
+        .unwrap();
+    assert_eq!(worker.health, HealthState::Down);
+    assert!(
+        worker
+            .facts
+            .iter()
+            .any(|f| f.name == "probe.broccoli.worker" && f.value.contains(DEFAULT_LOGIN_ENV))
+    );
+
+    let collector = TopologyCollector::new(topology.clone(), store)
+        .with_secret(DEFAULT_LOGIN_ENV, "probe:s3cret");
+    let snapshot = collector.capture_snapshot(capture).await.unwrap();
+    let state = |id: &str| {
+        snapshot
+            .resources
+            .iter()
+            .find(|r| r.resource_id == id)
+            .unwrap()
+            .clone()
+    };
+    let live = state("worker-1");
+    assert_eq!(live.health, HealthState::Healthy);
+    assert_eq!(
+        live.metrics
+            .iter()
+            .find(|m| m.name == "worker.in_flight")
+            .unwrap()
+            .value,
+        2.0
+    );
+    assert!(
+        live.facts
+            .iter()
+            .any(|f| f.name == "probe.broccoli.worker.hostname" && f.value == "judge-1")
+    );
+    assert_eq!(
+        state("worker-2").health,
+        HealthState::Degraded,
+        "stale heartbeat"
+    );
+    assert_eq!(
+        state("worker-3").health,
+        HealthState::Down,
+        "no heartbeat at all"
+    );
+
+    let queue = state("redis-mq");
+    assert_eq!(queue.health, HealthState::Degraded, "depth 7 > max 5");
+    assert_eq!(
+        queue
+            .metrics
+            .iter()
+            .find(|m| m.name == "queue.depth")
+            .unwrap()
+            .value,
+        7.0
+    );
+    assert!(
+        queue
+            .metrics
+            .iter()
+            .any(|m| m.name == "broccoli.dlq_unresolved" && m.value == 1.0)
+    );
+}

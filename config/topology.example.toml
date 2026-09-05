@@ -117,7 +117,23 @@ critical = false
 # kind = "broccoli_server"
 # probes = [
 #   { probe = "http.status", url = "http://10.0.0.12:3000/healthz", degraded_above_ms = 300 },
-#   # worker heartbeats and judging counters from Broccoli's own API, one value per probe
-#   { probe = "http.json", url = "http://10.0.0.12:3000/api/status", pointer = "/workers/online", metric = "workers.online", min = 2 },
-#   { probe = "http.json", url = "http://10.0.0.12:3000/api/status", pointer = "/mode", expect = "contest" },
+#   # any counter an unauthenticated JSON endpoint exposes, one value per probe
+#   { probe = "http.json", url = "http://10.0.0.12:3000/api/v1/health", pointer = "/status", expect = "ok" },
+# ]
+#
+# Broccoli's admin API (worker heartbeats, MQ queue depths) needs a login with system:view.
+# The probes read `username:password` from the BROCCOLI_PROBE_LOGIN environment variable
+# (or the variable named by `login_env`), never from this file:
+#
+# [[resources]]
+# id = "worker-1"
+# kind = "worker"
+# probes = [{ probe = "broccoli.worker", url = "http://10.0.0.12:3000" }]   # worker_id defaults to the resource id
+#
+# [[resources]]
+# id = "redis-mq"
+# kind = "redis"
+# probes = [
+#   { probe = "tcp.connect", target = "10.0.0.11:6379" },
+#   { probe = "broccoli.queue", url = "http://10.0.0.12:3000", queue = "operation_tasks", metric = "queue.depth", max = 200 },
 # ]

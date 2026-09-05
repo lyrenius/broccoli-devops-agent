@@ -32,14 +32,20 @@ pub struct DeploymentInfo {
 /// never errors, so a stale topology degrades visibly instead of failing collection.
 ///
 /// Reachability probes (`tcp.connect`, `http.status`) take a `target` or `url` and an optional
-/// `degraded_above_ms` latency threshold. Business probes read one number from the deployment:
-/// `redis.llen` (queue backlog of `key`) and `http.json` (a JSON `pointer` in a GET response,
-/// for worker heartbeats, judging results, or any other counter Broccoli's API exposes). Both
-/// publish the number as the metric named by `metric` and judge health with `min`, `max`, or
-/// `expect`.
+/// `degraded_above_ms` latency threshold. Generic business probes read one number from the
+/// deployment: `redis.llen` (queue backlog of `key`) and `http.json` (a JSON `pointer` in a GET
+/// response). Broccoli probes read the server's own admin API: `broccoli.worker` (the worker's
+/// heartbeat, in-flight count, and version, matched by `worker_id`) and `broccoli.queue` (the
+/// depth of one MQ `queue`). All of them publish numbers as the metric named by `metric` and
+/// judge health with `min`, `max`, or `expect`.
+///
+/// The Broccoli admin API needs a login with `system:view`. The topology never holds it: the
+/// probe names the environment variable (`login_env`, default `BROCCOLI_PROBE_LOGIN`) whose value
+/// is `username:password`, or `token_env` for a ready bearer token.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeSpec {
-    /// Registered probe ID, such as `tcp.connect`, `http.status`, `redis.llen`, or `http.json`.
+    /// Registered probe ID, such as `tcp.connect`, `http.status`, `redis.llen`, `http.json`,
+    /// `broccoli.worker`, or `broccoli.queue`.
     pub probe: String,
     /// `host:port` target for socket-level probes.
     #[serde(default)]
@@ -68,6 +74,18 @@ pub struct ProbeSpec {
     /// Exact expected value (string comparison) for `http.json`.
     #[serde(default)]
     pub expect: Option<String>,
+    /// Worker ID to look for in Broccoli's worker list; defaults to the resource ID.
+    #[serde(default)]
+    pub worker_id: Option<String>,
+    /// MQ queue name for `broccoli.queue`, e.g. `operation_tasks`.
+    #[serde(default)]
+    pub queue: Option<String>,
+    /// Environment variable holding `username:password` for the Broccoli API probes.
+    #[serde(default)]
+    pub login_env: Option<String>,
+    /// Environment variable holding a ready bearer token for the Broccoli API probes.
+    #[serde(default)]
+    pub token_env: Option<String>,
 }
 
 impl ProbeSpec {
@@ -84,6 +102,10 @@ impl ProbeSpec {
             min: None,
             max: None,
             expect: None,
+            worker_id: None,
+            queue: None,
+            login_env: None,
+            token_env: None,
         }
     }
 }

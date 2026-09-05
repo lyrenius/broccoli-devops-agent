@@ -192,6 +192,8 @@ pub struct ResourceRow {
     pub kind: String,
     /// Health state.
     pub health: String,
+    /// Business metrics (everything but probe latencies), rendered as `name value`.
+    pub signals: String,
 }
 
 /// HTTP client bound to one API base URL and optional token.
@@ -284,6 +286,25 @@ impl ApiClient {
                         id: r["resource_id"].as_str().unwrap_or("?").to_string(),
                         kind: r["kind"].as_str().unwrap_or("?").to_string(),
                         health: r["health"].as_str().unwrap_or("?").to_string(),
+                        signals: r["metrics"]
+                            .as_array()
+                            .map(|metrics| {
+                                metrics
+                                    .iter()
+                                    .filter(|m| {
+                                        !m["name"].as_str().unwrap_or("").starts_with("probe.")
+                                    })
+                                    .map(|m| {
+                                        format!(
+                                            "{} {}",
+                                            m["name"].as_str().unwrap_or("?"),
+                                            m["value"].as_f64().unwrap_or(0.0)
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" · ")
+                            })
+                            .unwrap_or_default(),
                     })
                     .collect()
             })

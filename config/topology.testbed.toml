@@ -1,0 +1,115 @@
+# Deployment topology for the OrbStack testbed (testbed/README.md).
+#
+# Three machines stand in for the contest LAN, each with its own Docker engine:
+#   infra-1   PostgreSQL, Redis, SeaweedFS
+#   app-1     broccoli-server, which also serves the built frontend
+#   judge-1   one judge worker
+#
+# Every probe address is a machine DNS name, so the control plane on the Mac reaches the
+# services the same way app-1 and judge-1 reach each other -- over the network, not through
+# a localhost port forward. This file contains no credentials: reachability probes never
+# authenticate, and the Broccoli API probes (worker heartbeats, queue depths) log in with the
+# `username:password` found in the BROCCOLI_PROBE_LOGIN environment variable -- for the
+# testbed, `$ADMIN_USER:$ADMIN_PASSWORD` from testbed/lib.sh.
+
+[deployment]
+id = "fcd45aeb-d563-477c-adb8-f53bed308793"
+name = "broccoli-testbed"
+topology_revision = "orbstack-testbed-1"
+operation_mode = "rehearsal"
+
+[[resources]]
+id = "postgres-main"
+kind = "postgresql"
+node = "infra-1"
+probes = [{ probe = "tcp.connect", target = "infra-1.orb.local:5432" }]
+
+# Redis requires a password on the testbed, so the queue backlog is read through Broccoli's
+# own overview API rather than the Redis protocol; `queue.depth` is what a purge is verified
+# against.
+[[resources]]
+id = "redis-mq"
+kind = "redis"
+node = "infra-1"
+probes = [
+    { probe = "tcp.connect", target = "infra-1.orb.local:6379" },
+    { probe = "broccoli.queue", url = "http://app-1.orb.local:3000", queue = "operation_tasks", metric = "queue.depth", max = 100 },
+]
+
+# The master answers a plain GET with 200; the S3 gateway answers "/" with 403, which the
+# collector would read as unhealthy, so that port is checked for reachability only.
+[[resources]]
+id = "seaweedfs-storage"
+kind = "object_storage"
+node = "infra-1"
+probes = [
+    { probe = "http.status", url = "http://infra-1.orb.local:9333/" },
+    { probe = "tcp.connect", target = "infra-1.orb.local:8333" },
+]
+
+[[resources]]
+id = "broccoli-server"
+kind = "broccoli_server"
+node = "app-1"
+probes = [{ probe = "http.status", url = "http://app-1.orb.local:3000/healthz" }]
+
+# Served by the same process as broccoli-server, but modelled separately because the
+# authority matrix rates a frontend restart (row 5) differently from a server restart
+# (row 4). The probe fetches the SPA entry point rather than the health endpoint.
+[[resources]]
+id = "web-frontend"
+kind = "frontend"
+node = "app-1"
+probes = [{ probe = "http.status", url = "http://app-1.orb.local:3000/" }]
+
+# The worker has no inbound port: it consumes from Redis and writes to PostgreSQL and the
+# blob store. It is observed through the heartbeat it writes, read from Broccoli's admin API
+# (the same data the admin dashboard shows): a live heartbeat is Healthy, a stale one
+# Degraded, none Down. Its in-flight count and heartbeat age become metrics.
+[[resources]]
+id = "worker-1"
+kind = "worker"
+node = "judge-1"
+probes = [{ probe = "broccoli.worker", url = "http://app-1.orb.local:3000" }]
+
+[[dependencies]]
+from = "broccoli-server"
+to = "postgres-main"
+relation = "sql"
+critical = true
+
+[[dependencies]]
+from = "broccoli-server"
+to = "redis-mq"
+relation = "redis_mq"
+critical = true
+
+[[dependencies]]
+from = "broccoli-server"
+to = "seaweedfs-storage"
+relation = "s3_blob"
+critical = true
+
+[[dependencies]]
+from = "web-frontend"
+to = "broccoli-server"
+relation = "rest_api"
+critical = true
+
+[[dependencies]]
+from = "worker-1"
+to = "redis-mq"
+relation = "redis_mq"
+critical = true
+
+[[dependencies]]
+from = "worker-1"
+to = "postgres-main"
+relation = "sql"
+critical = true
+
+[[dependencies]]
+from = "worker-1"
+to = "seaweedfs-storage"
+relation = "s3_blob"
+critical = true

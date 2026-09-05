@@ -1,28 +1,36 @@
 //! Topology-driven Collector: probes real endpoints and builds immutable Snapshots.
 //!
-//! The Probe Registry contains four read-only probes:
+//! The Probe Registry contains six read-only probes:
 //!
 //! - `tcp.connect` — opens a TCP connection to `host:port` and reports latency.
 //! - `http.status` — issues a minimal plain-HTTP `GET` and reports the status code. HTTPS is out
-//!   of scope and is recorded as a coverage gap, not silently skipped.
+//!   of scope for this probe and is recorded as a coverage gap, not silently skipped.
 //! - `redis.llen` — reads one list length over the plain Redis protocol (queue backlog).
-//! - `http.json` — reads one value at a JSON pointer from a plain-HTTP `GET` (worker heartbeats,
-//!   judging counters — whatever the deployment's API exposes).
+//! - `http.json` — reads one value at a JSON pointer from a plain-HTTP `GET`.
+//! - `broccoli.worker` — reads one worker's heartbeat from Broccoli's admin API: a worker has no
+//!   inbound port, so this is the only honest way to see it. Live heartbeat is `Healthy`, a
+//!   stale one `Degraded`, none `Down`; in-flight count and heartbeat age become metrics.
+//! - `broccoli.queue` — reads one MQ queue's depth from the same API's overview.
 //!
-//! All four are unauthenticated reads: no credentials, no mutation, no shell. Latency
-//! thresholds and value ranges in the probe spec turn a number into `Degraded` or `Down`, so
-//! "reachable but backed up" is visible and verifiable, not just "port open". A resource with no
-//! runnable probes is `Unknown` with an explicit coverage gap — the design treats "we cannot see
-//! it" as a first-class fact, never as healthy.
+//! The first four are unauthenticated reads. The Broccoli probes log in with credentials taken
+//! from the environment variable the probe names — never from the topology file — and cache the
+//! JWT per server, re-logging in once on a 401. No probe mutates anything or runs a shell.
+//! Latency thresholds and value ranges in the probe spec turn a number into `Degraded` or
+//! `Down`, so "reachable but backed up" is visible and verifiable, not just "port open". A
+//! resource with no runnable probes is `Unknown` with an explicit coverage gap — the design
+//! treats "we cannot see it" as a first-class fact, never as healthy.
+
+use std::collections::HashMap;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 use crate::domain::{
     ContentTrust, CoverageGap, HealthState, Metric, NamedValue, NewEvent, ResourceState, Snapshot,
@@ -39,13 +47,28 @@ pub const PROBE_HTTP_STATUS: &str = "http.status";
 pub const PROBE_REDIS_LLEN: &str = "redis.llen";
 /// Reads one JSON value from a plain-HTTP GET response.
 pub const PROBE_HTTP_JSON: &str = "http.json";
+/// Reads one worker's heartbeat from Broccoli's admin API.
+pub const PROBE_BROCCOLI_WORKER: &str = "broccoli.worker";
+/// Reads one MQ queue's depth from Broccoli's admin API.
+pub const PROBE_BROCCOLI_QUEUE: &str = "broccoli.queue";
 /// Every registered probe ID.
-pub const PROBE_REGISTRY: [&str; 4] = [
+pub const PROBE_REGISTRY: [&str; 6] = [
     PROBE_TCP_CONNECT,
     PROBE_HTTP_STATUS,
     PROBE_REDIS_LLEN,
     PROBE_HTTP_JSON,
+    PROBE_BROCCOLI_WORKER,
+    PROBE_BROCCOLI_QUEUE,
 ];
+/// Environment variable the Broccoli probes read `username:password` from unless a probe names
+/// another one.
+pub const DEFAULT_LOGIN_ENV: &str = "BROCCOLI_PROBE_LOGIN";
+/// Broccoli's login endpoint, relative to the server base URL.
+const BROCCOLI_LOGIN_PATH: &str = "/api/v1/auth/login";
+/// Broccoli's worker list, relative to the server base URL; needs `system:view`.
+const BROCCOLI_WORKERS_PATH: &str = "/api/v1/admin/system/workers";
+/// Broccoli's system overview (workers, queues, in-progress counts); needs `system:view`.
+const BROCCOLI_OVERVIEW_PATH: &str = "/api/v1/admin/system/overview";
 
 /// Result of running one probe against one resource.
 #[derive(Debug, Clone)]
@@ -55,8 +78,11 @@ struct ProbeOutcome {
     /// The probe answered, but outside its healthy range or latency threshold.
     degraded: bool,
     latency_ms: f64,
-    /// Business value the probe read, published as a metric.
-    value: Option<(String, f64, &'static str)>,
+    /// Business values the probe read, published as metrics.
+    values: Vec<(String, f64, &'static str)>,
+    /// Extra facts the probe read (remote text: published under the `probe.` prefix so the View
+    /// fences them as untrusted data).
+    facts: Vec<(String, String)>,
     /// Short, structured detail. Anything echoed from the remote side is untrusted.
     detail: String,
 }
@@ -68,7 +94,8 @@ impl ProbeOutcome {
             succeeded,
             degraded: false,
             latency_ms,
-            value: None,
+            values: Vec::new(),
+            facts: Vec::new(),
             detail,
         }
     }
@@ -97,7 +124,7 @@ impl ProbeOutcome {
         default: &str,
     ) -> Self {
         let name = spec.metric.clone().unwrap_or_else(|| default.to_string());
-        self.value = Some((name.clone(), value, unit));
+        self.values.push((name.clone(), value, unit));
         let below = spec.min.is_some_and(|min| value < min);
         let above = spec.max.is_some_and(|max| value > max);
         if below || above {
@@ -117,20 +144,142 @@ pub struct TopologyCollector {
     topology: DeploymentTopology,
     store: Arc<dyn StateStore>,
     timeout: Duration,
+    /// Secrets the Broccoli probes need, keyed by the environment variable name that supplied
+    /// them. Read once at construction; never written anywhere.
+    secrets: HashMap<String, String>,
+    http: reqwest::Client,
+    /// Cached bearer tokens per server base URL.
+    tokens: Mutex<HashMap<String, String>>,
 }
 
 impl TopologyCollector {
     /// Creates a Collector over the given topology, writing probe evidence to the store.
+    ///
+    /// Every environment variable the topology's Broccoli probes name (and the default
+    /// `BROCCOLI_PROBE_LOGIN`) is read now, so a missing credential shows up as a probe failure
+    /// with the variable's name rather than as a mystery later.
     pub fn new(topology: DeploymentTopology, store: Arc<dyn StateStore>) -> Self {
+        let timeout = Duration::from_secs(3);
+        let mut secrets = HashMap::new();
+        let names = topology
+            .resources
+            .iter()
+            .flat_map(|resource| resource.probes.iter())
+            .flat_map(|spec| [spec.login_env.clone(), spec.token_env.clone()])
+            .flatten()
+            .chain(std::iter::once(DEFAULT_LOGIN_ENV.to_string()));
+        for name in names {
+            if let Ok(value) = std::env::var(&name) {
+                secrets.insert(name, value);
+            }
+        }
         Self {
             topology,
             store,
-            timeout: Duration::from_secs(3),
+            timeout,
+            secrets,
+            http: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            tokens: Mutex::new(HashMap::new()),
         }
     }
 
+    /// Supplies a secret as if the named environment variable held it (tests, embedding).
+    pub fn with_secret(mut self, env_name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.secrets.insert(env_name.into(), value.into());
+        self
+    }
+
+    /// Returns a bearer token for the server, logging in with the probe's credentials when
+    /// none is cached (or when `refresh` says the cached one was rejected).
+    async fn session_token(
+        &self,
+        base: &str,
+        spec: &ProbeSpec,
+        refresh: bool,
+    ) -> Result<String, String> {
+        if let Some(token_env) = &spec.token_env {
+            return self.secrets.get(token_env).cloned().ok_or_else(|| {
+                format!(
+                    "set environment variable `{token_env}` to a Broccoli API token with \
+                     system:view"
+                )
+            });
+        }
+        if !refresh && let Some(token) = self.tokens.lock().await.get(base) {
+            return Ok(token.clone());
+        }
+        let login_env = spec.login_env.as_deref().unwrap_or(DEFAULT_LOGIN_ENV);
+        let login = self.secrets.get(login_env).ok_or_else(|| {
+            format!(
+                "set environment variable `{login_env}` to `username:password` of a Broccoli \
+                 account with system:view"
+            )
+        })?;
+        let (username, password) = login
+            .split_once(':')
+            .ok_or_else(|| format!("`{login_env}` must be `username:password`"))?;
+        let response = self
+            .http
+            .post(format!("{base}{BROCCOLI_LOGIN_PATH}"))
+            .json(&json!({ "username": username, "password": password }))
+            .send()
+            .await
+            .map_err(|error| format!("login request failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("login as `{username}` failed: HTTP {status}"));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("login response is not JSON: {error}"))?;
+        let token = body["token"]
+            .as_str()
+            .ok_or_else(|| "login response has no `token`".to_string())?
+            .to_string();
+        self.tokens
+            .lock()
+            .await
+            .insert(base.to_string(), token.clone());
+        Ok(token)
+    }
+
+    /// Reads one JSON document from Broccoli's API, re-logging in once on a rejected token.
+    async fn broccoli_get(&self, url: &str, path: &str, spec: &ProbeSpec) -> Result<Value, String> {
+        let base = url.trim_end_matches('/');
+        let mut token = self.session_token(base, spec, false).await?;
+        for attempt in 0..2 {
+            let response = self
+                .http
+                .get(format!("{base}{path}"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|error| format!("request to {base}{path} failed: {error}"))?;
+            let status = response.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                && attempt == 0
+                && spec.token_env.is_none()
+            {
+                token = self.session_token(base, spec, true).await?;
+                continue;
+            }
+            if !status.is_success() {
+                return Err(format!("HTTP {status} from {base}{path}"));
+            }
+            return response
+                .json()
+                .await
+                .map_err(|error| format!("response from {base}{path} is not JSON: {error}"));
+        }
+        Err("token rejected twice".to_string())
+    }
+
     /// Runs one probe spec and classifies the outcome; never panics on bad specs.
-    async fn run_probe(&self, spec: &ProbeSpec) -> Result<ProbeOutcome, String> {
+    async fn run_probe(&self, resource_id: &str, spec: &ProbeSpec) -> Result<ProbeOutcome, String> {
         let started = std::time::Instant::now();
         let elapsed = || started.elapsed().as_secs_f64() * 1000.0;
         match spec.probe.as_str() {
@@ -273,6 +422,146 @@ impl TopologyCollector {
                 }
                 Ok(outcome)
             }
+            PROBE_BROCCOLI_WORKER => {
+                let url = spec.url.as_deref().ok_or_else(|| {
+                    "broccoli.worker requires `url = \"http://server:port\"`".to_string()
+                })?;
+                let worker_id = spec
+                    .worker_id
+                    .clone()
+                    .unwrap_or_else(|| resource_id.to_string());
+                let document = match self.broccoli_get(url, BROCCOLI_WORKERS_PATH, spec).await {
+                    Ok(document) => document,
+                    Err(error) => {
+                        return Ok(ProbeOutcome::new(
+                            &spec.probe,
+                            false,
+                            elapsed(),
+                            format!("workers API: {error}"),
+                        ));
+                    }
+                };
+                let Some(worker) = document["workers"].as_array().and_then(|workers| {
+                    workers
+                        .iter()
+                        .find(|worker| worker["id"].as_str() == Some(worker_id.as_str()))
+                }) else {
+                    return Ok(ProbeOutcome::new(
+                        &spec.probe,
+                        false,
+                        elapsed(),
+                        format!("no heartbeat from `{worker_id}` in the last 15 s"),
+                    ));
+                };
+                let stale = worker["stale"].as_bool().unwrap_or(true);
+                let age = worker["seconds_since_last_seen"]
+                    .as_f64()
+                    .unwrap_or(f64::NAN);
+                let in_flight = worker["in_flight"].as_f64().unwrap_or(0.0);
+                let text = |key: &str| worker[key].as_str().unwrap_or("?").to_string();
+                let mut outcome = ProbeOutcome::new(
+                    &spec.probe,
+                    true,
+                    elapsed(),
+                    format!(
+                        "heartbeat {age:.0} s ago, {in_flight} in flight, version {}, {} on {}",
+                        text("version"),
+                        text("sandbox_backend"),
+                        text("hostname")
+                    ),
+                );
+                if stale {
+                    outcome.degraded = true;
+                    outcome.detail.push_str(" (stale)");
+                }
+                outcome
+                    .values
+                    .push(("worker.in_flight".to_string(), in_flight, "tasks"));
+                outcome
+                    .values
+                    .push(("worker.heartbeat_age".to_string(), age, "s"));
+                if let Some(max) = worker["max_concurrency"].as_f64() {
+                    outcome
+                        .values
+                        .push(("worker.max_concurrency".to_string(), max, "tasks"));
+                }
+                for key in ["version", "hostname", "sandbox_backend", "os", "arch"] {
+                    if let Some(value) = worker[key].as_str() {
+                        outcome
+                            .facts
+                            .push((format!("probe.broccoli.worker.{key}"), value.to_string()));
+                    }
+                }
+                Ok(outcome)
+            }
+            PROBE_BROCCOLI_QUEUE => {
+                let url = spec.url.as_deref().ok_or_else(|| {
+                    "broccoli.queue requires `url = \"http://server:port\"`".to_string()
+                })?;
+                let queue = spec.queue.as_deref().ok_or_else(|| {
+                    "broccoli.queue requires `queue = \"<queue name>\"`".to_string()
+                })?;
+                let document = match self.broccoli_get(url, BROCCOLI_OVERVIEW_PATH, spec).await {
+                    Ok(document) => document,
+                    Err(error) => {
+                        return Ok(ProbeOutcome::new(
+                            &spec.probe,
+                            false,
+                            elapsed(),
+                            format!("overview API: {error}"),
+                        ));
+                    }
+                };
+                let queues = document["queues"].as_array().cloned().unwrap_or_default();
+                let Some(entry) = queues
+                    .iter()
+                    .find(|entry| entry["name"].as_str() == Some(queue))
+                else {
+                    let known: Vec<_> = queues
+                        .iter()
+                        .filter_map(|entry| entry["name"].as_str())
+                        .collect();
+                    return Ok(ProbeOutcome::new(
+                        &spec.probe,
+                        false,
+                        elapsed(),
+                        format!(
+                            "queue `{queue}` is not in the overview (known: {})",
+                            known.join(", ")
+                        ),
+                    ));
+                };
+                let depth = entry["depth"].as_f64().unwrap_or(0.0);
+                let breakdown = entry["breakdown"]
+                    .as_object()
+                    .map(|map| {
+                        map.iter()
+                            .map(|(state, count)| format!("{state}={count}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let mut outcome = ProbeOutcome::new(
+                    &spec.probe,
+                    true,
+                    elapsed(),
+                    format!("queue {queue} depth {depth} ({breakdown})"),
+                )
+                .with_value(spec, depth, "messages", "queue.depth");
+                if let Some(count) = document["submissions_in_progress"].as_f64() {
+                    outcome.values.push((
+                        "broccoli.submissions_in_progress".to_string(),
+                        count,
+                        "submissions",
+                    ));
+                }
+                if let Some(count) = document["dlq_unresolved_count"].as_f64() {
+                    outcome
+                        .values
+                        .push(("broccoli.dlq_unresolved".to_string(), count, "messages"));
+                }
+                Ok(outcome)
+            }
             other => Err(format!("probe `{other}` is not in the Probe Registry")),
         }
     }
@@ -286,7 +575,7 @@ impl TopologyCollector {
         let mut gaps = Vec::new();
 
         for spec in &resource.probes {
-            match self.run_probe(spec).await {
+            match self.run_probe(&resource.id, spec).await {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(reason) => gaps.push(CoverageGap {
                     resource_id: resource.id.clone(),
@@ -339,10 +628,15 @@ impl TopologyCollector {
                 "ms",
                 0,
             ));
-            if let Some((name, value, unit)) = &outcome.value {
+            for (name, value, unit) in &outcome.values {
                 state
                     .metrics
                     .push(Metric::new(name.clone(), *value, *unit, 0));
+            }
+            for (name, value) in &outcome.facts {
+                state
+                    .facts
+                    .push(NamedValue::new(name.clone(), value.clone()));
             }
         }
 
@@ -366,9 +660,9 @@ impl TopologyCollector {
                             "succeeded": o.succeeded,
                             "degraded": o.degraded,
                             "latency_ms": o.latency_ms,
-                            "value": o.value.as_ref().map(|(name, value, unit)| json!({
+                            "values": o.values.iter().map(|(name, value, unit)| json!({
                                 "metric": name, "value": value, "unit": unit,
-                            })),
+                            })).collect::<Vec<_>>(),
                             "detail": o.detail,
                         }))
                         .collect::<Vec<_>>(),

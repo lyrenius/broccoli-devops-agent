@@ -64,18 +64,25 @@ export function Overview({ tick, onChanged }: { tick: number; onChanged: () => v
                 <th>Resource</th>
                 <th>Kind</th>
                 <th>Health</th>
+                <th>Signals</th>
                 <th className="num">Latency</th>
               </tr>
             </thead>
             <tbody>
               {snapshot.resources.map((r) => {
                 const latency = r.metrics.find((m) => m.name.endsWith(".latency"));
+                const signals = r.metrics.filter((m) => !m.name.startsWith("probe."));
                 return (
                   <tr key={r.resource_id}>
                     <td className="mono">{r.resource_id}</td>
                     <td className="muted">{r.kind}</td>
                     <td>
                       <span className={`health ${tone(r.health)}`}>{r.health}</span>
+                    </td>
+                    <td className="muted mono signals">
+                      {signals.length === 0
+                        ? "—"
+                        : signals.map((m) => `${m.name} ${Number.isInteger(m.value) ? m.value : m.value.toFixed(1)}${m.unit === "s" ? "s" : ""}`).join(" · ")}
                     </td>
                     <td className="num">{latency ? `${latency.value.toFixed(0)} ms` : "—"}</td>
                   </tr>

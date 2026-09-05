@@ -160,19 +160,24 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
                         .fg(tone(&r.health))
                         .add_modifier(Modifier::BOLD),
                 )),
+                Cell::from(Span::styled(
+                    r.signals.clone(),
+                    Style::default().fg(Color::DarkGray),
+                )),
             ])
         })
         .collect();
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(45),
-            Constraint::Percentage(30),
-            Constraint::Percentage(25),
+            Constraint::Percentage(28),
+            Constraint::Percentage(16),
+            Constraint::Percentage(14),
+            Constraint::Percentage(42),
         ],
     )
     .header(
-        Row::new(vec!["resource", "kind", "health"])
+        Row::new(vec!["resource", "kind", "health", "signals"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().borders(Borders::ALL).title(format!(
