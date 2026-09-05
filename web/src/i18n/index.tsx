@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { en, type Key } from "./en";
-import { zhCN, zhStatus } from "./zh-CN";
+import { en, enKind, type Key } from "./en";
+import { zhCN, zhKind, zhStatus } from "./zh-CN";
 
 export type Locale = "en" | "zh-CN";
 export const LOCALES: Locale[] = ["en", "zh-CN"];
@@ -82,6 +82,8 @@ export function useT() {
     const t = (key: Key, params?: Params) => interpolate(dict[key] ?? en[key], params);
     /** Display name of an enum value from the API (status, health, mode, priority, cause). */
     const status = (value: string) => (locale === "zh-CN" ? (zhStatus[value] ?? value.replace(/_/g, " ")) : value.replace(/_/g, " "));
+    /** Display name of a resource kind. */
+    const kind = (value: string) => (locale === "zh-CN" ? zhKind[value] : enKind[value]) ?? value.replace(/_/g, " ");
     const age = (iso: string, now = Date.now()) => {
       const seconds = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
       if (seconds < 5) return t("age.justNow");
@@ -92,6 +94,6 @@ export function useT() {
     };
     const dateTime = (iso: string) => new Date(iso).toLocaleString(locale);
     const time = (iso: string) => new Date(iso).toLocaleTimeString(locale);
-    return { t, status, age, dateTime, time, locale };
+    return { t, status, kind, age, dateTime, time, locale };
   }, [locale]);
 }

@@ -173,6 +173,22 @@ export const zhCN: Record<Key, string> = {
   "outcome.noResult": "无结果",
 };
 
+/** 资源类型的显示名称。 */
+export const zhKind: Record<string, string> = {
+  postgre_sql: "PostgreSQL",
+  redis: "Redis",
+  object_storage: "对象存储",
+  broccoli_server: "Broccoli 服务端",
+  frontend: "前端",
+  gateway: "网关",
+  worker: "判题节点",
+  printer_station: "打印站",
+  balloon_station: "气球站",
+  printer: "打印机",
+  network_vantage: "网络观测点",
+  agent_control_plane: "控制平面",
+};
+
 /** 状态、健康、模式等枚举值的显示名称；未列出的值按原样显示。 */
 export const zhStatus: Record<string, string> = {
   healthy: "健康",

@@ -125,6 +125,17 @@
       "Helvetica Neue",
       sans-serif;
   }
+  html[lang="zh-CN"] body {
+    font-family:
+      system-ui,
+      -apple-system,
+      "PingFang SC",
+      "Hiragino Sans GB",
+      "Microsoft YaHei",
+      "Noto Sans CJK SC",
+      "Source Han Sans SC",
+      sans-serif;
+  }
   .font-mono {
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }

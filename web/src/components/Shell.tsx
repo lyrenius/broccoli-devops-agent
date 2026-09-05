@@ -176,7 +176,7 @@ export function Shell({
                   {status.deployment.name} · {statusLabel(status.deployment.operation_mode)}
                 </div>
                 <div className="truncate" title={status.team_backend}>
-                  {status.team_backend}
+                  {status.team_backend.replace(/ via .*\)$/, ")")}
                 </div>
                 <div className={cn("font-medium", status.dry_run ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400")}>
                   {status.dry_run ? t("platform.dryRun") : t("platform.live")}

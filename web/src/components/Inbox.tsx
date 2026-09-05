@@ -262,12 +262,12 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                 <tbody className="divide-y">
                   {history.map((a) => (
                     <tr key={a.action_run_id} className="align-top transition-colors hover:bg-accent/30">
-                      <td className="px-3 py-2 font-mono text-xs font-medium">{a.runbook_id}</td>
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-xs font-medium">{a.runbook_id}</td>
                       <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{a.target_ids.join(", ")}</td>
-                      <td className="px-3 py-2">
+                      <td className="whitespace-nowrap px-3 py-2">
                         <StatusBadge value={a.status} />
                       </td>
-                      <td className="px-3 py-2 text-xs text-muted-foreground">
+                      <td className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground">
                         {label(a.approval)}
                         {a.approved_by && t("approval.by", { who: a.approved_by })}
                       </td>

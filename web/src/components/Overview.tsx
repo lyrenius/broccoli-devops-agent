@@ -15,7 +15,7 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
   const [missing, setMissing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { t, status: label, age } = useT();
+  const { t, status: label, kind, age } = useT();
 
   useEffect(() => {
     api
@@ -116,11 +116,11 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
-                      <th className="px-3 py-2 font-medium">{t("col.resource")}</th>
-                      <th className="px-3 py-2 font-medium">{t("col.kind")}</th>
-                      <th className="px-3 py-2 font-medium">{t("col.health")}</th>
-                      <th className="px-3 py-2 font-medium">{t("col.signals")}</th>
-                      <th className="px-3 py-2 text-right font-medium">{t("col.latency")}</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">{t("col.resource")}</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">{t("col.kind")}</th>
+                      <th className="whitespace-nowrap px-3 py-2 font-medium">{t("col.health")}</th>
+                      <th className="w-full px-3 py-2 font-medium">{t("col.signals")}</th>
+                      <th className="whitespace-nowrap px-3 py-2 text-right font-medium">{t("col.latency")}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
@@ -129,15 +129,15 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
                       const signals = r.metrics.filter((m) => !m.name.startsWith("probe."));
                       return (
                         <tr key={r.resource_id} className="transition-colors hover:bg-accent/30">
-                          <td className="px-3 py-2 font-mono text-xs font-medium">{r.resource_id}</td>
-                          <td className="px-3 py-2 text-muted-foreground">{r.kind.replace(/_/g, " ")}</td>
-                          <td className="px-3 py-2">
+                          <td className="whitespace-nowrap px-3 py-2 font-mono text-xs font-medium">{r.resource_id}</td>
+                          <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">{kind(r.kind)}</td>
+                          <td className="whitespace-nowrap px-3 py-2">
                             <StatusBadge value={r.health} />
                           </td>
-                          <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                          <td className="px-3 py-2 font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">
                             {signals.length === 0 ? "—" : signals.map((m) => `${m.name} ${Number.isInteger(m.value) ? m.value : m.value.toFixed(1)}${m.unit === "s" ? "s" : ""}`).join(" · ")}
                           </td>
-                          <td className="px-3 py-2 text-right font-mono text-xs tabular-nums">{latency ? `${latency.value.toFixed(0)} ms` : "—"}</td>
+                          <td className="whitespace-nowrap px-3 py-2 text-right font-mono text-xs tabular-nums">{latency ? `${latency.value.toFixed(0)} ms` : "—"}</td>
                         </tr>
                       );
                     })}

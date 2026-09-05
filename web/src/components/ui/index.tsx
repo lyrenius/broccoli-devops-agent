@@ -34,7 +34,7 @@ const BADGE: Record<BadgeVariant, string> = {
 export function Badge({ variant = "default", className, ...props }: HTMLAttributes<HTMLSpanElement> & { variant?: BadgeVariant }) {
   return (
     <span
-      className={cn("inline-flex items-center gap-1 rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors", BADGE[variant], className)}
+      className={cn("inline-flex items-center gap-1 whitespace-nowrap rounded-md border px-2.5 py-0.5 text-xs font-semibold transition-colors", BADGE[variant], className)}
       {...props}
     />
   );

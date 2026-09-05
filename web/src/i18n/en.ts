@@ -172,3 +172,19 @@ export const en = {
 } as const;
 
 export type Key = keyof typeof en;
+
+/** Display names of resource kinds; the enum values are protocol, these are for people. */
+export const enKind: Record<string, string> = {
+  postgre_sql: "PostgreSQL",
+  redis: "Redis",
+  object_storage: "Object storage",
+  broccoli_server: "Broccoli server",
+  frontend: "Frontend",
+  gateway: "Gateway",
+  worker: "Judge worker",
+  printer_station: "Printer station",
+  balloon_station: "Balloon station",
+  printer: "Printer",
+  network_vantage: "Network vantage",
+  agent_control_plane: "Control plane",
+};
