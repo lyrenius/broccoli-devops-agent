@@ -39,6 +39,11 @@ export function TopBar({
           {status.deployment.name} · {status.deployment.operation_mode}
         </span>
       )}
+      {status?.recovery && mode !== "running" && (
+        <span className="pill mode-dispatch_frozen" title="Startup recovery reconciled interrupted work; check the inbox, then resume">
+          recovered: {status.recovery.interrupted_job_ids.length + status.recovery.interrupted_action_ids.length} interrupted · was {status.recovery.previous_mode}
+        </span>
+      )}
       {error && <span className="error">API unreachable: {error}</span>}
       <div className="spacer" />
       <div className="controls">

@@ -142,13 +142,21 @@ impl SnapshotViewBuilderPort for RedactingViewBuilder {
             .feedback
             .iter()
             .map(|item| {
+                // Execution evidence is machine output quoted from the Platform; it moves under
+                // `untrusted_data` like probe detail, away from the structured origin.
+                let mut origin = serde_json::to_value(&item.origin).unwrap_or(json!(null));
+                let evidence = origin
+                    .as_object_mut()
+                    .and_then(|map| map.remove("evidence"))
+                    .filter(|value| !value.is_null());
                 json!({
                     "feedback_id": item.feedback_id,
                     "recorded_at": item.recorded_at,
                     "reviewer": item.reviewer,
-                    "origin": item.origin,
+                    "origin": origin,
                     "comment": item.comment,
                     "text": item.describe(),
+                    "untrusted_data": { "execution_evidence": evidence },
                 })
             })
             .collect();

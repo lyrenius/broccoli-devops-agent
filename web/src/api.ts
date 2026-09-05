@@ -23,6 +23,7 @@ function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export type ReviewChoice = "acknowledge" | "send_upstream";
+export type IssueClosure = "resolved" | "cancelled" | "failed";
 
 export const api = {
   status: () => request<Status>("/api/status"),
@@ -38,6 +39,8 @@ export const api = {
     post<ReviewOutcome<ActionRun>>(`/api/actions/${id}/review`, { by, decision, comment }),
   reviewJob: (id: string, by: string, decision: ReviewChoice, comment: string) =>
     post<ReviewOutcome<Job>>(`/api/jobs/${id}/review`, { by, decision, comment }),
+  closeIssue: (id: string, outcome: IssueClosure, by: string, comment: string) =>
+    post<Issue>(`/api/issues/${id}/close`, { outcome, by, comment }),
   events: (limit: number) => request<EventRecord[]>(`/api/events?limit=${limit}`),
   transition: (name: "freeze-dispatch" | "freeze-all" | "resume") => post<{ mode: string }>(`/api/scheduler/${name}`),
   report: (body: { title: string; description: string; reporter: string; priority?: string }) =>

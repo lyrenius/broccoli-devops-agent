@@ -22,7 +22,9 @@ use broccoli_devops_agent::config::AppConfig;
 use broccoli_devops_agent::domain::{HumanReport, IssuePriority, SnapshotCause};
 use broccoli_devops_agent::ports::StateStore;
 use broccoli_devops_agent::runner::{InboxDecision, SliceRunner, TeamBackend};
-use broccoli_devops_agent::scheduler::TopScheduler;
+use broccoli_devops_agent::scheduler::{
+    IssueClosure, RecoverySummary, SchedulerMode, TopScheduler,
+};
 use broccoli_devops_agent::store::file::FileStateStore;
 use broccoli_devops_agent::topology::DeploymentTopology;
 use uuid::Uuid;
@@ -78,8 +80,13 @@ enum Command {
         #[arg(long, value_enum, default_value_t = TeamChoice::Auto)]
         team: TeamChoice,
     },
-    /// Rebuild control state from the data directory and list unfinished work.
+    /// Rebuild control state after a restart: reconcile interrupted work, restore the freeze mode.
     Recover,
+    /// Close an Issue by hand: resolved, cancelled, or failed.
+    Issues {
+        #[command(subcommand)]
+        action: IssuesAction,
+    },
     /// Print the append-only event log.
     Events {
         /// Show only the last N events.
@@ -106,6 +113,10 @@ enum Command {
         item: ReviewItem,
     },
     /// Serve the HTTP + SSE API for the web console and the terminal UI.
+    ///
+    /// Startup runs recovery first. After a clean restart (the previous process was running and
+    /// nothing was interrupted) dispatch resumes automatically; otherwise the Scheduler stays
+    /// frozen until a human resumes it from a console.
     Serve {
         /// Override the bind address from the config file.
         #[arg(long)]
@@ -113,6 +124,9 @@ enum Command {
         /// Team backend for reports filed through the API.
         #[arg(long, value_enum, default_value_t = TeamChoice::Auto)]
         team: TeamChoice,
+        /// Stay frozen after recovery even when the restart was clean.
+        #[arg(long)]
+        stay_frozen: bool,
     },
 }
 
@@ -196,6 +210,61 @@ impl ReviewArgs {
 enum ConfigAction {
     /// Print the effective configuration.
     Show,
+}
+
+/// Issue subcommands.
+#[derive(Debug, Subcommand)]
+enum IssuesAction {
+    /// Close an Issue.
+    Close {
+        /// Issue ID.
+        id: Uuid,
+        /// The problem is fixed or was not a problem.
+        #[arg(long, conflicts_with_all = ["cancelled", "failed"])]
+        resolved: bool,
+        /// Stop working on it without claiming it is fixed.
+        #[arg(long, conflicts_with_all = ["resolved", "failed"])]
+        cancelled: bool,
+        /// Give up: the problem stands.
+        #[arg(long, conflicts_with_all = ["resolved", "cancelled"])]
+        failed: bool,
+        /// Why.
+        #[arg(long)]
+        comment: Option<String>,
+        /// Your name, recorded with the closure.
+        #[arg(long = "as", default_value = "operator")]
+        by: String,
+    },
+}
+
+/// Prints a recovery summary in operator-facing lines.
+fn print_recovery(summary: &RecoverySummary) {
+    println!(
+        "recovered control state · previous mode {:?} · now {:?}",
+        summary.previous_mode, summary.final_mode
+    );
+    println!("unfinished issues:  {}", summary.issue_ids.len());
+    for id in &summary.issue_ids {
+        println!("  {id}");
+    }
+    println!("unfinished jobs:    {}", summary.job_ids.len());
+    for id in &summary.job_ids {
+        println!("  {id}");
+    }
+    println!("unfinished actions: {}", summary.action_run_ids.len());
+    for id in &summary.action_run_ids {
+        println!("  {id}");
+    }
+    if summary.touched_anything() {
+        println!(
+            "reconciled: {} interrupted job(s) failed, {} interrupted action(s) failed or denied, \
+             {} action(s) verified now, {} review(s) reconstructed — see the inbox",
+            summary.interrupted_job_ids.len(),
+            summary.interrupted_action_ids.len(),
+            summary.verified_action_ids.len(),
+            summary.reconstructed_review_job_ids.len()
+        );
+    }
 }
 
 /// Parses the operator-facing priority names.
@@ -289,26 +358,56 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Recover => {
-            // Recovery needs only the store; a missing topology file must not block it.
-            let store = Arc::new(FileStateStore::open(&config.data.dir)?);
-            let scheduler = TopScheduler::new(store);
-            let summary = scheduler.recover().await?;
-            println!(
-                "recovered control state · mode {:?}",
-                scheduler.mode().await
-            );
-            println!("unfinished issues:  {}", summary.issue_ids.len());
-            for id in &summary.issue_ids {
-                println!("  {id}");
-            }
-            println!("unfinished jobs:    {}", summary.job_ids.len());
-            for id in &summary.job_ids {
-                println!("  {id}");
-            }
-            println!("unfinished actions: {}", summary.action_run_ids.len());
-            for id in &summary.action_run_ids {
-                println!("  {id}");
-            }
+            // With a topology, interrupted actions are verified against a fresh Snapshot; a
+            // missing topology file must not block recovery, so fall back to the store alone.
+            let summary = match DeploymentTopology::load(&config.topology.path) {
+                Ok(topology) => {
+                    let runner = SliceRunner::wire(
+                        topology,
+                        &config.data.dir,
+                        TeamBackend::ReadOnly,
+                        config.platform.clone(),
+                    )?;
+                    runner.recover().await?
+                }
+                Err(error) => {
+                    eprintln!(
+                        "note: topology not loaded ({error}); recovering from the store alone"
+                    );
+                    let store = Arc::new(FileStateStore::open(&config.data.dir)?);
+                    TopScheduler::new(store).recover().await?
+                }
+            };
+            print_recovery(&summary);
+        }
+        Command::Issues {
+            action:
+                IssuesAction::Close {
+                    id,
+                    resolved,
+                    cancelled,
+                    failed,
+                    comment,
+                    by,
+                },
+        } => {
+            let closure = match (resolved, cancelled, failed) {
+                (true, false, false) => IssueClosure::Resolved,
+                (false, true, false) => IssueClosure::Cancelled,
+                (false, false, true) => IssueClosure::Failed,
+                _ => {
+                    return Err("choose exactly one of --resolved, --cancelled, or --failed".into());
+                }
+            };
+            let topology = DeploymentTopology::load(&config.topology.path)?;
+            let runner = SliceRunner::wire(
+                topology,
+                &config.data.dir,
+                TeamBackend::ReadOnly,
+                config.platform.clone(),
+            )?;
+            let issue = runner.close_issue(id, closure, &by, comment).await?;
+            println!("Issue {} · status {:?}", issue.issue_id, issue.status);
         }
         Command::Events { tail } => {
             let store = FileStateStore::open(&config.data.dir)?;
@@ -414,7 +513,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Command::Serve { bind, team } => {
+        Command::Serve {
+            bind,
+            team,
+            stay_frozen,
+        } => {
             let topology = DeploymentTopology::load(&config.topology.path)?;
             let backend = select_backend(&config, team)?;
             let runner = Arc::new(SliceRunner::wire(
@@ -423,6 +526,24 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 backend,
                 config.platform.clone(),
             )?);
+
+            // Recovery before serving: reconcile what a previous process left behind and
+            // restore its freeze state. A clean restart resumes on its own; anything else
+            // waits for a human, who can see why in the console.
+            let summary = runner.recover().await?;
+            print_recovery(&summary);
+            let clean_restart =
+                summary.previous_mode == SchedulerMode::Running && !summary.touched_anything();
+            if clean_restart && !stay_frozen {
+                runner.scheduler().resume().await?;
+                println!("clean restart: dispatch resumed");
+            } else {
+                println!(
+                    "scheduler stays {:?}: resume from a console when the inbox has been checked",
+                    runner.scheduler().mode().await
+                );
+            }
+
             let bind = bind.unwrap_or_else(|| config.api.bind.clone());
             println!(
                 "serving API on http://{bind} · team backend: {} · dry-run: {}",
@@ -435,7 +556,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             {
                 eprintln!("warning: binding beyond localhost without an API token");
             }
-            let state = Arc::new(broccoli_devops_agent::api::ApiState::new(runner, config));
+            let state = Arc::new(
+                broccoli_devops_agent::api::ApiState::new(runner, config).with_recovery(summary),
+            );
             broccoli_devops_agent::api::serve(state, &bind).await?;
         }
         Command::CheckModel => {

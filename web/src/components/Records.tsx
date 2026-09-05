@@ -2,18 +2,46 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Issue, Job } from "../types";
 
-export function Records({ tick }: { tick: number }) {
+const LIVE = new Set(["open", "investigating", "waiting_for_human", "mitigating", "verifying"]);
+
+function loadOperator(): string {
+  try {
+    return localStorage.getItem("broccoli.operator") ?? "operator";
+  } catch {
+    return "operator";
+  }
+}
+
+export function Records({ tick, onChanged }: { tick: number; onChanged: () => void }) {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [comments, setComments] = useState<Record<string, string>>({});
 
   useEffect(() => {
     api.issues().then((list) => setIssues([...list].reverse())).catch(() => undefined);
     api.jobs().then((list) => setJobs(list)).catch(() => undefined);
   }, [tick]);
 
+  const close = async (issue: Issue, outcome: "resolved" | "cancelled") => {
+    setBusy(issue.issue_id);
+    setError(null);
+    try {
+      const updated = await api.closeIssue(issue.issue_id, outcome, loadOperator(), comments[issue.issue_id] ?? "");
+      setIssues((list) => list.map((i) => (i.issue_id === issue.issue_id ? updated : i)));
+      onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <>
       <h2>Issues ({issues.length})</h2>
+      {error && <p className="error">{error}</p>}
       {issues.length === 0 && <p className="muted">No issues filed yet.</p>}
       {issues.map((issue) => {
         const related = jobs.filter((j) => j.issue_id === issue.issue_id);
@@ -24,6 +52,21 @@ export function Records({ tick }: { tick: number }) {
               <span className="pill">{issue.priority}</span>
               <span className="pill">{issue.status}</span>
               <span className="meta">{new Date(issue.created_at).toLocaleString()}</span>
+              {LIVE.has(issue.status) && (
+                <span className="issue-actions">
+                  <input
+                    placeholder="closing comment"
+                    value={comments[issue.issue_id] ?? ""}
+                    onChange={(e) => setComments((c) => ({ ...c, [issue.issue_id]: e.target.value }))}
+                  />
+                  <button className="primary" disabled={busy === issue.issue_id} onClick={() => close(issue, "resolved")} title="The problem is fixed or was not a problem">
+                    Resolve
+                  </button>
+                  <button disabled={busy === issue.issue_id} onClick={() => close(issue, "cancelled")} title="Stop working on it without claiming it is fixed">
+                    Cancel
+                  </button>
+                </span>
+              )}
             </div>
             <p className="muted" style={{ margin: "0 0 8px" }}>
               {issue.description}
@@ -55,6 +98,7 @@ export function Records({ tick }: { tick: number }) {
                         {f.origin.kind === "failed_action" && (
                           <>
                             <span className="mono">{f.origin.runbook_id}</span> failed: {f.origin.summary}
+                            {f.origin.evidence && <pre className="evidence">{f.origin.evidence}</pre>}
                           </>
                         )}
                         {f.origin.kind === "failed_job" && <>the previous job failed: {f.origin.summary}</>}

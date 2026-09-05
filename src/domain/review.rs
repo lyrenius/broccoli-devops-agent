@@ -128,6 +128,10 @@ pub enum FeedbackOrigin {
         target_ids: Vec<ResourceId>,
         /// The Platform or verification summary.
         summary: String,
+        /// Sanitized execution evidence (exit codes, the tail of stderr and stdout), when the
+        /// Platform recorded output. Machine text: the View fences it as untrusted data.
+        #[serde(default)]
+        evidence: Option<String>,
     },
     /// A Job failed before producing a usable result.
     FailedJob {

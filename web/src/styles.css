@@ -228,3 +228,21 @@ dl.kv dd { margin: 0; }
 form.report { display: grid; gap: 10px; max-width: 640px; }
 form.report label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
 .result pre { white-space: pre-wrap; font-family: var(--mono); font-size: 12.5px; margin: 0; }
+
+/* ---- issues & evidence ---- */
+.issue-actions { display: inline-flex; gap: 6px; margin-left: auto; align-items: center; }
+.issue-actions button { padding: 3px 10px; font-size: 12.5px; }
+.issue-actions input { width: 200px; padding: 3px 8px; font-size: 12.5px; }
+pre.evidence {
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+.tag.evidence-strong { color: var(--good); border-color: var(--good); margin-left: 6px; }
+.tag.evidence-weak { color: var(--warn); border-color: var(--warn); margin-left: 6px; }
+.tag.evidence-dry_run { color: var(--unknown); border-color: var(--unknown); margin-left: 6px; }

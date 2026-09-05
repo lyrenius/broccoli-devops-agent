@@ -332,6 +332,12 @@ pub trait StateStore: Send + Sync {
     /// Updates an existing Issue; returns NotFound when absent.
     async fn update_issue(&self, issue: Issue) -> AgentResult<()>;
 
+    /// Updates an Issue only if the stored record still equals `expected`; otherwise `Conflict`.
+    ///
+    /// This is the compare-and-set every Scheduler transition uses: read, decide, write what you
+    /// read. Two operators acting on one record cannot both apply.
+    async fn update_issue_if(&self, expected: &Issue, next: Issue) -> AgentResult<()>;
+
     /// Reads an Issue by ID; returns NotFound when absent.
     async fn get_issue(&self, issue_id: IssueId) -> AgentResult<Issue>;
 
@@ -347,6 +353,9 @@ pub trait StateStore: Send + Sync {
     /// Updates an existing Job; returns NotFound when absent.
     async fn update_job(&self, job: Job) -> AgentResult<()>;
 
+    /// Updates a Job only if the stored record still equals `expected`; otherwise `Conflict`.
+    async fn update_job_if(&self, expected: &Job, next: Job) -> AgentResult<()>;
+
     /// Reads a Job by ID; returns NotFound when absent.
     async fn get_job(&self, job_id: JobId) -> AgentResult<Job>;
 
@@ -361,6 +370,23 @@ pub trait StateStore: Send + Sync {
 
     /// Updates an existing ActionRun; returns NotFound when absent.
     async fn update_action_run(&self, action: ActionRun) -> AgentResult<()>;
+
+    /// Updates an ActionRun only if the stored record still equals `expected`; otherwise
+    /// `Conflict`. Approval, start, execution result, verification, and review all go through
+    /// this, so a retry or a second operator gets a refusal instead of a duplicate effect.
+    async fn update_action_run_if(&self, expected: &ActionRun, next: ActionRun) -> AgentResult<()>;
+
+    /// Claims an idempotency key for an ActionRun.
+    ///
+    /// Returns `Ok(None)` when the key is free (or held by this ActionRun) and `Ok(Some(holder))`
+    /// when another ActionRun with the same key still holds it — it may yet run, is running, or
+    /// succeeded. Cancelled and failed runs release their key. The check and the answer happen
+    /// under the store's lock, so two proposals of the same intent cannot both be admitted.
+    async fn claim_idempotency_key(
+        &self,
+        key: &str,
+        action_run_id: ActionRunId,
+    ) -> AgentResult<Option<ActionRunId>>;
 
     /// Reads an ActionRun by ID; returns NotFound when absent.
     async fn get_action_run(&self, action_run_id: ActionRunId) -> AgentResult<ActionRun>;

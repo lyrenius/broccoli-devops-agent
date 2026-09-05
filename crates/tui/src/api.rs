@@ -21,6 +21,9 @@ pub struct Status {
     /// Inbox counts.
     #[serde(default)]
     pub inbox: InboxCounts,
+    /// Startup recovery summary, when the server recovered at startup.
+    #[serde(default)]
+    pub recovery: Option<Value>,
 }
 
 /// Object counts inside `/api/status`.
@@ -100,9 +103,15 @@ pub struct Action {
     /// Review, once given (rendered raw).
     #[serde(default)]
     pub review: Option<Value>,
+    /// The Platform's own summary of the execution.
+    #[serde(default)]
+    pub execution_summary: Option<String>,
     /// Verification conclusion, when reached.
     #[serde(default)]
     pub verification_summary: Option<String>,
+    /// How much the verification proves: `dry_run`, `weak`, or `strong`.
+    #[serde(default)]
+    pub verification_evidence: Option<String>,
 }
 
 /// One Job as served inside `/api/inbox`.
@@ -325,6 +334,21 @@ impl ApiClient {
         self.post_json(
             &format!("/api/jobs/{id}/review"),
             Some(json!({ "by": by, "decision": decision, "comment": comment })),
+        )
+        .await
+    }
+
+    /// Closes an Issue: `resolved`, `cancelled`, or `failed`.
+    pub async fn close_issue(
+        &self,
+        id: &str,
+        by: &str,
+        outcome: &str,
+        comment: &str,
+    ) -> Result<Value, String> {
+        self.post_json(
+            &format!("/api/issues/{id}/close"),
+            Some(json!({ "by": by, "outcome": outcome, "comment": comment })),
         )
         .await
     }

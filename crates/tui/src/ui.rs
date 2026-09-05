@@ -118,6 +118,22 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             app.status.inbox.permission_denied,
             app.status.inbox.failed_jobs + app.status.inbox.failed_actions
         )),
+        Span::styled(
+            match &app.status.recovery {
+                Some(recovery) if app.status.mode != "running" => format!(
+                    "  · recovered ({} interrupted, was {})",
+                    recovery["interrupted_job_ids"]
+                        .as_array()
+                        .map_or(0, Vec::len)
+                        + recovery["interrupted_action_ids"]
+                            .as_array()
+                            .map_or(0, Vec::len),
+                    recovery["previous_mode"].as_str().unwrap_or("?")
+                ),
+                _ => String::new(),
+            },
+            Style::default().fg(Color::Yellow),
+        ),
     ]);
     let tabs = Tabs::new(titles)
         .select(selected)
@@ -215,9 +231,15 @@ fn draw_issues(frame: &mut Frame, area: Rect, app: &App) {
     let rows: Vec<Row> = app
         .issues
         .iter()
-        .map(|i| {
+        .enumerate()
+        .map(|(index, i)| {
+            let marker = if index == app.selected_issue {
+                "▶ "
+            } else {
+                "  "
+            };
             Row::new(vec![
-                Cell::from(i.title.clone()),
+                Cell::from(format!("{marker}{}", i.title)),
                 Cell::from(i.priority.clone()),
                 Cell::from(Span::styled(
                     i.status.clone(),
@@ -240,7 +262,11 @@ fn draw_issues(frame: &mut Frame, area: Rect, app: &App) {
         Row::new(vec!["title", "priority", "status", "id"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
-    .block(Block::default().borders(Borders::ALL).title(" issues "));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" issues  (j/k select · R resolve · C cancel) "),
+    );
     frame.render_widget(table, area);
 }
 
@@ -281,7 +307,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let message = app.message.as_deref().unwrap_or(
-        "1-4 screens · j/k select · a approve · r reject · b send upstream · x acknowledge · s snapshot · f/F freeze · u resume · q quit",
+        "1-4 screens · j/k select · a approve · r reject · b send upstream · x acknowledge · R/C resolve/cancel issue · s snapshot · f/F freeze · u resume · q quit",
     );
     let style = if app.message.is_some() {
         Style::default().fg(Color::Yellow)

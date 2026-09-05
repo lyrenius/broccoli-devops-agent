@@ -230,8 +230,10 @@ export function Inbox({ tick, dryRun, onChanged }: { tick: number; dryRun: boole
           <dl className="kv">
             <dt>Proposed because</dt>
             <dd>{a.reason || "—"}</dd>
-            <dt>Result</dt>
-            <dd>{a.verification_summary ?? "execution failed; see the event log"}</dd>
+            <dt>Execution</dt>
+            <dd>{a.execution_summary ?? "—"}</dd>
+            <dt>Verification</dt>
+            <dd>{a.verification_summary ?? "not reached"}</dd>
           </dl>
           {feedbackBox(a.action_run_id, "What should the next pass do differently?")}
           {reviewButtons(a.action_run_id, () => reviewAction(a, "send_upstream"), () => reviewAction(a, "acknowledge"))}
@@ -265,7 +267,10 @@ export function Inbox({ tick, dryRun, onChanged }: { tick: number; dryRun: boole
                   {a.approved_by && <> by {a.approved_by}</>}
                 </td>
                 <td className="muted">
-                  {a.denial ? `${a.denial.reason}${a.denial.comment ? ` — ${a.denial.comment}` : ""}` : a.verification_summary ?? "—"}
+                  {a.denial
+                    ? `${a.denial.reason}${a.denial.comment ? ` — ${a.denial.comment}` : ""}`
+                    : a.verification_summary ?? a.execution_summary ?? "—"}
+                  {a.verification_evidence && <span className={`tag evidence-${a.verification_evidence}`}>{a.verification_evidence} evidence</span>}
                 </td>
                 <td className="muted">
                   {a.review

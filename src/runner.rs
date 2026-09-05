@@ -11,6 +11,7 @@
 //! Policy model is wired yet, so every Scheduler decision point still exercises its conservative
 //! deterministic fallback — by design.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,26 +20,29 @@ use std::time::Duration;
 use async_trait::async_trait;
 use broccoli_agent_harness::{AgentConfig as HarnessBudget, ModelClient};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 
 use crate::collector::TopologyCollector;
 use crate::domain::{
     ActionProposal, ActionRun, ActionRunId, ActionStatus, Artifact, FeedbackOrigin, HumanFeedback,
     HumanReport, HumanReview, Issue, IssueId, Job, JobBrief, JobId, JobOutcome, JobResult,
-    JobStatus, ReviewDecision, Snapshot, SnapshotCause, SnapshotId, TeamCallback, TeamKind,
+    JobStatus, ResourceId, ResourceKind, ReviewDecision, Snapshot, SnapshotCause, SnapshotId,
+    TeamCallback, TeamKind,
 };
 use crate::error::{AgentError, AgentResult};
 use crate::platform::{LocalCommandPlatform, PlatformConfig};
-use crate::policy::AuthorityPolicy;
+use crate::policy::{AuthorityPolicy, OPERATE_CAPABILITIES};
 use crate::ports::{AgentTeamPort, CaptureRequest, StateStore, TeamCallbackSink, cancel_pair};
-use crate::scheduler::TopScheduler;
+use crate::scheduler::{IssueClosure, RecoverySummary, TopScheduler};
 use crate::store::file::FileStateStore;
 use crate::team::{HarnessOperateTeam, ReadOnlyOperateTeam};
 use crate::topology::DeploymentTopology;
 use crate::view::{FileArtifactStore, PROFILE_OPERATE_READONLY, RedactingViewBuilder};
 
-/// Capabilities granted to the read-only Operate Job.
-const READONLY_CAPABILITIES: [&str; 1] = ["observe.readonly"];
+/// Characters of execution evidence handed to the next pass, at most.
+const EVIDENCE_LIMIT: usize = 2000;
 
 /// Sink that routes Team callbacks straight into the Scheduler.
 struct SchedulerSink {
@@ -131,6 +135,9 @@ pub struct SliceRunner {
     team_label: String,
     artifacts: FileArtifactStore,
     dry_run: bool,
+    /// Serializes review-plus-dispatch so two reviewers of one item cannot both dispatch a
+    /// revision; the store's compare-and-set catches what slips past process boundaries.
+    review_lock: Mutex<()>,
 }
 
 impl SliceRunner {
@@ -149,13 +156,20 @@ impl SliceRunner {
         ));
         let view_builder = Arc::new(RedactingViewBuilder::new(artifacts.clone()));
         let dry_run = platform.dry_run;
+        let resources: HashMap<ResourceId, ResourceKind> = topology
+            .resources
+            .iter()
+            .map(|resource| (resource.id.clone(), resource.kind))
+            .collect();
         let authority = AuthorityPolicy::new(
             platform.classification.clone(),
             Duration::from_secs(platform.auto_repeat_window_secs),
-        );
+        )
+        .with_resources(resources);
         let platform = Arc::new(LocalCommandPlatform::new(
             platform,
             artifacts.clone(),
+            store.clone() as Arc<dyn StateStore>,
             &topology,
         ));
         let artifacts_for_api = artifacts.clone();
@@ -195,6 +209,7 @@ impl SliceRunner {
             team_label,
             artifacts: artifacts_for_api,
             dry_run,
+            review_lock: Mutex::new(()),
         })
     }
 
@@ -240,11 +255,12 @@ impl SliceRunner {
         }
     }
 
-    /// The read-only Operate scope over every resource in the topology.
-    fn readonly_brief(&self) -> JobBrief {
+    /// The Operate scope over every resource in the topology: every capability the matrix can
+    /// decide (the matrix, not the scope, decides what needs a human), all resources in scope.
+    fn operate_brief(&self) -> JobBrief {
         JobBrief::new(
             TeamKind::Operate,
-            READONLY_CAPABILITIES
+            OPERATE_CAPABILITIES
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
@@ -279,7 +295,7 @@ impl SliceRunner {
             .dispatch_job(
                 issue.issue_id,
                 issue.opened_snapshot_id,
-                self.readonly_brief(),
+                self.operate_brief(),
                 PROFILE_OPERATE_READONLY,
             )
             .await?;
@@ -402,6 +418,7 @@ impl SliceRunner {
         decision: InboxDecision,
         comment: Option<String>,
     ) -> AgentResult<ReviewOutcome<ActionRun>> {
+        let _serialized = self.review_lock.lock().await;
         let action = self.store.get_action_run(action_run_id).await?;
         if !action.needs_review() {
             return Err(AgentError::InvalidInput(format!(
@@ -419,10 +436,12 @@ impl SliceRunner {
                 action_run_id,
                 runbook_id: action.runbook_id.clone(),
                 target_ids: action.target_ids.clone(),
-                summary: action
-                    .verification_summary
-                    .clone()
-                    .unwrap_or_else(|| format!("execution ended as {:?}", action.status)),
+                summary: match (&action.verification_summary, &action.execution_summary) {
+                    (Some(verification), _) => verification.clone(),
+                    (None, Some(execution)) => execution.clone(),
+                    (None, None) => format!("execution ended as {:?}", action.status),
+                },
+                evidence: self.execution_evidence(&action).await,
             },
         };
         self.review(
@@ -445,6 +464,7 @@ impl SliceRunner {
         decision: InboxDecision,
         comment: Option<String>,
     ) -> AgentResult<ReviewOutcome<Job>> {
+        let _serialized = self.review_lock.lock().await;
         let job = self.store.get_job(job_id).await?;
         if !job.needs_review() {
             return Err(AgentError::InvalidInput(format!(
@@ -522,6 +542,38 @@ impl SliceRunner {
         }
     }
 
+    /// Reads the action's ActionOutput Artifact and condenses it into sanitized evidence: exit
+    /// codes, timeouts, refusal reasons, and the tail of stderr and stdout with secret-shaped
+    /// lines removed. `None` when no output was recorded.
+    async fn execution_evidence(&self, action: &ActionRun) -> Option<String> {
+        let artifact_id = action.execution_artifact_id?;
+        let artifact = self.store.get_artifact(artifact_id).await.ok()?;
+        let bytes = self.artifacts.read_verified(&artifact).ok()?;
+        let record: Value = serde_json::from_slice(&bytes).ok()?;
+        Some(summarize_execution_record(&record))
+    }
+
+    /// Closes an Issue on a human's say-so; see `TopScheduler::close_issue`.
+    pub async fn close_issue(
+        &self,
+        issue_id: IssueId,
+        closure: IssueClosure,
+        closed_by: &str,
+        comment: Option<String>,
+    ) -> AgentResult<Issue> {
+        self.scheduler
+            .close_issue(issue_id, closure, closed_by, comment)
+            .await
+    }
+
+    /// Recovers control state after a restart, verifying interrupted actions against a fresh
+    /// Snapshot; see `TopScheduler::recover_with`.
+    pub async fn recover(&self) -> AgentResult<RecoverySummary> {
+        self.scheduler
+            .recover_with(Some(self.capture_request(SnapshotCause::AfterAction)))
+            .await
+    }
+
     /// Dispatches the revising Job for upstream feedback over a fresh Snapshot.
     async fn dispatch_revision(
         &self,
@@ -534,7 +586,7 @@ impl SliceRunner {
             .dispatch_job(
                 issue_id,
                 snapshot_id,
-                self.readonly_brief().revising(revises_job_id, feedback),
+                self.operate_brief().revising(revises_job_id, feedback),
                 PROFILE_OPERATE_READONLY,
             )
             .await
@@ -691,8 +743,18 @@ impl SliceRunner {
                         .unwrap_or_default()
                 );
             }
+            if let Some(summary) = &action.execution_summary {
+                let _ = writeln!(out, "    execution:    {summary}");
+            }
             if let Some(summary) = &action.verification_summary {
-                let _ = writeln!(out, "    verification: {summary}");
+                let _ = writeln!(
+                    out,
+                    "    verification: {summary}{}",
+                    action
+                        .verification_evidence
+                        .map(|evidence| format!(" [{evidence:?} evidence]"))
+                        .unwrap_or_default()
+                );
             }
             if let Some(review) = &action.review {
                 let _ = writeln!(
@@ -763,7 +825,11 @@ impl SliceRunner {
                 action.runbook_id,
                 action.target_ids.join(","),
                 action.status,
-                action.verification_summary.as_deref().unwrap_or("—")
+                action
+                    .verification_summary
+                    .as_deref()
+                    .or(action.execution_summary.as_deref())
+                    .unwrap_or("—")
             );
         }
         out
@@ -779,4 +845,90 @@ fn idempotency_key(job: &Job, proposal: &ActionProposal) -> AgentResult<String> 
     hasher.update(job.issue_id.as_bytes());
     hasher.update(serde_json::to_vec(proposal)?);
     Ok(format!("{:x}", hasher.finalize())[..24].to_string())
+}
+
+/// Fact-name or line fragments that mark secret-shaped output; such lines are dropped.
+const EVIDENCE_SECRET_MARKERS: [&str; 6] = [
+    "password",
+    "secret",
+    "token",
+    "credential",
+    "api_key",
+    "authorization",
+];
+
+/// Condenses an ActionOutput record into a short, sanitized evidence string for the next pass.
+///
+/// Machine output is untrusted: it is trimmed to a tail, lines that look like they carry a secret
+/// are replaced, and the whole thing is capped, so it can be fenced into a View without carrying
+/// a credential or a prompt injection of unbounded size along.
+pub fn summarize_execution_record(record: &Value) -> String {
+    fn tail(text: &str, lines: usize, chars: usize) -> String {
+        let kept: Vec<&str> = text
+            .lines()
+            .rev()
+            .take(lines)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|line| {
+                let lower = line.to_ascii_lowercase();
+                if EVIDENCE_SECRET_MARKERS
+                    .iter()
+                    .any(|marker| lower.contains(marker))
+                {
+                    "[line redacted: secret-shaped]"
+                } else {
+                    line
+                }
+            })
+            .collect();
+        let joined = kept.join("\n");
+        if joined.len() > chars {
+            format!("…{}", &joined[joined.len() - chars..])
+        } else {
+            joined
+        }
+    }
+
+    let mut parts = Vec::new();
+    if let Some(refused) = record["refused"].as_str() {
+        parts.push(format!("refused: {refused}"));
+    }
+    if record["dry_run"].as_bool() == Some(true) {
+        parts.push("dry run: commands were rendered, not executed".to_string());
+    }
+    for run in record["runs"].as_array().into_iter().flatten() {
+        let target = run["target"].as_str().unwrap_or("?");
+        let status = if run["spawn_error"].is_string() {
+            format!(
+                "could not start: {}",
+                run["spawn_error"].as_str().unwrap_or("")
+            )
+        } else if run["timed_out"].as_bool() == Some(true) {
+            "timed out and was killed".to_string()
+        } else {
+            format!(
+                "exit code {}",
+                run["exit_code"]
+                    .as_i64()
+                    .map_or("none".to_string(), |code| code.to_string())
+            )
+        };
+        let mut line = format!("target {target}: {status}");
+        for (name, key) in [("stderr", "stderr"), ("stdout", "stdout")] {
+            if let Some(text) = run[key].as_str()
+                && !text.trim().is_empty()
+            {
+                line.push_str(&format!("; {name} tail: {}", tail(text, 12, 600)));
+            }
+        }
+        parts.push(line);
+    }
+    let mut evidence = parts.join("\n");
+    if evidence.len() > EVIDENCE_LIMIT {
+        evidence.truncate(EVIDENCE_LIMIT);
+        evidence.push('…');
+    }
+    evidence
 }

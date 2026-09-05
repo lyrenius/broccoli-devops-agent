@@ -27,23 +27,69 @@ pub struct DeploymentInfo {
 
 /// One probe attached to a resource in the topology.
 ///
-/// `probe` names an entry in the Probe Registry (§4.8 of the architecture document); the v0.1
+/// `probe` names an entry in the Probe Registry (§4.9 of the architecture document); the
 /// registry is the fixed set the Collector implements. Unknown probe names become coverage gaps,
 /// never errors, so a stale topology degrades visibly instead of failing collection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Reachability probes (`tcp.connect`, `http.status`) take a `target` or `url` and an optional
+/// `degraded_above_ms` latency threshold. Business probes read one number from the deployment:
+/// `redis.llen` (queue backlog of `key`) and `http.json` (a JSON `pointer` in a GET response,
+/// for worker heartbeats, judging results, or any other counter Broccoli's API exposes). Both
+/// publish the number as the metric named by `metric` and judge health with `min`, `max`, or
+/// `expect`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeSpec {
-    /// Registered probe ID, such as `tcp.connect` or `http.status`.
+    /// Registered probe ID, such as `tcp.connect`, `http.status`, `redis.llen`, or `http.json`.
     pub probe: String,
     /// `host:port` target for socket-level probes.
     #[serde(default)]
     pub target: Option<String>,
-    /// Plain-HTTP URL for `http.status`; HTTPS is not supported by the v0.1 probe.
+    /// Plain-HTTP URL for `http.status` and `http.json`; HTTPS is not supported.
     #[serde(default)]
     pub url: Option<String>,
+    /// Redis key whose list length `redis.llen` reads.
+    #[serde(default)]
+    pub key: Option<String>,
+    /// RFC 6901 JSON pointer `http.json` reads from the response, e.g. `/workers/online`.
+    #[serde(default)]
+    pub pointer: Option<String>,
+    /// Metric name the value is published under, e.g. `queue.depth` or `workers.online`.
+    #[serde(default)]
+    pub metric: Option<String>,
+    /// Latency above which a reachability probe reports the resource as Degraded.
+    #[serde(default)]
+    pub degraded_above_ms: Option<f64>,
+    /// Lowest healthy value for a numeric business probe.
+    #[serde(default)]
+    pub min: Option<f64>,
+    /// Highest healthy value for a numeric business probe.
+    #[serde(default)]
+    pub max: Option<f64>,
+    /// Exact expected value (string comparison) for `http.json`.
+    #[serde(default)]
+    pub expect: Option<String>,
+}
+
+impl ProbeSpec {
+    /// A reachability or business probe with only its primary address set.
+    pub fn new(probe: impl Into<String>) -> Self {
+        Self {
+            probe: probe.into(),
+            target: None,
+            url: None,
+            key: None,
+            pointer: None,
+            metric: None,
+            degraded_above_ms: None,
+            min: None,
+            max: None,
+            expect: None,
+        }
+    }
 }
 
 /// One observable resource in the deployment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TopologyResource {
     /// Stable resource ID used across Snapshots, Issues, and Jobs.
     pub id: ResourceId,
@@ -72,7 +118,7 @@ pub struct TopologyDependency {
 }
 
 /// Complete static topology for one deployment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentTopology {
     /// Deployment identity and revision.
     pub deployment: DeploymentInfo,

@@ -6,7 +6,7 @@ use std::net::TcpListener;
 
 use broccoli_agent_harness::testing::{ScriptedModelClient, call};
 use broccoli_devops_agent::domain::{
-    ActionStatus, ApprovalState, HumanReport, OperationMode, ResourceKind,
+    ActionStatus, ApprovalState, HumanReport, OperationMode, ResourceKind, VerificationEvidence,
 };
 use broccoli_devops_agent::platform::{PlatformConfig, RunbookCommand};
 use broccoli_devops_agent::ports::StateStore;
@@ -32,9 +32,9 @@ fn topology(mode: OperationMode, worker_port: u16, redis_port: u16) -> Deploymen
                 kind: ResourceKind::Worker,
                 node: None,
                 probes: vec![ProbeSpec {
-                    probe: "tcp.connect".into(),
                     target: Some(format!("127.0.0.1:{worker_port}")),
                     url: None,
+                    ..ProbeSpec::new("tcp.connect")
                 }],
             },
             TopologyResource {
@@ -42,9 +42,9 @@ fn topology(mode: OperationMode, worker_port: u16, redis_port: u16) -> Deploymen
                 kind: ResourceKind::Redis,
                 node: None,
                 probes: vec![ProbeSpec {
-                    probe: "tcp.connect".into(),
                     target: Some(format!("127.0.0.1:{redis_port}")),
                     url: None,
+                    ..ProbeSpec::new("tcp.connect")
                 }],
             },
         ],
@@ -132,16 +132,21 @@ async fn matrix_drives_auto_approve_deny_and_rate_limit() {
     let actions = runner.run_proposals(&job).await.unwrap();
     assert_eq!(actions.len(), 3);
 
-    // Row 2, rehearsal: auto → executed (dry run) → verified: the worker listener is Healthy.
+    // Row 2, rehearsal: auto → executed as a dry run → verified as a dry run, which succeeds
+    // but is labelled as no evidence of remediation.
     assert_eq!(actions[0].runbook_id, "worker.restart");
     assert_eq!(actions[0].approval, ApprovalState::NotRequired);
     assert_eq!(actions[0].status, ActionStatus::Succeeded);
+    assert_eq!(
+        actions[0].verification_evidence,
+        Some(VerificationEvidence::DryRun)
+    );
     assert!(
         actions[0]
             .verification_summary
             .as_deref()
             .unwrap()
-            .contains("Healthy")
+            .contains("dry run")
     );
 
     // Row 8, rehearsal: approve → waiting for a human.
@@ -153,14 +158,19 @@ async fn matrix_drives_auto_approve_deny_and_rate_limit() {
     assert_eq!(actions[2].approval, ApprovalState::Rejected);
     assert_eq!(actions[2].status, ActionStatus::Cancelled);
 
-    // Human approval runs the purge; the after Snapshot still shows Redis down, so the command's
-    // exit code zero is not accepted as success.
+    // Human approval runs the purge — as a dry run here, so it is recorded as such rather than
+    // judged against Redis, which is down. (Live verification is covered in tests/reliability.rs.)
     let purged = runner
         .approve_action(actions[1].action_run_id, "op")
         .await
         .unwrap();
     assert_eq!(purged.approval, ApprovalState::Approved);
-    assert_eq!(purged.status, ActionStatus::VerificationFailed);
+    assert_eq!(purged.approved_by.as_deref(), Some("op"));
+    assert_eq!(purged.status, ActionStatus::Succeeded);
+    assert_eq!(
+        purged.verification_evidence,
+        Some(VerificationEvidence::DryRun)
+    );
 
     // Rule 5: the same automatic restart on the same target within the window escalates.
     let (_issue, job2) = runner
@@ -232,7 +242,7 @@ async fn contest_mode_denies_destructive_rows() {
 async fn platform_refuses_unconfigured_runbooks() {
     let dir = tempfile::tempdir().unwrap();
     let client = ScriptedModelClient::new(vec![
-        vec![propose("c1", "station.restart", "worker-1")],
+        vec![propose("c1", "worker.start", "worker-1")],
         vec![diagnosis("c2")],
     ]);
     let runner = SliceRunner::wire(
@@ -251,6 +261,23 @@ async fn platform_refuses_unconfigured_runbooks() {
         .await
         .unwrap();
     let actions = runner.run_proposals(&job).await.unwrap();
-    // station.restart is auto in rehearsal, so it reaches the Platform — which has no command.
+    // worker.start is auto in rehearsal, so it reaches the Platform — which has no command.
     assert_eq!(actions[0].status, ActionStatus::Failed);
+    assert!(
+        actions[0]
+            .execution_summary
+            .as_deref()
+            .unwrap()
+            .contains("no command is configured")
+    );
+    // The Platform's output record is a registered Artifact, resolvable by ID.
+    let artifact = runner
+        .store()
+        .get_artifact(actions[0].execution_artifact_id.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        artifact.produced_by_action_run_id,
+        Some(actions[0].action_run_id)
+    );
 }

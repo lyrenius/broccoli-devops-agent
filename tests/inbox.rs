@@ -37,9 +37,9 @@ fn topology(worker_port: u16, redis_port: u16) -> DeploymentTopology {
                 kind: ResourceKind::Worker,
                 node: None,
                 probes: vec![ProbeSpec {
-                    probe: "tcp.connect".into(),
                     target: Some(format!("127.0.0.1:{worker_port}")),
                     url: None,
+                    ..ProbeSpec::new("tcp.connect")
                 }],
             },
             TopologyResource {
@@ -47,9 +47,9 @@ fn topology(worker_port: u16, redis_port: u16) -> DeploymentTopology {
                 kind: ResourceKind::Redis,
                 node: None,
                 probes: vec![ProbeSpec {
-                    probe: "tcp.connect".into(),
                     target: Some(format!("127.0.0.1:{redis_port}")),
                     url: None,
+                    ..ProbeSpec::new("tcp.connect")
                 }],
             },
         ],
@@ -419,8 +419,8 @@ async fn failed_actions_can_be_sent_upstream() {
         dir.path(),
         worker.local_addr().unwrap().port(),
         vec![
-            // station.restart is auto in rehearsal but has no configured command → refused.
-            vec![propose("c1", "station.restart", "worker-1")],
+            // worker.start is auto in rehearsal but has no configured command → refused.
+            vec![propose("c1", "worker.start", "worker-1")],
             vec![diagnosis("c2")],
             // Revision: no proposals this time.
             vec![call(
@@ -450,10 +450,27 @@ async fn failed_actions_can_be_sent_upstream() {
         .await
         .unwrap();
     let revision = outcome.revision.unwrap();
-    let FeedbackOrigin::FailedAction { summary, .. } = &revision.job.feedback[0].origin else {
+    let FeedbackOrigin::FailedAction {
+        summary, evidence, ..
+    } = &revision.job.feedback[0].origin
+    else {
         panic!("feedback about a failed action");
     };
-    assert!(summary.contains("Failed"), "{summary}");
+    assert!(summary.contains("no command is configured"), "{summary}");
+    // The Platform's refusal travels upstream as sanitized evidence, fenced in the View.
+    assert!(
+        evidence
+            .as_deref()
+            .unwrap()
+            .contains("refused: no command configured")
+    );
+    let view = runner
+        .store()
+        .get_artifact(revision.job.snapshot_view.artifact_id)
+        .await
+        .unwrap();
+    let view_body = String::from_utf8(runner.artifacts().read_verified(&view).unwrap()).unwrap();
+    assert!(view_body.contains("execution_evidence"));
     assert!(revision.actions.is_empty());
     assert!(runner.inbox().await.unwrap().failed_actions.is_empty());
 }

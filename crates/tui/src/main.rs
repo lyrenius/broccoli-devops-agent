@@ -2,9 +2,9 @@
 //!
 //! A pure client of the control plane's HTTP API: it refreshes status, the latest Snapshot, the
 //! inbox, issues, and the event tail once a second, and lets an operator work the inbox —
-//! approve, reject with a comment, acknowledge, or send an item back upstream — capture a
-//! Snapshot, and freeze or resume the Scheduler. It has no state of its own and no access to
-//! machines — everything it can do, the API and therefore the authority matrix allow.
+//! approve, reject with a comment, acknowledge, or send an item back upstream — close Issues,
+//! capture a Snapshot, and freeze or resume the Scheduler. It has no state of its own and no
+//! access to machines — everything it can do, the API and therefore the authority matrix allow.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -98,8 +98,18 @@ impl InboxItem {
                 detail.push_str(&format!("\ncomment: {comment}"));
             }
         }
+        if let Some(summary) = &action.execution_summary {
+            detail.push_str(&format!("\nexecution: {summary}"));
+        }
         if let Some(summary) = &action.verification_summary {
-            detail.push_str(&format!("\nverification: {summary}"));
+            detail.push_str(&format!(
+                "\nverification: {summary}{}",
+                action
+                    .verification_evidence
+                    .as_deref()
+                    .map(|evidence| format!(" [{evidence} evidence]"))
+                    .unwrap_or_default()
+            ));
         }
         if let Some(review) = &action.review {
             detail.push_str(&format!(
@@ -144,6 +154,10 @@ pub enum Pending {
     SendUpstream,
     /// Acknowledge the selected item with the text as comment.
     Acknowledge,
+    /// Resolve the selected Issue with the text as comment.
+    ResolveIssue,
+    /// Cancel the selected Issue with the text as comment.
+    CancelIssue,
 }
 
 /// A one-line text prompt in the footer.
@@ -162,6 +176,8 @@ impl Prompt {
             Pending::Reject => "reject — comment (Enter to submit, Esc to cancel): ",
             Pending::SendUpstream => "send upstream — feedback for the next pass: ",
             Pending::Acknowledge => "acknowledge — comment (optional): ",
+            Pending::ResolveIssue => "resolve issue — comment (optional): ",
+            Pending::CancelIssue => "cancel issue — comment (optional): ",
         }
     }
 }
@@ -185,6 +201,8 @@ pub struct App {
     pub events: Vec<EventRow>,
     /// Selected inbox index.
     pub selected: usize,
+    /// Selected issue index.
+    pub selected_issue: usize,
     /// Active footer prompt, if any.
     pub prompt: Option<Prompt>,
     /// Transient footer message (last error or confirmation).
@@ -237,6 +255,9 @@ impl App {
         }
         if let Ok(issues) = client.issues().await {
             self.issues = issues;
+            if self.selected_issue >= self.issues.len() {
+                self.selected_issue = self.issues.len().saturating_sub(1);
+            }
         }
         if let Ok(events) = client.events(200).await {
             self.events = events;
@@ -288,15 +309,27 @@ impl App {
                 self.screen = Screen::ALL[(index + 1) % Screen::ALL.len()];
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.selected + 1 < self.inbox.len() {
+                if self.screen == Screen::Issues {
+                    if self.selected_issue + 1 < self.issues.len() {
+                        self.selected_issue += 1;
+                    }
+                } else if self.selected + 1 < self.inbox.len() {
                     self.selected += 1;
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.screen == Screen::Issues {
+                    self.selected_issue = self.selected_issue.saturating_sub(1);
+                } else {
+                    self.selected = self.selected.saturating_sub(1);
+                }
+            }
             KeyCode::Char('a') => self.approve(client).await,
             KeyCode::Char('r') => self.open_prompt(Pending::Reject),
             KeyCode::Char('b') => self.open_prompt(Pending::SendUpstream),
             KeyCode::Char('x') => self.open_prompt(Pending::Acknowledge),
+            KeyCode::Char('R') => self.open_issue_prompt(Pending::ResolveIssue),
+            KeyCode::Char('C') => self.open_issue_prompt(Pending::CancelIssue),
             KeyCode::Char('s') => {
                 self.message = Some(match client.capture().await {
                     Ok(_) => "Snapshot captured".to_string(),
@@ -320,6 +353,23 @@ impl App {
         item
     }
 
+    /// Opens a footer prompt for the selected Issue, when it is still live.
+    fn open_issue_prompt(&mut self, pending: Pending) {
+        let Some(issue) = self.issues.get(self.selected_issue) else {
+            self.message = Some("no issue selected".to_string());
+            return;
+        };
+        if matches!(issue.status.as_str(), "resolved" | "cancelled" | "failed") {
+            self.message = Some(format!("issue is already {}", issue.status));
+            return;
+        }
+        self.screen = Screen::Issues;
+        self.prompt = Some(Prompt {
+            pending,
+            buffer: String::new(),
+        });
+    }
+
     /// Opens a footer prompt for the selected item, if the decision applies to it.
     fn open_prompt(&mut self, pending: Pending) {
         let Some(item) = self.selected_item() else {
@@ -328,6 +378,7 @@ impl App {
         let applies = match pending {
             Pending::Reject => item.category == Category::Request,
             Pending::SendUpstream | Pending::Acknowledge => item.category != Category::Request,
+            Pending::ResolveIssue | Pending::CancelIssue => false,
         };
         if !applies {
             self.message = Some(format!(
@@ -360,11 +411,39 @@ impl App {
 
     /// Submits a finished prompt.
     async fn submit(&mut self, client: &ApiClient, prompt: Prompt) {
+        let comment = prompt.buffer.trim();
+        if matches!(prompt.pending, Pending::ResolveIssue | Pending::CancelIssue) {
+            let Some(issue) = self.issues.get(self.selected_issue).cloned() else {
+                self.message = Some("no issue selected".to_string());
+                return;
+            };
+            let outcome = if prompt.pending == Pending::ResolveIssue {
+                "resolved"
+            } else {
+                "cancelled"
+            };
+            self.message = Some(
+                match client
+                    .close_issue(&issue.issue_id, &self.operator, outcome, comment)
+                    .await
+                {
+                    Ok(value) => format!(
+                        "issue {} → {}",
+                        issue.title,
+                        value["status"].as_str().unwrap_or("?")
+                    ),
+                    Err(error) => format!("close failed: {error}"),
+                },
+            );
+            return;
+        }
         let Some(item) = self.selected_item() else {
             return;
         };
-        let comment = prompt.buffer.trim();
         let result = match prompt.pending {
+            Pending::ResolveIssue | Pending::CancelIssue => {
+                unreachable!("issue prompts are submitted above")
+            }
             Pending::Reject => client.reject(&item.id, &self.operator, comment).await,
             Pending::SendUpstream | Pending::Acknowledge => {
                 let decision = if prompt.pending == Pending::SendUpstream {
@@ -397,6 +476,7 @@ impl App {
                 )
             }
             (Pending::Acknowledge, Ok(_)) => "acknowledged".to_string(),
+            (Pending::ResolveIssue | Pending::CancelIssue, Ok(_)) => "issue closed".to_string(),
             (_, Err(error)) => format!("{:?} failed: {error}", prompt.pending),
         });
     }
@@ -477,7 +557,9 @@ mod tests {
             reason: "queue is stuck".into(),
             denial: None,
             review: None,
+            execution_summary: None,
             verification_summary: None,
+            verification_evidence: None,
         }
     }
 

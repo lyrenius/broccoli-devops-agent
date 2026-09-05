@@ -41,6 +41,18 @@ pub enum AgentError {
         to: String,
     },
 
+    /// An optimistic update found the stored record changed by someone else first.
+    ///
+    /// Every state transition is a compare-and-set against the record the caller read, so two
+    /// operators approving the same action, or a retry racing its original, cannot both apply.
+    #[error("{entity} `{id}` changed concurrently; re-read it and decide again")]
+    Conflict {
+        /// Kind of object that changed underneath the caller.
+        entity: &'static str,
+        /// ID of the object.
+        id: String,
+    },
+
     /// The current scheduler mode forbids the requested operation.
     #[error("Scheduler mode `{mode}` does not allow `{operation}`")]
     SchedulerFrozen {

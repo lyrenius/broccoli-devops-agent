@@ -99,3 +99,25 @@ from = "printer-station-1"
 to = "broccoli-server"
 relation = "rest_api"
 critical = false
+
+# ---------------------------------------------------------------------------------------------
+# Business probes (all unauthenticated reads; credentials never belong in this file):
+#
+# [[resources]]
+# id = "redis-mq"
+# kind = "redis"
+# probes = [
+#   { probe = "tcp.connect", target = "10.0.0.11:6379", degraded_above_ms = 50 },
+#   # queue backlog: Degraded above 200 pending entries, published as the metric `queue.depth`
+#   { probe = "redis.llen", target = "10.0.0.11:6379", key = "judge:queue", metric = "queue.depth", max = 200 },
+# ]
+#
+# [[resources]]
+# id = "broccoli-server"
+# kind = "broccoli_server"
+# probes = [
+#   { probe = "http.status", url = "http://10.0.0.12:3000/healthz", degraded_above_ms = 300 },
+#   # worker heartbeats and judging counters from Broccoli's own API, one value per probe
+#   { probe = "http.json", url = "http://10.0.0.12:3000/api/status", pointer = "/workers/online", metric = "workers.online", min = 2 },
+#   { probe = "http.json", url = "http://10.0.0.12:3000/api/status", pointer = "/mode", expect = "contest" },
+# ]

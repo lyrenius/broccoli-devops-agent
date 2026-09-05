@@ -4,8 +4,13 @@
 //! `events.jsonl` plus one JSON document per Snapshot, Issue, Job, ActionRun, and Artifact record.
 //! It trades throughput for auditability — every object is a plain file an operator can open — and
 //! keeps the exact `StateStore` contract so a later SQLite implementation is a drop-in swap.
-//! Writes are not transactional across objects; the Scheduler documents which pairs a database
-//! implementation must commit atomically.
+//!
+//! Each document write is atomic on its own: the JSON is written to a sibling temporary file,
+//! synced, and renamed over the target, so a crash mid-write leaves the previous version intact
+//! rather than a truncated file. Event lines are synced after every append. Writes are still not
+//! transactional across objects; Scheduler recovery reconciles the gaps that leaves (a Job with
+//! no executor, an action whose outcome was never recorded) instead of pretending they cannot
+//! happen.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write as _};
@@ -126,14 +131,28 @@ impl FileStateStore {
         })
     }
 
-    /// Writes one object as a pretty JSON document under the given subdirectory.
+    /// Writes one object as a pretty JSON document under the given subdirectory, atomically.
+    ///
+    /// Temp file, fsync, rename: readers and a crashed writer both see either the old document
+    /// or the new one, never a partial file.
     fn write_doc<T: Serialize>(&self, sub: &str, id: impl ToString, value: &T) -> AgentResult<()> {
-        let path = self.root.join(sub).join(format!("{}.json", id.to_string()));
+        let dir = self.root.join(sub);
+        let path = dir.join(format!("{}.json", id.to_string()));
+        let temp = dir.join(format!("{}.json.tmp", id.to_string()));
         let text = serde_json::to_string_pretty(value)?;
-        std::fs::write(&path, text).map_err(|source| AgentError::Io {
-            context: format!("writing `{}`", path.display()),
-            source,
-        })
+        let io = |context: String| move |source| AgentError::Io { context, source };
+        {
+            let mut file = std::fs::File::create(&temp)
+                .map_err(io(format!("creating `{}`", temp.display())))?;
+            file.write_all(text.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(io(format!("writing `{}`", temp.display())))?;
+        }
+        std::fs::rename(&temp, &path).map_err(io(format!(
+            "renaming `{}` over `{}`",
+            temp.display(),
+            path.display()
+        )))
     }
 
     /// Appends one event line to `events.jsonl` and flushes it.
@@ -150,7 +169,7 @@ impl FileStateStore {
         let mut line = serde_json::to_string(record)?;
         line.push('\n');
         file.write_all(line.as_bytes())
-            .and_then(|()| file.flush())
+            .and_then(|()| file.sync_data())
             .map_err(|source| AgentError::Io {
                 context: format!("appending to `{}`", path.display()),
                 source,
@@ -161,6 +180,14 @@ impl FileStateStore {
 /// Builds the standard Duplicate error.
 fn duplicate(entity: &'static str, id: impl ToString) -> AgentError {
     AgentError::Duplicate {
+        entity,
+        id: id.to_string(),
+    }
+}
+
+/// Builds the standard Conflict error.
+fn conflict(entity: &'static str, id: impl ToString) -> AgentError {
+    AgentError::Conflict {
         entity,
         id: id.to_string(),
     }
@@ -220,6 +247,19 @@ impl StateStore for FileStateStore {
         Ok(())
     }
 
+    /// Compare-and-set on an Issue under the index lock.
+    async fn update_issue_if(&self, expected: &Issue, next: Issue) -> AgentResult<()> {
+        let mut index = self.index.write().await;
+        match index.issues.get(&next.issue_id) {
+            None => return Err(not_found("Issue", next.issue_id)),
+            Some(stored) if stored != expected => return Err(conflict("Issue", next.issue_id)),
+            Some(_) => {}
+        }
+        self.write_doc("issues", next.issue_id, &next)?;
+        index.issues.insert(next.issue_id, next);
+        Ok(())
+    }
+
     /// Reads an Issue by ID.
     async fn get_issue(&self, issue_id: IssueId) -> AgentResult<Issue> {
         self.index
@@ -265,6 +305,19 @@ impl StateStore for FileStateStore {
         }
         self.write_doc("jobs", job.job_id, &job)?;
         index.jobs.insert(job.job_id, job);
+        Ok(())
+    }
+
+    /// Compare-and-set on a Job under the index lock.
+    async fn update_job_if(&self, expected: &Job, next: Job) -> AgentResult<()> {
+        let mut index = self.index.write().await;
+        match index.jobs.get(&next.job_id) {
+            None => return Err(not_found("Job", next.job_id)),
+            Some(stored) if stored != expected => return Err(conflict("Job", next.job_id)),
+            Some(_) => {}
+        }
+        self.write_doc("jobs", next.job_id, &next)?;
+        index.jobs.insert(next.job_id, next);
         Ok(())
     }
 
@@ -314,6 +367,37 @@ impl StateStore for FileStateStore {
         self.write_doc("action_runs", action.action_run_id, &action)?;
         index.action_runs.insert(action.action_run_id, action);
         Ok(())
+    }
+
+    /// Compare-and-set on an ActionRun under the index lock.
+    async fn update_action_run_if(&self, expected: &ActionRun, next: ActionRun) -> AgentResult<()> {
+        let mut index = self.index.write().await;
+        match index.action_runs.get(&next.action_run_id) {
+            None => return Err(not_found("ActionRun", next.action_run_id)),
+            Some(stored) if stored != expected => {
+                return Err(conflict("ActionRun", next.action_run_id));
+            }
+            Some(_) => {}
+        }
+        self.write_doc("action_runs", next.action_run_id, &next)?;
+        index.action_runs.insert(next.action_run_id, next);
+        Ok(())
+    }
+
+    /// Answers whether another live ActionRun already holds the key, under the index lock.
+    async fn claim_idempotency_key(
+        &self,
+        key: &str,
+        action_run_id: ActionRunId,
+    ) -> AgentResult<Option<ActionRunId>> {
+        let index = self.index.write().await;
+        Ok(index
+            .action_runs
+            .values()
+            .filter(|run| run.action_run_id != action_run_id)
+            .filter(|run| run.idempotency_key == key && run.holds_idempotency_claim())
+            .map(|run| run.action_run_id)
+            .min())
     }
 
     /// Reads an ActionRun by ID.

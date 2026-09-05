@@ -101,6 +101,19 @@ impl StateStore for InMemoryStateStore {
         Ok(())
     }
 
+    /// Compare-and-set on an Issue under the store lock.
+    async fn update_issue_if(&self, expected: &Issue, next: Issue) -> AgentResult<()> {
+        let mut state = self.inner.write().await;
+        match state.issues.get(&next.issue_id) {
+            None => Err(not_found("Issue", next.issue_id)),
+            Some(stored) if stored != expected => Err(conflict("Issue", next.issue_id)),
+            Some(_) => {
+                state.issues.insert(next.issue_id, next);
+                Ok(())
+            }
+        }
+    }
+
     /// Returns a clone of the specified Issue.
     async fn get_issue(&self, issue_id: IssueId) -> AgentResult<Issue> {
         self.inner
@@ -147,6 +160,19 @@ impl StateStore for InMemoryStateStore {
         Ok(())
     }
 
+    /// Compare-and-set on a Job under the store lock.
+    async fn update_job_if(&self, expected: &Job, next: Job) -> AgentResult<()> {
+        let mut state = self.inner.write().await;
+        match state.jobs.get(&next.job_id) {
+            None => Err(not_found("Job", next.job_id)),
+            Some(stored) if stored != expected => Err(conflict("Job", next.job_id)),
+            Some(_) => {
+                state.jobs.insert(next.job_id, next);
+                Ok(())
+            }
+        }
+    }
+
     /// Returns a clone of the specified Job.
     async fn get_job(&self, job_id: JobId) -> AgentResult<Job> {
         self.inner
@@ -191,6 +217,35 @@ impl StateStore for InMemoryStateStore {
         }
         state.action_runs.insert(action.action_run_id, action);
         Ok(())
+    }
+
+    /// Compare-and-set on an ActionRun under the store lock.
+    async fn update_action_run_if(&self, expected: &ActionRun, next: ActionRun) -> AgentResult<()> {
+        let mut state = self.inner.write().await;
+        match state.action_runs.get(&next.action_run_id) {
+            None => Err(not_found("ActionRun", next.action_run_id)),
+            Some(stored) if stored != expected => Err(conflict("ActionRun", next.action_run_id)),
+            Some(_) => {
+                state.action_runs.insert(next.action_run_id, next);
+                Ok(())
+            }
+        }
+    }
+
+    /// Answers whether another live ActionRun already holds the key, under the store lock.
+    async fn claim_idempotency_key(
+        &self,
+        key: &str,
+        action_run_id: ActionRunId,
+    ) -> AgentResult<Option<ActionRunId>> {
+        let state = self.inner.write().await;
+        Ok(state
+            .action_runs
+            .values()
+            .filter(|run| run.action_run_id != action_run_id)
+            .filter(|run| run.idempotency_key == key && run.holds_idempotency_claim())
+            .map(|run| run.action_run_id)
+            .min())
     }
 
     /// Returns a clone of the specified ActionRun.
@@ -302,6 +357,14 @@ impl StateStore for InMemoryStateStore {
 /// Creates a Duplicate error containing the entity kind and ID.
 fn duplicate(entity: &'static str, id: impl ToString) -> AgentError {
     AgentError::Duplicate {
+        entity,
+        id: id.to_string(),
+    }
+}
+
+/// Creates a Conflict error containing the entity kind and ID.
+fn conflict(entity: &'static str, id: impl ToString) -> AgentError {
+    AgentError::Conflict {
         entity,
         id: id.to_string(),
     }

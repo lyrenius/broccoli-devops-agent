@@ -325,10 +325,12 @@ impl Issue {
     }
 }
 
-/// Returns whether an Issue transition belongs to the initially allowed minimal flow.
+/// Returns whether an Issue transition belongs to the allowed flow.
 ///
-/// This function encodes only fundamental ordering that should not change with product policy.
-/// Contest-phase permissions and automation boundaries are deferred to the Scheduler.
+/// Terminal states are final. Among the live states the Scheduler derives the current one from
+/// the Issue's outstanding work (§4.10 of the architecture document), so every live state can
+/// move to every other live state it can be derived into; a human may resolve or cancel from any
+/// live state.
 fn is_valid_transition(current: IssueStatus, next: IssueStatus) -> bool {
     use IssueStatus::{
         Cancelled, Failed, Investigating, Mitigating, Open, Resolved, Verifying, WaitingForHuman,
@@ -336,16 +338,22 @@ fn is_valid_transition(current: IssueStatus, next: IssueStatus) -> bool {
 
     matches!(
         (current, next),
-        (Open, Investigating | Cancelled | Failed)
+        (Open, Investigating | WaitingForHuman | Cancelled | Failed)
             | (
                 Investigating,
-                WaitingForHuman | Mitigating | Resolved | Failed | Cancelled
+                WaitingForHuman | Mitigating | Verifying | Resolved | Failed | Cancelled
             )
             | (
                 WaitingForHuman,
-                Investigating | Mitigating | Failed | Cancelled
+                Investigating | Mitigating | Resolved | Failed | Cancelled
             )
-            | (Mitigating, Verifying | Failed | Cancelled)
-            | (Verifying, Resolved | Mitigating | Failed | Cancelled)
+            | (
+                Mitigating,
+                Investigating | WaitingForHuman | Verifying | Failed | Cancelled
+            )
+            | (
+                Verifying,
+                Investigating | WaitingForHuman | Resolved | Mitigating | Failed | Cancelled
+            )
     )
 }

@@ -9,7 +9,7 @@ See the [architecture document](./docs/architecture.md) for the complete design 
 Two files, both safe to commit — neither holds credentials:
 
 - `config/agent.toml` (copy from [`config/agent.example.toml`](./config/agent.example.toml)): data directory, topology path, and the model relay (`base_url`, `model`, `wire_api`) with the **name** of the environment variable that carries the API key. Export that variable before running a model-backed command.
-- `config/topology.toml` (copy from [`config/topology.example.toml`](./config/topology.example.toml)): every machine and endpoint — PostgreSQL, Redis, CephFS/object storage, the API server, frontend, judge workers, and stations — with the read-only probes used to observe them.
+- `config/topology.toml` (copy from [`config/topology.example.toml`](./config/topology.example.toml)): every machine and endpoint — PostgreSQL, Redis, CephFS/object storage, the API server, frontend, judge workers, and stations — with the read-only probes used to observe them: `tcp.connect` and `http.status` for reachability (with a `degraded_above_ms` latency threshold), `redis.llen` for queue backlog, and `http.json` for any counter Broccoli's API exposes (worker heartbeats, judging results), each with `min`/`max`/`expect` health criteria.
 
 `broccoli-devops-agent config show` prints the effective configuration as JSON (key redacted) for a frontend or for checking what the agent will actually use.
 
@@ -19,6 +19,8 @@ The control plane exposes an HTTP + SSE API (`serve`), and two user interfaces a
 
 ```bash
 # Terminal 1: the control plane API (localhost:4720 by default; see [api] in config/agent.toml).
+# Startup recovers first: interrupted work is reconciled into the inbox and the previous freeze
+# is restored; dispatch resumes on its own only after a clean restart (--stay-frozen to never).
 cargo run -- serve
 
 # Terminal 2: the web console — plain React + Vite, no Broccoli dependencies.
@@ -86,8 +88,11 @@ cargo run -- actions approve <id> --as alice                  # executes and ver
 cargo run -- actions reject <id> --as alice --comment "..."   # cancels it; comment travels with it
 cargo run -- review action <id> --upstream --comment "..."    # revising Job runs now with the feedback
 cargo run -- review job <id> --acknowledge                    # recorded; no further automatic work
-cargo run -- actions list                                     # every ActionRun with denial and review
+cargo run -- issues close <id> --resolved --comment "..."     # or --cancelled / --failed
+cargo run -- actions list                                     # every ActionRun with denial, evidence, review
 ```
+
+Authority is decided over the whole proposal: the runbook, every target's kind (a worker restart cannot be pointed at the API server), the Job's target scope and capabilities, and the arguments — then the matrix row. Every transition is a compare-and-set, the idempotency key is claimed atomically (a duplicate of a live action is denied; a retry after a failure is allowed and escalated to approval), and a command that outlives its timeout is killed with its whole process group before the failure is reported. Verification is per operation class and graded: `strong` when the effect was observed to change, `weak` when the target was already healthy, `dry_run` when nothing executed — only real evidence resolves an Issue; otherwise the Issue waits for a human to close it.
 
 The Platform executes runbooks as the commands you map in `config/agent.toml` under `[[platform.runbooks]]` (for example `ssh {target} sudo systemctl restart broccoli-worker`); credentials stay with your SSH agent. It starts in **dry-run** mode — commands are rendered and recorded as Artifacts, not executed — until you set `dry_run = false`. Verification treats a command's exit code zero as evidence only: the target must be Healthy in the after-Snapshot, or the action ends as `VerificationFailed`.
 
@@ -115,7 +120,8 @@ The v0.1 slice deliberately does not implement:
   but the Scheduler Policy and Judger adapters are not, so every Scheduler
   decision point still runs its conservative deterministic fallback.
 - Real machine mutation out of the box: the Platform executes only the runbook commands you configure, and stays in dry-run until you opt in.
-- Deciding an Issue's fate from the inbox: acknowledging a denial or failure records the review and stops, but does not resolve or cancel the Issue.
+- Cross-object transactions: each document write is atomic and every update a compare-and-set, but a crash between two records is reconciled by startup recovery rather than prevented.
+- Periodic collection, automatic incident intake through the Snapshot Judge, and continuous autonomous troubleshooting: capture and reports are still operator-triggered.
 - Authenticated PostgreSQL, Redis, object-storage, or Broccoli API probes; the
   v0.1 Probe Registry is `tcp.connect` and plain-HTTP `http.status` only.
 - SQLite (the file-backed store keeps the same `StateStore` contract for a

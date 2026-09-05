@@ -89,9 +89,9 @@ async fn test_topology() -> DeploymentTopology {
                 kind: serde_json::from_value(serde_json::json!("redis")).unwrap(),
                 node: Some("infra-1".to_string()),
                 probes: vec![ProbeSpec {
-                    probe: "tcp.connect".to_string(),
                     target: Some(healthy),
                     url: None,
+                    ..ProbeSpec::new("tcp.connect")
                 }],
             },
             TopologyResource {
@@ -99,9 +99,9 @@ async fn test_topology() -> DeploymentTopology {
                 kind: serde_json::from_value(serde_json::json!("broccoli_server")).unwrap(),
                 node: Some("app-1".to_string()),
                 probes: vec![ProbeSpec {
-                    probe: "http.status".to_string(),
                     target: None,
                     url: Some(format!("http://{http}/healthz")),
+                    ..ProbeSpec::new("http.status")
                 }],
             },
             TopologyResource {
@@ -109,9 +109,9 @@ async fn test_topology() -> DeploymentTopology {
                 kind: serde_json::from_value(serde_json::json!("postgresql")).unwrap(),
                 node: Some("infra-1".to_string()),
                 probes: vec![ProbeSpec {
-                    probe: "tcp.connect".to_string(),
                     target: Some(down),
                     url: None,
+                    ..ProbeSpec::new("tcp.connect")
                 }],
             },
             TopologyResource {
@@ -247,7 +247,9 @@ async fn human_report_flows_to_diagnosis_and_survives_restart() {
             .unwrap();
 
         assert_eq!(issue.priority, IssuePriority::HumanTop);
-        assert_eq!(issue.status, IssueStatus::Investigating);
+        // A diagnosis with no proposals ends the pass: nothing automatic remains, so the Issue
+        // is derived to WaitingForHuman rather than left Investigating forever.
+        assert_eq!(issue.status, IssueStatus::WaitingForHuman);
         assert_eq!(job.status, JobStatus::Completed);
         let result = job.result.as_ref().unwrap();
         assert_eq!(result.outcome, JobOutcome::DiagnosisOnly);

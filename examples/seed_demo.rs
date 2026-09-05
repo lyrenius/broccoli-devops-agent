@@ -7,9 +7,10 @@
 //! ```
 //!
 //! The seeded state holds one permission request (a queue purge), one rule denial (an
-//! operation-mode change), one failed action (a worker restart whose target stayed down), and one
-//! failed Job (a model that answered in prose). Reviewing an item in the console with "send back
-//! upstream" then runs the deterministic Team as the revision, so the whole loop is visible.
+//! operation-mode change no Team may hold), one failed action (a worker start the Platform has no
+//! command for), and one failed Job (a model that answered in prose). Reviewing an item in the
+//! console with "send back upstream" then runs the deterministic Team as the revision, so the
+//! whole loop is visible.
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -50,8 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     std::fs::create_dir_all(&data_dir)?;
 
-    // A tiny topology on closed local ports: everything probes as Down, which is what makes the
-    // worker restart fail verification.
+    // A tiny topology on closed local ports: everything probes as Down.
     let closed = || {
         TcpListener::bind("127.0.0.1:0")
             .map(|l| l.local_addr().unwrap().port())
@@ -111,10 +111,10 @@ probes = [{{ probe = "http.status", url = "http://127.0.0.1:{}/healthz" }}]
             ),
             propose(
                 "c4",
-                "worker.restart",
+                "worker.start",
                 "worker-1",
-                "The worker stopped sending heartbeats",
-                "worker-1 reconnects and drains the queue",
+                "A second worker slot is configured but idle",
+                "worker-1 starts and drains the queue",
             ),
         ],
         vec![call(

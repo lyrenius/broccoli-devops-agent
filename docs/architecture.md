@@ -1,9 +1,10 @@
 # Broccoli DevOps Agent Architecture
 
-> Status: Draft v0.3  
+> Status: Draft v0.4  
 > Updated: 2026-09-05  
 > Scope: Product and system architecture. This document does not yet prescribe a concrete OpenAI model, deployment host, or production permission policy.  
-> v0.3 applies the first design-feedback round (`docs/fable-design-feedback.md`): the separate Work Order layer is gone, the inbox has three categories, denials carry reasons and comments, and a human review can send an item back upstream as a revising Job.
+> v0.3 applied the first design-feedback round (`docs/fable-design-feedback.md`): the separate Work Order layer is gone, the inbox has three categories, denials carry reasons and comments, and a human review can send an item back upstream as a revising Job.  
+> v0.4 applies the second review (`docs/remaining-issues-d805bf1-zh-en.md`): joint scope authorization, idempotency claims and compare-and-set transitions, process-group kill on timeout, startup recovery with reconciliation, derived Issue status with explicit closure, class-specific verification evidence and business probes, and execution evidence in upstream feedback. See §12 for the design choices that review asked to align on.
 
 ## 1. Goal
 
@@ -174,6 +175,21 @@ Responsibilities:
 For v0.1, the Collector and Snapshot Builder may be one Rust subsystem. They do
 not need to be separate processes.
 
+#### Probe Registry (implemented)
+
+Four unauthenticated read-only probes exist, each configured per resource in
+the topology file:
+
+| Probe | Reads | Publishes |
+| --- | --- | --- |
+| `tcp.connect` | reachability and latency of `host:port` | `probe.tcp.connect.latency`; `Degraded` above `degraded_above_ms` |
+| `http.status` | status code of a plain-HTTP `GET` | latency as above |
+| `redis.llen` | the length of one Redis list (queue backlog) over the plain protocol | the metric named by `metric` (default `queue.depth`); `Degraded` outside `[min, max]` |
+| `http.json` | one value at a JSON `pointer` in a plain-HTTP `GET` response (worker heartbeats, judging counters, mode) | the numeric value as a metric; `expect` for exact matches; `Degraded` outside `[min, max]` |
+
+"Reachable but backed up" is therefore a visible state, and verification can
+require a business postcondition (§6.3) rather than an open port.
+
 ### 4.2 AutoLog DB / Snapshot Store
 
 Responsibilities:
@@ -256,6 +272,25 @@ state-machine transitions, capability and target scoping, `HumanTop`
 reservation, and idempotency. Every consultation is written to the EventLog
 with its exact input and output (mixed trust) so post-contest review can audit
 each model-influenced decision.
+
+**Authority is decided over the whole proposal.** Before the matrix row
+applies, the Scheduler validates the runbook, every target's kind against the
+operation class's allowed kinds (a worker restart pointed at the API server is
+denied, not approved under the worker row), every target against the Job's
+target scope, the class's capability against the Job's capabilities, and the
+runbook's required arguments for presence and shell safety. Any failure is a
+denial whose rationale names the failed check. The Platform re-checks the
+machine-side half (target kinds, arguments) before it runs anything.
+
+**Every transition is a compare-and-set.** Approval, rejection, execution
+start, execution result, verification, review, and Issue changes are written
+only if the stored record still equals the one the caller read; otherwise the
+caller gets `Conflict`. Two operators approving one action, or a retry racing
+its original, cannot both apply. The idempotency key is claimed under the
+store's lock before a proposal is admitted: while another ActionRun with the
+same key may yet run, is running, or succeeded, the new one is denied as a
+duplicate; a failed or cancelled run releases its key so a retry is possible —
+and the repeat rule then escalates that retry to approval.
 
 **Fallback:** when the policy model is unavailable, decision points degrade to
 conservative deterministic defaults — candidates are recorded and deferred to a
@@ -367,10 +402,20 @@ is explicit in the implementation: `LocalCommandPlatform` renders one command
 per target from the operator's Runbook templates, holds a per-resource
 execution lane for every target (acquired in sorted order, so multi-target
 actions cannot deadlock), runs the per-target executors in sequence, and
-stores the complete output as an `ActionOutput` Artifact. A refusal — unknown
-target, unconfigured Runbook, an argument with shell metacharacters — is a
-failed result, never an exception, so it reaches the Failed inbox with its
-reason.
+stores the complete output as an `ActionOutput` Artifact, registered in the
+store so its ID resolves through the Artifact API. A refusal — unknown target,
+wrong target kind for the Runbook, unconfigured Runbook, an argument with shell
+metacharacters — is a failed result, never an exception, so it reaches the
+Failed inbox with its reason.
+
+Each command runs in its own process group with a wall-clock limit. On timeout
+the whole group receives `SIGKILL` and the child is reaped before the result
+is reported and the execution lanes are released, so a "failed" action never
+means "still running and changing the machine". Output is captured
+concurrently and capped per stream. A Platform that errors out instead of
+reporting a result is recorded by the Scheduler as a failed execution, and an
+after-Snapshot that cannot be captured is recorded as a failed verification:
+an ActionRun is never left `Running` or `Verifying` with nobody responsible.
 
 ### 4.7 Reporter Agent
 
@@ -422,7 +467,25 @@ suggestions, and models cannot extend them:
   is what makes "a model cannot send a free-form shell command" concrete.
 
 `allowed_capabilities` on a Job is interpreted against these registries: a
-capability names a subset of Probes and Runbooks the Job may request.
+capability names a subset of Probes and Runbooks the Job may request. The
+Runbook Registry binds each operation class to the resource kinds it applies
+to and to one capability:
+
+| Capability | Rows | Target kinds |
+| --- | --- | --- |
+| `observe` | 1, 17 | any |
+| `operate.restart` | 2–6 | worker; API server; frontend/gateway; stations |
+| `operate.queue` | 7, 8, 21 | Redis |
+| `operate.config` | 9–11 | services |
+| `operate.firewall` | 12–13 | any |
+| `operate.deploy` | 14–16 | API server, frontend, worker |
+| `operate.database` | 18–20 | PostgreSQL |
+| `operate.storage` | 22–23 | object storage |
+| `operate.machine` | 24 | any |
+| `operate.shell`, `operate.mode` | 25, 26 | never granted to a Team |
+
+An Operate Job dispatched for a human report holds every capability but the
+last two; the matrix, not the capability list, decides what needs a human.
 
 ### 4.10 Inbox and feedback loop
 
@@ -448,14 +511,25 @@ shared status, is what groups them.
 **Sending an item back upstream** is what makes feedback participate rather
 than sit in history. The Scheduler captures a fresh Snapshot, builds a View
 whose `human_feedback` section carries every earlier feedback item on the
-Issue plus this one — the denial's reason and comment, or the failure summary,
-and the reviewer's own words — dispatches a **revising Job** (`revises_job_id`
-names the reviewed pass), runs the selected Team backend, and evaluates the
-new proposals through the matrix again. The review on the original item names
-the revising Job. Acknowledging records the review and stops; it does not
-decide the Issue's fate. Whenever something lands in the inbox, the owning
-Issue is parked at `WaitingForHuman`; a revision moves it back to
-`Investigating`.
+Issue plus this one — the denial's reason and comment, or the failure summary
+with the sanitized execution evidence (exit codes, the tail of stderr) fenced
+as untrusted data, and the reviewer's own words — dispatches a **revising
+Job** (`revises_job_id` names the reviewed pass), runs the selected Team
+backend, and evaluates the new proposals through the matrix again. The review
+on the original item names the revising Job; review-plus-dispatch is
+serialized, and a crash between the two is repaired by startup recovery.
+Acknowledging records the review and stops; it does not decide the Issue's
+fate.
+
+**Issue status is derived, not set.** After every Job result, action
+transition, review, and recovery step the Scheduler reconciles the Issue from
+its outstanding work: a running Job means `Investigating`; a ready or running
+action `Mitigating`; one awaiting verification `Verifying`; anything in an
+inbox `WaitingForHuman`. With nothing outstanding, the latest pass decides: a
+`Solved` result, or an action of the latest Job that succeeded with real (not
+dry-run) evidence, resolves the Issue; otherwise it waits for a human. A human
+closes an Issue explicitly as resolved, cancelled, or failed from any live
+state. Acknowledging an inbox item never resolves an Issue by itself.
 
 ```mermaid
 flowchart TD
@@ -625,6 +699,9 @@ struct ActionRun {
     approved_by: Option<String>,      // the human, when a human approved
     denial: Option<Denial>,           // source (policy | human), reason, comment
     review: Option<HumanReview>,      // a denied or failed action leaves the inbox through this
+    execution_summary: Option<String>,        // the Platform's own account
+    dry_run: bool,                            // rendered, not executed
+    verification_evidence: Option<VerificationEvidence>, // dry_run | weak | strong
     before_snapshot_id: SnapshotId,
     after_snapshot_id: Option<SnapshotId>,
     idempotency_key: String,
@@ -718,7 +795,22 @@ Before-action Snapshot
 ```
 
 The absence of an expected effect is a verification failure even when the
-underlying command returned exit code zero.
+underlying command returned exit code zero. Postconditions are per operation
+class:
+
+- **Observe-only** classes pass on execution success; the observation is the
+  effect.
+- **Mutating** classes must show their effect in the after-Snapshot: every
+  target `Healthy`, observed after the action started, every verification
+  Probe the proposal named having run, and for a queue purge the `queue.depth`
+  metric at zero. A target absent or `Unknown` fails — "we cannot see it" is
+  not "it worked" — which is why unprobed resources need a Probe before any
+  action on them can verify.
+- **Evidence grade.** A target that was already `Healthy` before the action
+  passes with `Weak` evidence: the check cannot tell the action's effect from
+  the prior state. A `DryRun` passes as an ActionRun (the rehearsal worked) but
+  is labelled as no evidence of remediation and never resolves an Issue.
+  `Strong` evidence means the postcondition was observed to change.
 
 ### 6.4 Denial and failure feedback
 
@@ -804,6 +896,21 @@ bypassed Scheduler check would still fail at the Platform. Every mode change,
 including the transitions inside recovery, is written to the EventLog, so the
 event stream alone reconstructs the mode history.
 
+**Startup recovery.** `serve` recovers before it serves. Recovery reads the
+previous process's last persisted mode back from the EventLog, then
+reconciles what a crash left behind rather than pretending it can be resumed:
+a Job that was running has no Team any more and is failed into the inbox; an
+action that was `Running` has an unknown outcome (the command may or may not
+have completed) and is failed into the inbox with that warning; one that was
+`Verifying` is verified now against a fresh Snapshot; one never evaluated or
+never started is denied so it can be proposed again; a revising Job whose
+review record was not written gets it written from the Job's own feedback.
+Every touched Issue is reconciled. Recovery ends `FullyFrozen` if that is what
+the previous process was, otherwise `DispatchFrozen`. `serve` resumes dispatch
+automatically only after a clean restart — the previous mode was `Running` and
+nothing had to be reconciled — and otherwise stays frozen until a human, who
+can see the recovery summary in the console, resumes.
+
 ## 8. Security and Reliability Boundaries
 
 - The OpenAI API key exists only on the Agent control plane.
@@ -815,7 +922,10 @@ event stream alone reconstructs the mode history.
 - Raw logs and contestant-derived strings are untrusted evidence.
 - A model cannot send a free-form shell command directly to a machine in normal
   mode.
-- Side effects use idempotency keys and bounded timeouts.
+- Authority is decided over the whole proposal: runbook, target kinds, Job
+  scope and capabilities, and arguments, then re-checked by the Platform.
+- Side effects use idempotency keys (claimed atomically) and bounded timeouts
+  that kill and reap the whole process group.
 - Destructive or contest-sensitive actions can be denied or require approval by
   policy.
 - The local collection, Snapshot, EventLog, and recovery path must continue
@@ -846,6 +956,13 @@ Recommended indexes include:
 
 Large artifact bodies should not be stored inline in SQLite.
 
+The file-backed store writes each document atomically (temp file, fsync,
+rename) and syncs every event line, so a crash never leaves a truncated
+record. Cross-object transactions are still absent; every multi-record change
+is ordered so that recovery can reconcile the gap a crash leaves, and every
+update is a compare-and-set so concurrent writers conflict instead of
+overwriting each other.
+
 ## 10. v0.1 Implementation Scope — IMPLEMENTED
 
 The first vertical slice is implemented and exercised by the CLI and the
@@ -864,12 +981,17 @@ The first vertical slice is implemented and exercised by the CLI and the
    built with the `operate-readonly-v1` redaction profile (`src/view.rs`),
    through either the read-only or the harness Team backend (`src/team/`).
 7. Receive structured callbacks through the sink and persist the Job result.
-8. Run proposals through the authority matrix into ActionRuns, execute them
-   through the Platform, verify them against an after-Snapshot, and route
-   denials and failures to the inbox, where a review can send them back
-   upstream as a revising Job (`src/runner.rs`, `src/api.rs`, the consoles).
-9. Restart the controller and recover Issue and Job state, with event
-   sequencing continuing from the persisted log (`cargo run -- recover`).
+8. Run proposals through joint scope validation and the authority matrix into
+   ActionRuns, execute them through the Platform (process-group timeouts,
+   registered output Artifacts), verify them with class-specific postconditions
+   and an evidence grade, and route denials and failures to the inbox, where a
+   review can send them back upstream — with sanitized execution evidence — as
+   a revising Job (`src/runner.rs`, `src/api.rs`, the consoles).
+9. Derive Issue status from outstanding work and let a human close an Issue
+   explicitly.
+10. Restart the controller: recovery reconciles interrupted Jobs and actions,
+    restores the persisted freeze mode, and `serve` resumes only after a clean
+    restart (`cargo run -- recover`, `cargo run -- serve`).
 
 The slice proves the Snapshot, Scheduler, Team, and recovery boundaries without
 permitting production mutation. No Scheduler Policy model is wired yet, so every
@@ -980,7 +1102,18 @@ Build a replayable incident corpus covering at least:
 - Conflicting Develop worktrees or Bundle targets.
 - OpenAI API unavailable during an incident.
 
-## 12. Acceptance Criteria for the Architecture
+## 12. Design choices from review round 2
+
+The second review named three choices to align on rather than fix. The
+current positions, open to change:
+
+| Choice | Position |
+| --- | --- |
+| One Job per Issue, or multiple passes? | **Multiple passes.** A Job is bound to one immutable Snapshot View; new evidence or human feedback is a new pass under the same Issue (`supersedes_job_id` for evidence, `revises_job_id` for feedback). Issue status is derived from all passes, so the human sees one Issue, not many Jobs. A strict one-to-one would require mutable Jobs and would lose replayability. |
+| One Failed inbox category for Jobs and actions? | **One category, tagged.** Both are "something the automation could not finish" and take the same two decisions; the cards and rows say whether it is a Job, an execution failure, or a verification failure. Splitting them is a UI change, not a model change, if it ever helps. |
+| A model-driven executor inside the Platform? | **Not now.** The execution block is Runbook commands plus execution lanes, deliberately deterministic: it is the last gate before a machine changes. A model earns a place there only once a concrete need (adaptive runbooks, multi-step remediations) is written down. |
+
+## 13. Acceptance Criteria for the Architecture
 
 The design is ready to move from architecture into implementation when:
 

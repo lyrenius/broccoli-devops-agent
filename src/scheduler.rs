@@ -20,13 +20,14 @@ use serde_json::json;
 use tokio::sync::RwLock;
 
 use crate::domain::{
-    ActionProposal, ActionRun, ActionRunId, ApprovalState, Artifact, ArtifactKind, ContentTrust,
-    Denial, EventRecord, HumanReport, HumanReview, Issue, IssueCandidate, IssueId, IssueStatus,
-    Job, JobBrief, JobId, JobOutcome, NewEvent, Snapshot, SnapshotId, SnapshotViewRef,
-    TeamCallback,
+    ActionProposal, ActionRun, ActionRunId, ActionStatus, ApprovalState, Artifact, ArtifactKind,
+    ContentTrust, Denial, EventRecord, FeedbackOrigin, HealthState, HumanReport, HumanReview,
+    Issue, IssueCandidate, IssueId, IssueStatus, Job, JobBrief, JobId, JobOutcome, JobResult,
+    JobStatus, NewEvent, PlatformOperationResult, ReviewDecision, Snapshot, SnapshotId,
+    SnapshotViewRef, TeamCallback, VerificationEvidence,
 };
 use crate::error::{AgentError, AgentResult};
-use crate::policy::AuthorityPolicy;
+use crate::policy::{AuthorityPolicy, OperationClass, ProposalContext};
 use crate::ports::{
     AgentsPlatformPort, CallbackAdviceRequest, CaptureRequest, CollectorPort, NextStep,
     NextStepDecision, SchedulerPolicyPort, SnapshotViewBuildRequest, SnapshotViewBuilderPort,
@@ -47,15 +48,60 @@ pub enum SchedulerMode {
     Recovering,
 }
 
-/// Summary of unfinished objects found during Scheduler recovery.
+/// Summary of what Scheduler recovery found and did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoverySummary {
-    /// Issue IDs that still need attention.
+    /// The mode the previous process had persisted last (`Running` when none was recorded).
+    pub previous_mode: SchedulerMode,
+    /// Issue IDs that were unfinished when recovery started.
     pub issue_ids: Vec<IssueId>,
-    /// Job IDs that still need attention.
+    /// Job IDs that were unfinished when recovery started.
     pub job_ids: Vec<JobId>,
-    /// ActionRun IDs that still need attention.
+    /// ActionRun IDs that were unfinished when recovery started.
     pub action_run_ids: Vec<ActionRunId>,
+    /// Jobs that were running with no Team left to run them, now `Failed` and in the inbox.
+    pub interrupted_job_ids: Vec<JobId>,
+    /// Actions whose execution was interrupted or never evaluated, now failed or denied and in
+    /// the inbox; a human must check the machine before retrying.
+    pub interrupted_action_ids: Vec<ActionRunId>,
+    /// Actions that were awaiting verification and were verified now against a fresh Snapshot.
+    pub verified_action_ids: Vec<ActionRunId>,
+    /// Revising Jobs whose review record had not been written before the crash, now recorded.
+    pub reconstructed_review_job_ids: Vec<JobId>,
+    /// The mode recovery left the Scheduler in.
+    pub final_mode: SchedulerMode,
+}
+
+impl RecoverySummary {
+    /// Whether recovery had to change anything: a clean restart has nothing here.
+    pub fn touched_anything(&self) -> bool {
+        !self.interrupted_job_ids.is_empty()
+            || !self.interrupted_action_ids.is_empty()
+            || !self.verified_action_ids.is_empty()
+            || !self.reconstructed_review_job_ids.is_empty()
+    }
+}
+
+/// How a human closes an Issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueClosure {
+    /// The problem is fixed or was not a problem.
+    Resolved,
+    /// Stop working on it without claiming it is fixed.
+    Cancelled,
+    /// Give up: the problem stands and automatic work will not continue.
+    Failed,
+}
+
+impl IssueClosure {
+    fn status(self) -> IssueStatus {
+        match self {
+            Self::Resolved => IssueStatus::Resolved,
+            Self::Cancelled => IssueStatus::Cancelled,
+            Self::Failed => IssueStatus::Failed,
+        }
+    }
 }
 
 /// Harness-validated outcome of triaging one Issue Candidate.
@@ -475,7 +521,7 @@ impl TopScheduler {
     /// inbox. A future database implementation must place the event and both updates in one
     /// transaction.
     pub async fn handle_callback(&self, callback: TeamCallback) -> AgentResult<Job> {
-        let mut job = self.store.get_job(callback.job_id).await?;
+        let job = self.store.get_job(callback.job_id).await?;
         if job.issue_id != callback.issue_id {
             return Err(AgentError::InvalidInput(format!(
                 "callback Issue `{}` does not match the Job's Issue `{}`",
@@ -501,45 +547,32 @@ impl TopScheduler {
             )
             .await?;
 
-        if let Some(result) = callback.final_result {
-            let issue_next = match result.outcome {
-                JobOutcome::NeedsHuman
-                | JobOutcome::OptionsReady
-                | JobOutcome::Blocked
-                | JobOutcome::Failed => Some(IssueStatus::WaitingForHuman),
-                JobOutcome::Solved => Some(IssueStatus::Resolved),
-                JobOutcome::DiagnosisOnly | JobOutcome::NeedsMoreData => None,
-            };
-            let failed = result.outcome == JobOutcome::Failed;
-            let failure_summary = result.summary.clone();
+        let Some(result) = callback.final_result else {
+            return Ok(job);
+        };
+        let failed = result.outcome == JobOutcome::Failed;
+        let failure_summary = result.summary.clone();
 
-            job.complete(result)?;
-            self.store.update_job(job.clone()).await?;
+        let mut next = job.clone();
+        next.complete(result)?;
+        self.store.update_job_if(&job, next.clone()).await?;
 
-            if failed {
-                self.store
-                    .append_event(
-                        NewEvent::new(
-                            "top-scheduler",
-                            "scheduler.job_failed",
-                            format!("The Job failed and awaits human review: {failure_summary}"),
-                        )
-                        .with_issue(job.issue_id)
-                        .with_job(job.job_id)
-                        .with_trust(ContentTrust::Mixed),
+        if failed {
+            self.store
+                .append_event(
+                    NewEvent::new(
+                        "top-scheduler",
+                        "scheduler.job_failed",
+                        format!("The Job failed and awaits human review: {failure_summary}"),
                     )
-                    .await?;
-            }
-
-            if let Some(next) = issue_next {
-                let mut issue = self.store.get_issue(job.issue_id).await?;
-                if issue.can_transition_to(next) {
-                    issue.transition_to(next)?;
-                    self.store.update_issue(issue).await?;
-                }
-            }
+                    .with_issue(next.issue_id)
+                    .with_job(next.job_id)
+                    .with_trust(ContentTrust::Mixed),
+                )
+                .await?;
         }
-        Ok(job)
+        self.reconcile_issue(next.issue_id).await?;
+        Ok(next)
     }
 
     /// Proposes the validated next step after a Job returned its final result.
@@ -615,13 +648,15 @@ impl TopScheduler {
     /// Converts a Team's ActionProposal into a persisted ActionRun and applies the authority matrix.
     ///
     /// The before Snapshot is captured through the Collector so every side effect has an auditable
-    /// starting state, and its operation mode selects the matrix column. The decision — auto,
-    /// approve, or deny, with the repeat-rate escalation of rule 5 — is applied immediately and
-    /// recorded, so the returned ActionRun is already `Ready`, `WaitingForApproval`, or
-    /// `Cancelled`. A denial keeps the rule's rationale on the ActionRun and parks the Issue with
-    /// a human: the item is in the Permission Denied inbox. Creation is refused while the
-    /// Scheduler is `FullyFrozen` or `Recovering`. The idempotency key comes from the caller so
-    /// retries of the same intent reuse the same key.
+    /// starting state, and its operation mode selects the matrix column. The idempotency key is
+    /// claimed first: if another live ActionRun already holds the same key (it may yet run, is
+    /// running, or succeeded) this one is denied as a duplicate before anyone is asked to approve
+    /// it. Then the whole proposal — runbook, target kinds, the Job's scope and capabilities,
+    /// arguments — is validated and the matrix row applies, with the repeat-rate escalation of
+    /// rule 5. The returned ActionRun is already `Ready`, `WaitingForApproval`, or `Cancelled`;
+    /// a denial keeps its rationale on the ActionRun and the Issue is reconciled, so the item
+    /// shows in the Permission Denied inbox. Creation is refused while the Scheduler is
+    /// `FullyFrozen` or `Recovering`.
     pub async fn create_action_run(
         &self,
         originating_job_id: JobId,
@@ -633,7 +668,7 @@ impl TopScheduler {
         let job = self.store.get_job(originating_job_id).await?;
 
         let before = self.request_snapshot(before_capture).await?;
-        let mut action = ActionRun::from_proposal(
+        let action = ActionRun::from_proposal(
             job.issue_id,
             originating_job_id,
             job.team_kind,
@@ -656,6 +691,29 @@ impl TopScheduler {
             )
             .await?;
 
+        // The idempotency claim is answered under the store's lock: two proposals of the same
+        // intent cannot both be admitted, and a retry after a failure can.
+        if let Some(holder) = self
+            .store
+            .claim_idempotency_key(&action.idempotency_key, action.action_run_id)
+            .await?
+        {
+            let rationale = format!(
+                "duplicate: ActionRun {holder} already holds idempotency key `{}` (it may yet \
+                 run, is running, or succeeded); a retry is allowed only after it fails or is \
+                 cancelled",
+                action.idempotency_key
+            );
+            return self
+                .deny_action(
+                    action,
+                    &job,
+                    Denial::by_policy(rationale.clone()),
+                    rationale,
+                )
+                .await;
+        }
+
         // Rule 5: an automatic action that already ran on one of these targets inside the window
         // escalates to approval instead of looping.
         let window = chrono::Duration::from_std(self.authority.auto_repeat_window())
@@ -671,19 +729,15 @@ impl TopScheduler {
                     .iter()
                     .any(|target| action.target_ids.contains(target))
         });
-        let decision = self.authority.decide(
-            &action.runbook_id,
-            &action.arguments,
-            before.operation_mode,
+        let decision = self.authority.decide(&ProposalContext {
+            runbook_id: &action.runbook_id,
+            target_ids: &action.target_ids,
+            arguments: &action.arguments,
+            allowed_capabilities: &job.allowed_capabilities,
+            allowed_target_ids: &job.allowed_target_ids,
+            mode: before.operation_mode,
             recent_auto_repeat,
-        );
-        let denied = decision.approval == ApprovalState::Rejected;
-        if denied {
-            action.deny(Denial::by_policy(decision.rationale.clone()))?;
-        } else {
-            action.apply_approval(decision.approval)?;
-        }
-        self.store.update_action_run(action.clone()).await?;
+        });
         self.store
             .append_event(
                 NewEvent::new(
@@ -694,43 +748,74 @@ impl TopScheduler {
                 .with_issue(job.issue_id)
                 .with_job(originating_job_id)
                 .with_action(action.action_run_id)
-                .with_payload(json!({ "decision": decision, "status": action.status })),
+                .with_payload(json!({ "decision": decision })),
             )
             .await?;
-        if denied {
-            self.store
-                .append_event(
-                    NewEvent::new(
-                        "top-scheduler",
-                        "scheduler.action_denied",
-                        format!(
-                            "Denied by rule; awaiting human review: {}",
-                            decision.rationale
-                        ),
-                    )
-                    .with_issue(job.issue_id)
-                    .with_job(originating_job_id)
-                    .with_action(action.action_run_id),
+        if decision.approval == ApprovalState::Rejected {
+            return self
+                .deny_action(
+                    action,
+                    &job,
+                    Denial::by_policy(decision.rationale.clone()),
+                    decision.rationale,
                 )
-                .await?;
-            self.park_issue_for_human(job.issue_id).await?;
+                .await;
         }
-        Ok(action)
+        let mut next = action.clone();
+        next.apply_approval(decision.approval)?;
+        self.store
+            .update_action_run_if(&action, next.clone())
+            .await?;
+        self.reconcile_issue(job.issue_id).await?;
+        Ok(next)
+    }
+
+    /// Applies a rule denial to a freshly created ActionRun and reconciles its Issue.
+    async fn deny_action(
+        &self,
+        action: ActionRun,
+        job: &Job,
+        denial: Denial,
+        rationale: String,
+    ) -> AgentResult<ActionRun> {
+        let mut next = action.clone();
+        next.deny(denial)?;
+        self.store
+            .update_action_run_if(&action, next.clone())
+            .await?;
+        self.store
+            .append_event(
+                NewEvent::new(
+                    "top-scheduler",
+                    "scheduler.action_denied",
+                    format!("Denied by rule; awaiting human review: {rationale}"),
+                )
+                .with_issue(job.issue_id)
+                .with_job(job.job_id)
+                .with_action(next.action_run_id),
+            )
+            .await?;
+        self.reconcile_issue(job.issue_id).await?;
+        Ok(next)
     }
 
     /// Records a human's approval of a waiting ActionRun; it becomes `Ready`.
     ///
-    /// The domain object enforces the state machine; this method persists the result and records
-    /// who approved what in the EventLog. Execution is a separate step (`execute_action`).
+    /// The write is a compare-and-set against the record as read, so two humans approving at
+    /// once cannot both apply: the second gets `Conflict`. Execution is a separate step
+    /// (`execute_action`).
     pub async fn approve_action(
         &self,
         action_run_id: ActionRunId,
         approved_by: impl Into<String>,
     ) -> AgentResult<ActionRun> {
         let approved_by = approved_by.into();
-        let mut action = self.store.get_action_run(action_run_id).await?;
-        action.approve(approved_by.clone())?;
-        self.store.update_action_run(action.clone()).await?;
+        let action = self.store.get_action_run(action_run_id).await?;
+        let mut next = action.clone();
+        next.approve(approved_by.clone())?;
+        self.store
+            .update_action_run_if(&action, next.clone())
+            .await?;
         self.store
             .append_event(
                 NewEvent::new(
@@ -738,20 +823,21 @@ impl TopScheduler {
                     "human.action_approved",
                     format!("{approved_by} approved the action"),
                 )
-                .with_issue(action.issue_id)
-                .with_job(action.originating_job_id)
+                .with_issue(next.issue_id)
+                .with_job(next.originating_job_id)
                 .with_action(action_run_id)
-                .with_payload(json!({ "approved_by": approved_by, "status": action.status })),
+                .with_payload(json!({ "approved_by": approved_by, "status": next.status })),
             )
             .await?;
-        Ok(action)
+        self.reconcile_issue(next.issue_id).await?;
+        Ok(next)
     }
 
     /// Records a human's rejection of a waiting ActionRun, with their comment.
     ///
     /// The action is cancelled and never executes; the denial stays on it, so it appears in the
     /// Permission Denied inbox where the same or another human decides whether the reason should
-    /// go back upstream. The Issue is parked with a human meanwhile.
+    /// go back upstream.
     pub async fn reject_action(
         &self,
         action_run_id: ActionRunId,
@@ -759,10 +845,13 @@ impl TopScheduler {
         comment: Option<String>,
     ) -> AgentResult<ActionRun> {
         let rejected_by = rejected_by.into();
-        let mut action = self.store.get_action_run(action_run_id).await?;
+        let action = self.store.get_action_run(action_run_id).await?;
         let denial = Denial::by_human(rejected_by.clone(), comment);
-        action.deny(denial.clone())?;
-        self.store.update_action_run(action.clone()).await?;
+        let mut next = action.clone();
+        next.deny(denial.clone())?;
+        self.store
+            .update_action_run_if(&action, next.clone())
+            .await?;
         self.store
             .append_event(
                 NewEvent::new(
@@ -773,62 +862,75 @@ impl TopScheduler {
                         None => format!("{rejected_by} rejected the action"),
                     },
                 )
-                .with_issue(action.issue_id)
-                .with_job(action.originating_job_id)
+                .with_issue(next.issue_id)
+                .with_job(next.originating_job_id)
                 .with_action(action_run_id)
-                .with_payload(json!({ "denial": denial, "status": action.status }))
+                .with_payload(json!({ "denial": denial, "status": next.status }))
                 .with_trust(ContentTrust::Mixed),
             )
             .await?;
-        self.park_issue_for_human(action.issue_id).await?;
-        Ok(action)
+        self.reconcile_issue(next.issue_id).await?;
+        Ok(next)
     }
 
     /// Records a human's review of a denied or failed ActionRun, taking it out of the inbox.
     ///
     /// Sending the item upstream is the caller's job (a revising Job must exist first, so the
-    /// review can name it); this method only persists and events the decision.
+    /// review can name it); this method only persists and events the decision, as a
+    /// compare-and-set so a second reviewer gets `Conflict` rather than overwriting the first.
     pub async fn review_action(
         &self,
         action_run_id: ActionRunId,
         review: HumanReview,
     ) -> AgentResult<ActionRun> {
-        let mut action = self.store.get_action_run(action_run_id).await?;
-        action.record_review(review.clone())?;
-        self.store.update_action_run(action.clone()).await?;
+        let action = self.store.get_action_run(action_run_id).await?;
+        let mut next = action.clone();
+        next.record_review(review.clone())?;
+        self.store
+            .update_action_run_if(&action, next.clone())
+            .await?;
         self.record_review_event(
             &review,
-            action.issue_id,
-            Some(action.originating_job_id),
+            next.issue_id,
+            Some(next.originating_job_id),
             Some(action_run_id),
         )
         .await?;
-        Ok(action)
+        self.reconcile_issue(next.issue_id).await?;
+        Ok(next)
     }
 
     /// Records a human's review of a failed Job, taking it out of the Failed Job inbox.
     pub async fn review_job(&self, job_id: JobId, review: HumanReview) -> AgentResult<Job> {
-        let mut job = self.store.get_job(job_id).await?;
-        job.record_review(review.clone())?;
-        self.store.update_job(job.clone()).await?;
-        self.record_review_event(&review, job.issue_id, Some(job_id), None)
+        let job = self.store.get_job(job_id).await?;
+        let mut next = job.clone();
+        next.record_review(review.clone())?;
+        self.store.update_job_if(&job, next.clone()).await?;
+        self.record_review_event(&review, next.issue_id, Some(job_id), None)
             .await?;
-        Ok(job)
+        self.reconcile_issue(next.issue_id).await?;
+        Ok(next)
     }
 
     /// Executes a `Ready` ActionRun through the Agents Platform.
     ///
     /// The Scheduler is the sole gateway to execution: it re-checks the freeze mode immediately
-    /// before starting, and Platform output is recorded with mixed trust because it contains
-    /// machine-produced text. Platform success only moves the action to `Verifying`;
-    /// `record_action_verification` decides the terminal state.
+    /// before starting, and the move to `Running` is a compare-and-set so a concurrent retry gets
+    /// `Conflict` instead of a second execution. Platform output is recorded with mixed trust
+    /// because it contains machine-produced text. A Platform that errors out (as opposed to
+    /// reporting a failed command) is recorded as a failed execution too — the action never stays
+    /// `Running` with nobody responsible for it. Platform success only moves the action to
+    /// `Verifying`; `verify_action` decides the terminal state.
     pub async fn execute_action(&self, action_run_id: ActionRunId) -> AgentResult<ActionRun> {
         self.ensure_actions_allowed("execute_action").await?;
         let platform = self.require_platform("execute_action")?;
 
-        let mut action = self.store.get_action_run(action_run_id).await?;
-        action.start()?;
-        self.store.update_action_run(action.clone()).await?;
+        let ready = self.store.get_action_run(action_run_id).await?;
+        let mut running = ready.clone();
+        running.start()?;
+        self.store
+            .update_action_run_if(&ready, running.clone())
+            .await?;
         self.store
             .append_event(
                 NewEvent::new(
@@ -836,36 +938,41 @@ impl TopScheduler {
                     "action.started",
                     "The Scheduler handed an ActionRun to the Agents Platform",
                 )
-                .with_issue(action.issue_id)
+                .with_issue(running.issue_id)
                 .with_action(action_run_id),
             )
             .await?;
 
-        let result = platform.execute_action(&action).await?;
-        action.record_execution_result(result.clone())?;
-        self.store.update_action_run(action.clone()).await?;
+        let result = match platform.execute_action(&running).await {
+            Ok(result) => result,
+            Err(error) => PlatformOperationResult::new(
+                false,
+                None,
+                format!("the Agents Platform failed before reporting a result: {error}"),
+            ),
+        };
+        let mut next = running.clone();
+        next.record_execution_result(result.clone())?;
+        self.store
+            .update_action_run_if(&running, next.clone())
+            .await?;
         self.store
             .append_event(
                 NewEvent::new("agents-platform", "action.executed", result.summary.clone())
-                    .with_issue(action.issue_id)
+                    .with_issue(next.issue_id)
                     .with_action(action_run_id)
                     .with_payload(serde_json::to_value(&result)?)
                     .with_artifacts(result.output_artifact_id.into_iter().collect())
                     .with_trust(ContentTrust::Mixed),
             )
             .await?;
-        if !result.succeeded {
-            // Execution failures are the Failed inbox's business, not something to retry blindly.
-            self.park_issue_for_human(action.issue_id).await?;
-        }
-        Ok(action)
+        self.reconcile_issue(next.issue_id).await?;
+        Ok(next)
     }
 
-    /// Captures the after Snapshot and records the effect-verification conclusion.
+    /// Captures the after Snapshot and records a caller-supplied verification conclusion.
     ///
-    /// The absence of an expected effect is a verification failure even when the underlying command
-    /// succeeded. Initially the caller supplies the boolean result; a later verifier will compute
-    /// it from the action's verification Probes.
+    /// Kept for callers with their own verifier; `verify_action` is the built-in one.
     pub async fn record_action_verification(
         &self,
         action_run_id: ActionRunId,
@@ -875,113 +982,297 @@ impl TopScheduler {
     ) -> AgentResult<ActionRun> {
         let action = self.store.get_action_run(action_run_id).await?;
         let after = self.request_snapshot(after_capture).await?;
-        let summary = summary.into();
-        self.record_verification_result(action, after.snapshot_id, passed, summary)
-            .await
+        let evidence = if passed {
+            Some(VerificationEvidence::Strong)
+        } else {
+            None
+        };
+        self.record_verification_result(
+            action,
+            Some(after.snapshot_id),
+            passed,
+            evidence,
+            summary.into(),
+        )
+        .await
     }
 
-    /// Captures the after Snapshot and verifies the action's expected effect deterministically.
+    /// Captures the after Snapshot and verifies the action's postcondition for its class.
     ///
-    /// v0.1 verification is the rule "every target the action touched must be Healthy in the
-    /// after Snapshot", except for Observe-class actions, whose effect is the observation itself.
-    /// A target missing from the Snapshot counts as unverified, and a successful command with no
-    /// visible effect is still a verification failure — exit code zero is not success. Later
-    /// verifiers will evaluate the action's own verification Probes.
+    /// Observe-only classes pass on execution success: the observation is the effect. Mutating
+    /// classes must show their effect in the after Snapshot: every target Healthy, observed
+    /// after the action started, with every verification Probe the proposal named having run,
+    /// and — for a queue purge — the queue-depth metric at zero. A target that was already
+    /// Healthy before the action passes with `Weak` evidence, because the check cannot tell the
+    /// action's effect from the prior state; a dry run passes with `DryRun` evidence, which is not
+    /// evidence of remediation at all and never resolves an Issue. A target missing from the
+    /// Snapshot or `Unknown` fails: "we cannot see it" is not "it worked". If the after Snapshot
+    /// cannot be captured, that is a verification failure recorded on the action, not an error
+    /// that leaves it `Verifying`.
     pub async fn verify_action(
         &self,
         action_run_id: ActionRunId,
         after_capture: CaptureRequest,
     ) -> AgentResult<ActionRun> {
         let action = self.store.get_action_run(action_run_id).await?;
-        let after = self.request_snapshot(after_capture).await?;
+        let after = match self.request_snapshot(after_capture).await {
+            Ok(after) => after,
+            Err(error) => {
+                return self
+                    .record_verification_result(
+                        action,
+                        None,
+                        false,
+                        None,
+                        format!("after-Snapshot capture failed: {error}; effect unverified"),
+                    )
+                    .await;
+            }
+        };
+        let class = self
+            .authority
+            .registry()
+            .classify(&action.runbook_id, &action.arguments);
 
-        // An Observe-class action changes nothing by design; its effect is the observation
-        // itself, so Platform success is the whole verification.
-        let observe_only = matches!(
-            self.authority
-                .registry()
-                .classify(&action.runbook_id, &action.arguments),
-            Some(crate::policy::OperationClass::Observe)
-        );
-        if observe_only {
+        if action.dry_run {
+            let summary = format!(
+                "dry run: commands were rendered and recorded, not executed; not evidence of \
+                 remediation (after Snapshot {})",
+                after.snapshot_id
+            );
+            return self
+                .record_verification_result(
+                    action,
+                    Some(after.snapshot_id),
+                    true,
+                    Some(VerificationEvidence::DryRun),
+                    summary,
+                )
+                .await;
+        }
+        if class.is_some_and(|class| !class.is_mutating()) {
             let summary = format!(
                 "observation completed; no state change expected (after Snapshot {})",
                 after.snapshot_id
             );
             return self
-                .record_verification_result(action, after.snapshot_id, true, summary)
+                .record_verification_result(
+                    action,
+                    Some(after.snapshot_id),
+                    true,
+                    Some(VerificationEvidence::Strong),
+                    summary,
+                )
                 .await;
         }
 
+        let before = self
+            .store
+            .get_snapshot(action.before_snapshot_id)
+            .await
+            .ok();
+        let started_at = action.started_at.unwrap_or(action.created_at);
         let mut lines = Vec::new();
         let mut passed = !action.target_ids.is_empty();
+        let mut changed = false;
         for target in &action.target_ids {
-            match after.resources.iter().find(|r| &r.resource_id == target) {
-                Some(resource) if resource.health == crate::domain::HealthState::Healthy => {
-                    lines.push(format!("`{target}` is Healthy"));
-                }
-                Some(resource) => {
+            let Some(resource) = after.resources.iter().find(|r| &r.resource_id == target) else {
+                passed = false;
+                lines.push(format!("`{target}` is absent from the after Snapshot"));
+                continue;
+            };
+            if resource.health != HealthState::Healthy {
+                passed = false;
+                lines.push(format!("`{target}` is {:?}", resource.health));
+                continue;
+            }
+            if resource.observed_at <= started_at {
+                passed = false;
+                lines.push(format!(
+                    "`{target}` was last observed before the action started; no fresh evidence"
+                ));
+                continue;
+            }
+            for probe in &action.verification_probe_ids {
+                let ran = resource
+                    .facts
+                    .iter()
+                    .any(|fact| fact.name == format!("probe.{probe}"));
+                if !ran {
                     passed = false;
-                    lines.push(format!("`{target}` is {:?}", resource.health));
-                }
-                None => {
-                    passed = false;
-                    lines.push(format!("`{target}` is absent from the after Snapshot"));
+                    lines.push(format!(
+                        "verification probe `{probe}` did not run on `{target}`"
+                    ));
                 }
             }
+            if class == Some(OperationClass::QueuePurge)
+                && let Some(depth) = resource
+                    .metrics
+                    .iter()
+                    .find(|metric| metric.name == "queue.depth")
+                && depth.value > 0.0
+            {
+                passed = false;
+                lines.push(format!(
+                    "`{target}` still reports queue.depth = {} after the purge",
+                    depth.value
+                ));
+            }
+            let was_healthy = before
+                .as_ref()
+                .and_then(|snapshot| snapshot.resources.iter().find(|r| &r.resource_id == target))
+                .is_some_and(|r| r.health == HealthState::Healthy);
+            if was_healthy {
+                lines.push(format!(
+                    "`{target}` is Healthy, but was already Healthy before the action"
+                ));
+            } else {
+                changed = true;
+                lines.push(format!("`{target}` is Healthy (was not before the action)"));
+            }
         }
+        let evidence = if !passed {
+            None
+        } else if changed {
+            Some(VerificationEvidence::Strong)
+        } else {
+            Some(VerificationEvidence::Weak)
+        };
         let summary = format!(
             "{}: {}",
-            if passed {
-                "expected effect observed"
-            } else {
-                "expected effect absent"
+            match evidence {
+                None => "expected effect absent",
+                Some(VerificationEvidence::Weak) => {
+                    "postcondition holds, but it already held before (weak evidence)"
+                }
+                _ => "expected effect observed",
             },
             lines.join("; ")
         );
-        self.record_verification_result(action, after.snapshot_id, passed, summary)
+        self.record_verification_result(action, Some(after.snapshot_id), passed, evidence, summary)
             .await
     }
 
     /// Persists a verification conclusion for an action already in `Verifying`.
     async fn record_verification_result(
         &self,
-        mut action: ActionRun,
-        after_snapshot_id: SnapshotId,
+        action: ActionRun,
+        after_snapshot_id: Option<SnapshotId>,
         passed: bool,
+        evidence: Option<VerificationEvidence>,
         summary: String,
     ) -> AgentResult<ActionRun> {
-        action.record_verification(after_snapshot_id, passed, summary.clone())?;
-        self.store.update_action_run(action.clone()).await?;
+        let mut next = action.clone();
+        next.record_verification(after_snapshot_id, passed, evidence, summary.clone())?;
+        self.store
+            .update_action_run_if(&action, next.clone())
+            .await?;
         self.store
             .append_event(
                 NewEvent::new("top-scheduler", "verification.recorded", summary)
-                    .with_issue(action.issue_id)
-                    .with_action(action.action_run_id)
+                    .with_issue(next.issue_id)
+                    .with_action(next.action_run_id)
                     .with_payload(json!({
                         "passed": passed,
+                        "evidence": evidence,
                         "after_snapshot_id": after_snapshot_id,
-                        "status": action.status,
+                        "status": next.status,
                     })),
             )
             .await?;
-        if !passed {
-            self.park_issue_for_human(action.issue_id).await?;
-        }
-        Ok(action)
+        self.reconcile_issue(next.issue_id).await?;
+        Ok(next)
     }
 
-    /// Moves an Issue to `WaitingForHuman` when its state machine allows it.
+    /// Derives an Issue's status from its outstanding work and applies it.
     ///
-    /// Called whenever something lands in an inbox — a denial, a failed Job, a failed or
-    /// unverified action — so the Issue's status says what the inbox says: a human decides next.
-    async fn park_issue_for_human(&self, issue_id: IssueId) -> AgentResult<()> {
-        let mut issue = self.store.get_issue(issue_id).await?;
-        if issue.can_transition_to(IssueStatus::WaitingForHuman) {
-            issue.transition_to(IssueStatus::WaitingForHuman)?;
-            self.store.update_issue(issue).await?;
+    /// The rule, in order: a Job still running means `Investigating`; an action ready or running
+    /// means `Mitigating`, one awaiting verification means `Verifying`; anything in an inbox —
+    /// a permission request, an unreviewed denial or failure, a Job waiting on a human — means
+    /// `WaitingForHuman`. With nothing outstanding, the latest pass decides: a `Solved` result,
+    /// or an action of the latest Job that succeeded with real (not dry-run) evidence, resolves
+    /// the Issue; otherwise it waits for a human to close it or send it on. Acknowledging an
+    /// inbox item therefore never resolves an Issue by itself. Terminal Issues are left alone.
+    pub async fn reconcile_issue(&self, issue_id: IssueId) -> AgentResult<Issue> {
+        let issue = self.store.get_issue(issue_id).await?;
+        if issue.status.is_terminal() {
+            return Ok(issue);
         }
-        Ok(())
+        let jobs: Vec<Job> = self
+            .store
+            .list_jobs()
+            .await?
+            .into_iter()
+            .filter(|job| job.issue_id == issue_id)
+            .collect();
+        let actions: Vec<ActionRun> = self
+            .store
+            .list_action_runs()
+            .await?
+            .into_iter()
+            .filter(|action| action.issue_id == issue_id)
+            .collect();
+        let Some((next, reason)) = derive_issue_status(&jobs, &actions) else {
+            return Ok(issue);
+        };
+        if next == issue.status || !issue.can_transition_to(next) {
+            return Ok(issue);
+        }
+        let mut updated = issue.clone();
+        updated.transition_to(next)?;
+        self.store.update_issue_if(&issue, updated.clone()).await?;
+        self.store
+            .append_event(
+                NewEvent::new(
+                    "top-scheduler",
+                    "scheduler.issue_reconciled",
+                    format!("Issue moved from {:?} to {next:?}: {reason}", issue.status),
+                )
+                .with_issue(issue_id)
+                .with_payload(json!({ "from": issue.status, "to": next, "reason": reason })),
+            )
+            .await?;
+        Ok(updated)
+    }
+
+    /// Closes an Issue on a human's say-so.
+    ///
+    /// Resolution is a human judgment when the derived status is `WaitingForHuman`; cancelling
+    /// or failing an Issue is always available. Later callbacks and reconciliations leave a
+    /// terminal Issue alone.
+    pub async fn close_issue(
+        &self,
+        issue_id: IssueId,
+        closure: IssueClosure,
+        closed_by: impl Into<String>,
+        comment: Option<String>,
+    ) -> AgentResult<Issue> {
+        let closed_by = closed_by.into();
+        let issue = self.store.get_issue(issue_id).await?;
+        let mut next = issue.clone();
+        next.transition_to(closure.status())?;
+        self.store.update_issue_if(&issue, next.clone()).await?;
+        let comment = comment.filter(|text| !text.trim().is_empty());
+        self.store
+            .append_event(
+                NewEvent::new(
+                    "human",
+                    "human.issue_closed",
+                    match &comment {
+                        Some(comment) => {
+                            format!("{closed_by} closed the Issue as {closure:?}: {comment}")
+                        }
+                        None => format!("{closed_by} closed the Issue as {closure:?}"),
+                    },
+                )
+                .with_issue(issue_id)
+                .with_payload(
+                    json!({ "closure": closure, "closed_by": closed_by, "comment": comment }),
+                )
+                .with_trust(ContentTrust::Mixed),
+            )
+            .await?;
+        Ok(next)
     }
 
     /// Records a human review in the EventLog.
@@ -1041,39 +1332,226 @@ impl TopScheduler {
         self.set_mode(SchedulerMode::Running).await
     }
 
-    /// Enumerates unfinished Issues, Jobs, and ActionRuns from the Store and returns a recovery summary.
+    /// Recovers control state after a restart: enumerate, reconcile, restore the freeze mode.
     ///
-    /// The method does not reconnect Agent Teams or replay ActionRuns. After recovery the Scheduler
-    /// remains `DispatchFrozen`, waiting for a human to inspect the summary and call `resume`. Both
-    /// mode changes go through the evented path so the EventLog alone can reconstruct mode history.
+    /// Recovery does not pretend interrupted work can be resumed. A Job that was running has no
+    /// Team any more, so it is failed into the inbox; an action that was `Running` has an unknown
+    /// outcome (the command may or may not have completed), so it is failed into the inbox with
+    /// that warning; one that was `Verifying` is verified now when an after-capture request is
+    /// supplied, otherwise failed as unverified; one never evaluated or never started is denied
+    /// so it can be proposed again. A revising Job whose review record was not written before
+    /// the crash gets it written now. Every touched Issue is reconciled.
+    ///
+    /// The previous process's last persisted mode is read back from the event log. Recovery ends
+    /// in `FullyFrozen` if that is what it was, otherwise `DispatchFrozen`, and a human (or the
+    /// `serve` startup policy) decides when to resume. Every mode change goes through the evented
+    /// path, so the EventLog alone reconstructs mode history.
     pub async fn recover(&self) -> AgentResult<RecoverySummary> {
+        self.recover_with(None).await
+    }
+
+    /// See [`TopScheduler::recover`]; `after_capture` lets actions that were awaiting
+    /// verification be verified against a fresh Snapshot instead of failed as unverified.
+    pub async fn recover_with(
+        &self,
+        after_capture: Option<CaptureRequest>,
+    ) -> AgentResult<RecoverySummary> {
+        let previous_mode = self.persisted_mode().await?;
         self.set_mode(SchedulerMode::Recovering).await?;
 
         let issues = self.store.list_unfinished_issues().await?;
         let jobs = self.store.list_unfinished_jobs().await?;
         let actions = self.store.list_unfinished_action_runs().await?;
-        let summary = RecoverySummary {
-            issue_ids: issues.into_iter().map(|issue| issue.issue_id).collect(),
-            job_ids: jobs.into_iter().map(|job| job.job_id).collect(),
-            action_run_ids: actions
-                .into_iter()
-                .map(|action| action.action_run_id)
-                .collect(),
+        let mut summary = RecoverySummary {
+            previous_mode,
+            issue_ids: issues.iter().map(|issue| issue.issue_id).collect(),
+            job_ids: jobs.iter().map(|job| job.job_id).collect(),
+            action_run_ids: actions.iter().map(|a| a.action_run_id).collect(),
+            interrupted_job_ids: Vec::new(),
+            interrupted_action_ids: Vec::new(),
+            verified_action_ids: Vec::new(),
+            reconstructed_review_job_ids: Vec::new(),
+            final_mode: SchedulerMode::DispatchFrozen,
         };
+        let mut touched_issues: Vec<IssueId> = Vec::new();
 
-        self.set_mode(SchedulerMode::DispatchFrozen).await?;
+        for job in &jobs {
+            if !matches!(job.status, JobStatus::Queued | JobStatus::Running) {
+                continue;
+            }
+            let mut next = job.clone();
+            next.complete(JobResult::new(
+                JobOutcome::Failed,
+                "interrupted by a controller restart; no Team was running this Job any more",
+            ))?;
+            self.store.update_job_if(job, next).await?;
+            self.store
+                .append_event(
+                    NewEvent::new(
+                        "top-scheduler",
+                        "scheduler.job_failed",
+                        "The Job was interrupted by a controller restart and awaits human review",
+                    )
+                    .with_issue(job.issue_id)
+                    .with_job(job.job_id),
+                )
+                .await?;
+            summary.interrupted_job_ids.push(job.job_id);
+            touched_issues.push(job.issue_id);
+        }
 
+        for action in &actions {
+            let interrupted = |reason: &str| {
+                Denial::by_policy(format!("interrupted by a controller restart {reason}"))
+            };
+            match action.status {
+                ActionStatus::Proposed => {
+                    let mut next = action.clone();
+                    next.deny(interrupted(
+                        "before authority was evaluated; propose it again if still needed",
+                    ))?;
+                    self.store.update_action_run_if(action, next).await?;
+                }
+                ActionStatus::Ready => {
+                    let mut next = action.clone();
+                    next.deny(interrupted(
+                        "before execution started; propose it again if still needed",
+                    ))?;
+                    self.store.update_action_run_if(action, next).await?;
+                }
+                ActionStatus::Running => {
+                    let mut next = action.clone();
+                    next.record_execution_result(PlatformOperationResult::new(
+                        false,
+                        None,
+                        "interrupted by a controller restart while executing; the command may \
+                         or may not have completed — check the machine before retrying",
+                    ))?;
+                    self.store.update_action_run_if(action, next).await?;
+                }
+                ActionStatus::Verifying => match &after_capture {
+                    Some(capture) if self.collector.is_some() => {
+                        self.verify_action(action.action_run_id, capture.clone())
+                            .await?;
+                        summary.verified_action_ids.push(action.action_run_id);
+                        touched_issues.push(action.issue_id);
+                        continue;
+                    }
+                    _ => {
+                        let mut next = action.clone();
+                        next.record_verification(
+                            None,
+                            false,
+                            None,
+                            "controller restarted before verification; no after-Snapshot was \
+                             captured, so the effect is unverified",
+                        )?;
+                        self.store.update_action_run_if(action, next).await?;
+                    }
+                },
+                ActionStatus::WaitingForApproval => continue,
+                _ => continue,
+            }
+            self.store
+                .append_event(
+                    NewEvent::new(
+                        "top-scheduler",
+                        "scheduler.action_interrupted",
+                        format!(
+                            "ActionRun was {:?} at restart and was reconciled into the inbox",
+                            action.status
+                        ),
+                    )
+                    .with_issue(action.issue_id)
+                    .with_job(action.originating_job_id)
+                    .with_action(action.action_run_id),
+                )
+                .await?;
+            summary.interrupted_action_ids.push(action.action_run_id);
+            touched_issues.push(action.issue_id);
+        }
+
+        // A revising Job proves a human sent something upstream; if the crash came between
+        // dispatching it and writing the review, write the review now from the Job's own record.
+        for job in self.store.list_jobs().await? {
+            let (Some(_), Some(feedback)) = (job.revises_job_id, job.feedback.last()) else {
+                continue;
+            };
+            let review = HumanReview::new(
+                feedback.reviewer.clone(),
+                ReviewDecision::SentUpstream { job_id: job.job_id },
+                feedback.comment.clone(),
+            );
+            let reconstructed = match &feedback.origin {
+                FeedbackOrigin::DeniedAction { action_run_id, .. }
+                | FeedbackOrigin::FailedAction { action_run_id, .. } => {
+                    let action = self.store.get_action_run(*action_run_id).await?;
+                    if action.needs_review() {
+                        self.review_action(*action_run_id, review).await?;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                FeedbackOrigin::FailedJob { job_id, .. } => {
+                    let reviewed = self.store.get_job(*job_id).await?;
+                    if reviewed.needs_review() {
+                        self.review_job(*job_id, review).await?;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+            if reconstructed {
+                summary.reconstructed_review_job_ids.push(job.job_id);
+                touched_issues.push(job.issue_id);
+            }
+        }
+
+        for issue in &issues {
+            self.reconcile_issue(issue.issue_id).await?;
+        }
+        touched_issues.sort();
+        touched_issues.dedup();
+
+        summary.final_mode = match previous_mode {
+            SchedulerMode::FullyFrozen => SchedulerMode::FullyFrozen,
+            _ => SchedulerMode::DispatchFrozen,
+        };
+        self.set_mode(summary.final_mode).await?;
         self.store
             .append_event(
                 NewEvent::new(
                     "top-scheduler",
                     "scheduler.recovered",
-                    "The Scheduler enumerated unfinished state and kept dispatch frozen",
+                    format!(
+                        "The Scheduler reconciled {} interrupted Job(s) and {} action(s) and is {:?}",
+                        summary.interrupted_job_ids.len(),
+                        summary.interrupted_action_ids.len(),
+                        summary.final_mode
+                    ),
                 )
                 .with_payload(serde_json::to_value(&summary)?),
             )
             .await?;
         Ok(summary)
+    }
+
+    /// Reads the last mode the previous process persisted, from the event log.
+    ///
+    /// `Recovering` is transient and ignored; a log with no mode event at all means `Running`.
+    async fn persisted_mode(&self) -> AgentResult<SchedulerMode> {
+        let mut mode = SchedulerMode::Running;
+        for event in self.store.list_events().await? {
+            mode = match event.kind.as_str() {
+                "scheduler.resumed" => SchedulerMode::Running,
+                "scheduler.dispatch_frozen" => SchedulerMode::DispatchFrozen,
+                "scheduler.fully_frozen" => SchedulerMode::FullyFrozen,
+                _ => mode,
+            };
+        }
+        Ok(mode)
     }
 
     /// Verifies that the Scheduler currently permits Job creation or supersession.
@@ -1273,4 +1751,78 @@ impl TopScheduler {
             .await?;
         Ok(())
     }
+}
+
+/// The Issue status implied by its Jobs and ActionRuns, with the reason, or `None` when no work
+/// exists yet (an Issue stays `Open` until something is dispatched).
+fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStatus, String)> {
+    if jobs.is_empty() && actions.is_empty() {
+        return None;
+    }
+    if jobs
+        .iter()
+        .any(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
+    {
+        return Some((IssueStatus::Investigating, "a Job is running".to_string()));
+    }
+    if actions
+        .iter()
+        .any(|action| matches!(action.status, ActionStatus::Ready | ActionStatus::Running))
+    {
+        return Some((
+            IssueStatus::Mitigating,
+            "an action is ready or executing".to_string(),
+        ));
+    }
+    if actions
+        .iter()
+        .any(|action| action.status == ActionStatus::Verifying)
+    {
+        return Some((
+            IssueStatus::Verifying,
+            "an action awaits verification".to_string(),
+        ));
+    }
+    let waiting = actions
+        .iter()
+        .any(|action| action.status == ActionStatus::WaitingForApproval || action.needs_review())
+        || jobs.iter().any(|job| {
+            job.needs_review()
+                || matches!(
+                    job.status,
+                    JobStatus::WaitingForHuman | JobStatus::Blocked | JobStatus::NeedsResnapshot
+                )
+        });
+    if waiting {
+        return Some((
+            IssueStatus::WaitingForHuman,
+            "an inbox item or a Job waits for a human".to_string(),
+        ));
+    }
+    let latest_job = jobs.iter().max_by_key(|job| (job.created_at, job.job_id))?;
+    if latest_job
+        .result
+        .as_ref()
+        .is_some_and(|result| result.outcome == JobOutcome::Solved)
+    {
+        return Some((
+            IssueStatus::Resolved,
+            "the latest pass reported the problem solved".to_string(),
+        ));
+    }
+    let remediated = actions.iter().any(|action| {
+        action.originating_job_id == latest_job.job_id
+            && action.status == ActionStatus::Succeeded
+            && action.verification_evidence != Some(VerificationEvidence::DryRun)
+    });
+    if remediated {
+        return Some((
+            IssueStatus::Resolved,
+            "an action of the latest pass succeeded with verified evidence".to_string(),
+        ));
+    }
+    Some((
+        IssueStatus::WaitingForHuman,
+        "nothing automatic remains; a human closes the Issue or sends it on".to_string(),
+    ))
 }

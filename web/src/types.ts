@@ -15,12 +15,22 @@ export interface InboxCounts {
   total: number;
 }
 
+export interface RecoverySummary {
+  previous_mode: string;
+  final_mode: string;
+  interrupted_job_ids: string[];
+  interrupted_action_ids: string[];
+  verified_action_ids: string[];
+  reconstructed_review_job_ids: string[];
+}
+
 export interface Status {
   mode: string;
   team_backend: string;
   dry_run: boolean;
   uptime_secs: number;
   deployment: { name: string; topology_revision: string; operation_mode: string };
+  recovery: RecoverySummary | null;
   counts: Counts;
   inbox: InboxCounts;
 }
@@ -99,7 +109,7 @@ export interface HumanReview {
 
 export type FeedbackOrigin =
   | { kind: "denied_action"; action_run_id: string; runbook_id: string; target_ids: string[]; denial: Denial }
-  | { kind: "failed_action"; action_run_id: string; runbook_id: string; target_ids: string[]; summary: string }
+  | { kind: "failed_action"; action_run_id: string; runbook_id: string; target_ids: string[]; summary: string; evidence: string | null }
   | { kind: "failed_job"; job_id: string; summary: string };
 
 export interface HumanFeedback {
@@ -135,7 +145,10 @@ export interface ActionRun {
   approved_by: string | null;
   denial: Denial | null;
   review: HumanReview | null;
+  execution_summary: string | null;
+  dry_run: boolean;
   verification_summary: string | null;
+  verification_evidence: "dry_run" | "weak" | "strong" | null;
   created_at: string;
 }
 

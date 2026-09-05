@@ -30,6 +30,7 @@ use crate::domain::{HumanReport, IssuePriority, SnapshotCause};
 use crate::error::AgentError;
 use crate::ports::StateStore;
 use crate::runner::{InboxDecision, SliceRunner};
+use crate::scheduler::{IssueClosure, RecoverySummary};
 
 /// Shared state behind every route.
 pub struct ApiState {
@@ -37,6 +38,9 @@ pub struct ApiState {
     pub runner: Arc<SliceRunner>,
     /// Effective configuration, served redacted.
     pub config: AppConfig,
+    /// What startup recovery found, shown by the consoles so an operator knows why the
+    /// Scheduler may be frozen.
+    pub recovery: Option<RecoverySummary>,
     started: Instant,
 }
 
@@ -46,8 +50,15 @@ impl ApiState {
         Self {
             runner,
             config,
+            recovery: None,
             started: Instant::now(),
         }
+    }
+
+    /// Attaches the startup recovery summary.
+    pub fn with_recovery(mut self, recovery: RecoverySummary) -> Self {
+        self.recovery = Some(recovery);
+        self
     }
 }
 
@@ -61,9 +72,9 @@ impl From<AgentError> for ApiError {
             AgentError::InvalidInput(_) | AgentError::InvalidTransition { .. } => {
                 StatusCode::BAD_REQUEST
             }
-            AgentError::SchedulerFrozen { .. } | AgentError::Duplicate { .. } => {
-                StatusCode::CONFLICT
-            }
+            AgentError::SchedulerFrozen { .. }
+            | AgentError::Duplicate { .. }
+            | AgentError::Conflict { .. } => StatusCode::CONFLICT,
             AgentError::MissingDependency { .. } => StatusCode::NOT_IMPLEMENTED,
             AgentError::Serialization(_) | AgentError::Io { .. } => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -100,6 +111,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/snapshots", post(capture_snapshot))
         .route("/api/snapshots/latest", get(latest_snapshot))
         .route("/api/issues", get(issues))
+        .route("/api/issues/{id}/close", post(close_issue))
         .route("/api/jobs", get(jobs))
         .route("/api/jobs/{id}/review", post(review_job))
         .route("/api/reports", post(report))
@@ -169,6 +181,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
         "dry_run": state.runner.dry_run(),
         "deployment": state.runner.topology().deployment,
         "uptime_secs": state.started.elapsed().as_secs(),
+        "recovery": state.recovery,
         "counts": {
             "issues": store.list_issues().await?.len(),
             "jobs": store.list_jobs().await?.len(),
@@ -210,6 +223,33 @@ async fn latest_snapshot(State(state): State<Arc<ApiState>>) -> ApiResult<Value>
 async fn issues(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
     Ok(Json(serde_json::to_value(
         state.runner.store().list_issues().await?,
+    )?))
+}
+
+/// A human closing an Issue.
+#[derive(Debug, Deserialize)]
+struct CloseRequest {
+    /// `resolved`, `cancelled`, or `failed`.
+    outcome: IssueClosure,
+    #[serde(flatten)]
+    who: DecisionRequest,
+}
+
+async fn close_issue(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<CloseRequest>,
+) -> ApiResult<Value> {
+    Ok(Json(serde_json::to_value(
+        state
+            .runner
+            .close_issue(
+                id,
+                request.outcome,
+                request.who.who(),
+                request.who.comment.clone(),
+            )
+            .await?,
     )?))
 }
 

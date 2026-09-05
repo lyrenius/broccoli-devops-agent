@@ -7,7 +7,7 @@ use broccoli_devops_agent::domain::{
     ActionProposal, ActionRun, ActionStatus, ApprovalState, Artifact, ArtifactKind, Confidence,
     HumanReport, Issue, IssueCandidate, IssuePriority, IssueStatus, Job, JobBrief, JobOutcome,
     JobResult, JobStatus, NamedValue, NewEvent, OperationMode, PlatformOperationResult, Snapshot,
-    SnapshotCause, SnapshotViewRef, TeamCallback, TeamCallbackKind, TeamKind,
+    SnapshotCause, SnapshotViewRef, TeamCallback, TeamCallbackKind, TeamKind, VerificationEvidence,
 };
 use broccoli_devops_agent::ports::{
     AgentTeamPort, CallbackAdviceRequest, CancelSignal, CaptureRequest, NextStep, NextStepDecision,
@@ -241,7 +241,12 @@ fn action_run_requires_execution_and_verification() {
         .expect("a running action should accept a Platform result");
     assert_eq!(action.status, ActionStatus::Verifying);
     action
-        .record_verification(after.snapshot_id, true, "The Worker heartbeat recovered")
+        .record_verification(
+            Some(after.snapshot_id),
+            true,
+            Some(VerificationEvidence::Strong),
+            "The Worker heartbeat recovered",
+        )
         .expect("a verifying action should accept an after Snapshot");
 
     assert_eq!(action.status, ActionStatus::Succeeded);

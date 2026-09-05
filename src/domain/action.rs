@@ -64,6 +64,20 @@ impl ActionStatus {
     }
 }
 
+/// How much an after-Snapshot verification actually proves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationEvidence {
+    /// The Platform rendered the commands but did not run them; nothing about the machines
+    /// changed, so a passing check is not evidence of remediation.
+    DryRun,
+    /// The postcondition holds, but it already held before the action, so the check cannot tell
+    /// the action's effect from the prior state.
+    Weak,
+    /// The postcondition holds and was observed to change, or the operation is observe-only.
+    Strong,
+}
+
 /// Minimal result returned after the Agents Platform executes an action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlatformOperationResult {
@@ -71,6 +85,9 @@ pub struct PlatformOperationResult {
     pub operation_id: PlatformOperationId,
     /// Whether the underlying execution succeeded.
     pub succeeded: bool,
+    /// Whether the Platform only rendered the commands (dry run) instead of executing them.
+    #[serde(default)]
+    pub dry_run: bool,
     /// Artifact ID containing complete stdout, stderr, or diagnostic output.
     pub output_artifact_id: Option<ArtifactId>,
     /// Execution summary suitable for display and logging.
@@ -90,9 +107,16 @@ impl PlatformOperationResult {
         Self {
             operation_id: Uuid::now_v7(),
             succeeded,
+            dry_run: false,
             output_artifact_id,
             summary: summary.into(),
         }
+    }
+
+    /// Marks the result as a dry run: rendered, recorded, not executed.
+    pub fn as_dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
     }
 }
 
@@ -145,10 +169,19 @@ pub struct ActionRun {
     pub platform_operation_id: Option<PlatformOperationId>,
     /// Artifact ID containing complete Agents Platform output.
     pub execution_artifact_id: Option<ArtifactId>,
+    /// The Platform's own summary of what happened (refusal reason, exit codes, dry run).
+    #[serde(default)]
+    pub execution_summary: Option<String>,
+    /// Whether the Platform executed in dry-run mode.
+    #[serde(default)]
+    pub dry_run: bool,
     /// Probe IDs to run after the operation.
     pub verification_probe_ids: Vec<String>,
     /// Verification result summary.
     pub verification_summary: Option<String>,
+    /// How much the verification proves, once verified.
+    #[serde(default)]
+    pub verification_evidence: Option<VerificationEvidence>,
     /// Time at which the ActionRun was created.
     pub created_at: DateTime<Utc>,
     /// Time at which execution actually started.
@@ -192,8 +225,11 @@ impl ActionRun {
             idempotency_key: idempotency_key.into(),
             platform_operation_id: None,
             execution_artifact_id: None,
+            execution_summary: None,
+            dry_run: false,
             verification_probe_ids: proposal.verification_probe_ids,
             verification_summary: None,
+            verification_evidence: None,
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
@@ -261,6 +297,15 @@ impl ActionRun {
         self.review.is_none() && (self.denial.is_some() || self.has_failed())
     }
 
+    /// Whether this action still holds its idempotency key: it may yet run, is running, or ran to
+    /// a verified success. Cancelled and failed runs release the key so a retry can proceed.
+    pub fn holds_idempotency_claim(&self) -> bool {
+        !matches!(
+            self.status,
+            ActionStatus::Cancelled | ActionStatus::Failed | ActionStatus::VerificationFailed
+        )
+    }
+
     /// Whether execution or verification failed.
     pub fn has_failed(&self) -> bool {
         matches!(
@@ -291,6 +336,8 @@ impl ActionRun {
 
         self.platform_operation_id = Some(result.operation_id);
         self.execution_artifact_id = result.output_artifact_id;
+        self.execution_summary = Some(result.summary);
+        self.dry_run = result.dry_run;
         self.transition_to(if result.succeeded {
             ActionStatus::Verifying
         } else {
@@ -301,12 +348,13 @@ impl ActionRun {
     /// Records the after Snapshot and effect-verification conclusion.
     ///
     /// A true `passed` value moves to `Succeeded`; otherwise it moves to `VerificationFailed`.
-    /// Initially the caller supplies the boolean result; a later verifier will compute it from
-    /// `verification_probe_ids`.
+    /// `after_snapshot_id` is `None` when no after Snapshot could be captured, which is itself a
+    /// verification failure. The evidence grade says how much a pass proves.
     pub fn record_verification(
         &mut self,
-        after_snapshot_id: SnapshotId,
+        after_snapshot_id: Option<SnapshotId>,
         passed: bool,
+        evidence: Option<VerificationEvidence>,
         summary: impl Into<String>,
     ) -> AgentResult<()> {
         if self.status != ActionStatus::Verifying {
@@ -317,8 +365,9 @@ impl ActionRun {
             });
         }
 
-        self.after_snapshot_id = Some(after_snapshot_id);
+        self.after_snapshot_id = after_snapshot_id;
         self.verification_summary = Some(summary.into());
+        self.verification_evidence = evidence;
         self.transition_to(if passed {
             ActionStatus::Succeeded
         } else {

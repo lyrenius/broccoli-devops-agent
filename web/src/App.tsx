@@ -58,7 +58,7 @@ export default function App() {
       <main>
         {tab === "overview" && <Overview tick={tick} onChanged={refresh} />}
         {tab === "inbox" && <Inbox tick={tick} dryRun={status?.dry_run ?? true} onChanged={refresh} />}
-        {tab === "records" && <Records tick={tick} />}
+        {tab === "records" && <Records tick={tick} onChanged={refresh} />}
         {tab === "events" && <Events />}
         {tab === "report" && <Report onChanged={refresh} />}
       </main>
