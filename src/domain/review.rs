@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{ActionRunId, JobId, ResourceId};
+use crate::tr;
 
 /// Who refused an ActionRun.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,17 +186,27 @@ impl HumanFeedback {
                 denial,
                 ..
             } => {
-                let mut line = format!(
-                    "The proposed action `{runbook_id}` on {} was denied ({}): {}.",
-                    target_ids.join(", "),
-                    match denial.source {
-                        DenialSource::Policy => "by rule",
-                        DenialSource::Human => "by a human",
-                    },
-                    denial.reason
+                let by = match denial.source {
+                    DenialSource::Policy => tr!("by rule", "按规则"),
+                    DenialSource::Human => tr!("by a human", "由人工"),
+                };
+                let mut line = tr!(
+                    format!(
+                        "The proposed action `{runbook_id}` on {} was denied ({by}): {}.",
+                        target_ids.join(", "),
+                        denial.reason
+                    ),
+                    format!(
+                        "针对 {} 提议的操作 `{runbook_id}` 已被拒绝（{by}）：{}。",
+                        target_ids.join(", "),
+                        denial.reason
+                    )
                 );
                 if let Some(comment) = &denial.comment {
-                    line.push_str(&format!(" The human who denied it said: {comment}"));
+                    line.push_str(&tr!(
+                        format!(" The human who denied it said: {comment}"),
+                        format!(" 拒绝者的说明：{comment}")
+                    ));
                 }
                 line
             }
@@ -204,20 +215,33 @@ impl HumanFeedback {
                 target_ids,
                 summary,
                 ..
-            } => format!(
-                "The action `{runbook_id}` on {} ran but did not succeed: {summary}.",
-                target_ids.join(", ")
+            } => tr!(
+                format!(
+                    "The action `{runbook_id}` on {} ran but did not succeed: {summary}.",
+                    target_ids.join(", ")
+                ),
+                format!(
+                    "针对 {} 的操作 `{runbook_id}` 已执行但未成功：{summary}。",
+                    target_ids.join(", ")
+                )
             ),
-            FeedbackOrigin::FailedJob { summary, .. } => {
-                format!("The previous Job failed: {summary}.")
-            }
+            FeedbackOrigin::FailedJob { summary, .. } => tr!(
+                format!("The previous Job failed: {summary}."),
+                format!("上一轮任务失败：{summary}。")
+            ),
         };
         if let Some(comment) = &self.comment {
-            text.push_str(&format!(" Reviewer {} added: {comment}", self.reviewer));
+            text.push_str(&tr!(
+                format!(" Reviewer {} added: {comment}", self.reviewer),
+                format!(" 审核人 {} 补充：{comment}", self.reviewer)
+            ));
         } else {
-            text.push_str(&format!(
-                " Reviewer {} sent this back for another pass.",
-                self.reviewer
+            text.push_str(&tr!(
+                format!(
+                    " Reviewer {} sent this back for another pass.",
+                    self.reviewer
+                ),
+                format!(" 审核人 {} 将其送回以进行新一轮处理。", self.reviewer)
             ));
         }
         text

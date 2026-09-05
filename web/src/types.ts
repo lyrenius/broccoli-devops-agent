@@ -30,6 +30,8 @@ export interface Status {
   dry_run: boolean;
   uptime_secs: number;
   deployment: { name: string; topology_revision: string; operation_mode: string };
+  /** The agent's configured output language, e.g. `en` or `zh-CN`. */
+  language: string;
   recovery: RecoverySummary | null;
   counts: Counts;
   inbox: InboxCounts;

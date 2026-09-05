@@ -3,6 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   FilePlus2,
   Inbox,
+  Languages,
   LayoutDashboard,
   ListChecks,
   Moon,
@@ -16,25 +17,27 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
+import { useLocale, useT } from "../i18n";
+import type { Key } from "../i18n/en";
 import { cn } from "../lib/cn";
 import { useOperator, useTheme } from "../lib/prefs";
 import type { Status } from "../types";
 
 export type Tab = "overview" | "inbox" | "records" | "events" | "report";
 
-const NAV: { id: Tab; label: string; icon: LucideIcon }[] = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "inbox", label: "Inbox", icon: Inbox },
-  { id: "records", label: "Issues & jobs", icon: ListChecks },
-  { id: "events", label: "Events", icon: ScrollText },
-  { id: "report", label: "File a report", icon: FilePlus2 },
+const NAV: { id: Tab; label: Key; icon: LucideIcon }[] = [
+  { id: "overview", label: "nav.overview", icon: LayoutDashboard },
+  { id: "inbox", label: "nav.inbox", icon: Inbox },
+  { id: "records", label: "nav.records", icon: ListChecks },
+  { id: "events", label: "nav.events", icon: ScrollText },
+  { id: "report", label: "nav.report", icon: FilePlus2 },
 ];
 
-const MODE_LABEL: Record<string, string> = {
-  running: "Running",
-  dispatch_frozen: "Dispatch frozen",
-  fully_frozen: "Fully frozen",
-  recovering: "Recovering",
+const MODE_KEY: Record<string, Key> = {
+  running: "mode.running",
+  dispatch_frozen: "mode.dispatch_frozen",
+  fully_frozen: "mode.fully_frozen",
+  recovering: "mode.recovering",
 };
 
 function modeDot(mode: string): string {
@@ -97,6 +100,8 @@ export function Shell({
   const [theme, toggleTheme] = useTheme();
   const [operator, setOperator] = useOperator();
   const [busy, setBusy] = useState(false);
+  const { t, status: statusLabel } = useT();
+  const { locale, setLocale } = useLocale();
   const mode = status?.mode ?? "unknown";
 
   const transition = async (name: "freeze-dispatch" | "freeze-all" | "resume") => {
@@ -119,21 +124,21 @@ export function Shell({
             </span>
             <div className="flex flex-col leading-none">
               <span className="font-semibold">Broccoli</span>
-              <span className="mt-0.5 text-xs text-sidebar-foreground/70">Ops Console</span>
+              <span className="mt-0.5 text-xs text-sidebar-foreground/70">{t("brand.tagline")}</span>
             </div>
           </div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2">
           <div className="flex flex-col">
-            <GroupLabel>Control plane</GroupLabel>
+            <GroupLabel>{t("group.controlPlane")}</GroupLabel>
             <ul className="flex flex-col gap-1">
               {NAV.map((item) => (
                 <li key={item.id}>
                   <MenuButton
                     active={tab === item.id}
                     icon={item.icon}
-                    label={item.label}
+                    label={t(item.label)}
                     onClick={() => onTab(item.id)}
                     trailing={
                       item.id === "inbox" && status && status.inbox.total > 0 ? (
@@ -149,48 +154,55 @@ export function Shell({
           </div>
 
           <div className="flex flex-col">
-            <GroupLabel>Scheduler</GroupLabel>
+            <GroupLabel>{t("group.scheduler")}</GroupLabel>
             <div className="flex items-center gap-2 px-2 py-1.5 text-sm">
               <span className={cn("size-2 rounded-full", modeDot(mode))} />
-              <span className="font-medium">{MODE_LABEL[mode] ?? mode}</span>
+              <span className="font-medium">{MODE_KEY[mode] ? t(MODE_KEY[mode]) : t("mode.unknown")}</span>
             </div>
             <ul className="flex flex-col gap-1">
               <li>
-                <MenuButton icon={Snowflake} label="Freeze dispatch" onClick={() => void transition("freeze-dispatch")} className={cn((busy || mode === "dispatch_frozen") && "pointer-events-none opacity-50")} />
+                <MenuButton icon={Snowflake} label={t("scheduler.freezeDispatch")} onClick={() => void transition("freeze-dispatch")} className={cn((busy || mode === "dispatch_frozen") && "pointer-events-none opacity-50")} />
               </li>
               <li>
-                <MenuButton icon={ShieldAlert} label="Freeze all" onClick={() => void transition("freeze-all")} className={cn((busy || mode === "fully_frozen") && "pointer-events-none opacity-50")} />
+                <MenuButton icon={ShieldAlert} label={t("scheduler.freezeAll")} onClick={() => void transition("freeze-all")} className={cn((busy || mode === "fully_frozen") && "pointer-events-none opacity-50")} />
               </li>
               <li>
-                <MenuButton icon={Play} label="Resume" onClick={() => void transition("resume")} className={cn((busy || mode === "running") && "pointer-events-none opacity-50")} />
+                <MenuButton icon={Play} label={t("scheduler.resume")} onClick={() => void transition("resume")} className={cn((busy || mode === "running") && "pointer-events-none opacity-50")} />
               </li>
             </ul>
             {status && (
               <div className="mt-2 grid gap-1 px-2 text-xs text-sidebar-foreground/70">
                 <div className="truncate" title={status.deployment.name}>
-                  {status.deployment.name} · {status.deployment.operation_mode}
+                  {status.deployment.name} · {statusLabel(status.deployment.operation_mode)}
                 </div>
                 <div className="truncate" title={status.team_backend}>
                   {status.team_backend}
                 </div>
                 <div className={cn("font-medium", status.dry_run ? "text-amber-600 dark:text-amber-400" : "text-red-600 dark:text-red-400")}>
-                  {status.dry_run ? "Platform dry-run" : "Platform LIVE"}
+                  {status.dry_run ? t("platform.dryRun") : t("platform.live")}
                 </div>
               </div>
             )}
-            {error && <div className="mt-2 px-2 text-xs text-destructive">API unreachable: {error}</div>}
+            {error && <div className="mt-2 px-2 text-xs text-destructive">{t("api.unreachable", { error })}</div>}
           </div>
         </div>
 
         <div className="flex flex-col gap-1 border-t border-sidebar-border p-2">
-          <MenuButton icon={theme === "light" ? Moon : Sun} label={theme === "light" ? "Dark mode" : "Light mode"} onClick={toggleTheme} className="bg-sidebar-accent/50" />
+          <MenuButton
+            icon={Languages}
+            label={t("locale.name")}
+            onClick={() => setLocale(locale === "en" ? "zh-CN" : "en")}
+            className="bg-sidebar-accent/50"
+            trailing={<span className="ml-auto text-xs text-sidebar-foreground/60">{t("locale.switch")}</span>}
+          />
+          <MenuButton icon={theme === "light" ? Moon : Sun} label={theme === "light" ? t("theme.dark") : t("theme.light")} onClick={toggleTheme} className="bg-sidebar-accent/50" />
           <label className="flex h-8 items-center gap-2 rounded-md p-2 text-sm">
             <User className="size-4 shrink-0" />
             <input
               value={operator}
               onChange={(e) => setOperator(e.target.value)}
-              placeholder="your name"
-              title="Recorded with every decision you make"
+              placeholder={t("operator.placeholder")}
+              title={t("operator.title")}
               className="w-full min-w-0 bg-transparent outline-hidden placeholder:text-sidebar-foreground/50"
             />
           </label>

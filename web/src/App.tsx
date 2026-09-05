@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { Status } from "./types";
+import { LocaleProvider } from "./i18n";
 import { Shell, type Tab } from "./components/Shell";
 import { Overview } from "./components/Overview";
 import { Inbox } from "./components/Inbox";
@@ -49,12 +50,14 @@ export default function App() {
   }, [refresh]);
 
   return (
-    <Shell tab={tab} onTab={setTab} status={status} error={error} onChanged={refresh}>
-      {tab === "overview" && <Overview tick={tick} status={status} onChanged={refresh} />}
-      {tab === "inbox" && <Inbox tick={tick} status={status} onChanged={refresh} />}
-      {tab === "records" && <Records tick={tick} onChanged={refresh} />}
-      {tab === "events" && <Events />}
-      {tab === "report" && <Report onChanged={refresh} />}
-    </Shell>
+    <LocaleProvider agentLanguage={status?.language ?? null}>
+      <Shell tab={tab} onTab={setTab} status={status} error={error} onChanged={refresh}>
+        {tab === "overview" && <Overview tick={tick} status={status} onChanged={refresh} />}
+        {tab === "inbox" && <Inbox tick={tick} status={status} onChanged={refresh} />}
+        {tab === "records" && <Records tick={tick} onChanged={refresh} />}
+        {tab === "events" && <Events />}
+        {tab === "report" && <Report onChanged={refresh} />}
+      </Shell>
+    </LocaleProvider>
   );
 }

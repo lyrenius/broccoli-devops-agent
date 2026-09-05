@@ -33,6 +33,7 @@ use crate::ports::{
     NextStepDecision, SchedulerPolicyPort, SnapshotViewBuildRequest, SnapshotViewBuilderPort,
     StateStore, TriageDecision, TriageRequest,
 };
+use crate::tr;
 
 /// Whether the Top Scheduler currently permits dispatch or execution work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,7 +221,10 @@ impl TopScheduler {
                 NewEvent::new(
                     "top-scheduler",
                     "snapshot.captured",
-                    "The Scheduler requested and persisted a Snapshot",
+                    tr!(
+                        "The Scheduler requested and persisted a Snapshot",
+                        "调度器请求并持久化了一份快照"
+                    ),
                 )
                 .with_payload(json!({
                     "snapshot_id": snapshot.snapshot_id,
@@ -250,7 +254,7 @@ impl TopScheduler {
                 NewEvent::new(
                     "human",
                     "human.issue_reported",
-                    "A human reported a problem",
+                    tr!("A human reported a problem", "人工上报了一个问题"),
                 )
                 .with_payload(report_payload)
                 .with_artifacts(report.attachment_artifact_ids.clone())
@@ -291,7 +295,10 @@ impl TopScheduler {
                 NewEvent::new(
                     "snapshot-judge",
                     "snapshot_judge.issue_candidate",
-                    "The Snapshot Judge proposed a potential problem",
+                    tr!(
+                        "The Snapshot Judge proposed a potential problem",
+                        "快照裁判提出了一个潜在问题"
+                    ),
                 )
                 .with_payload(payload)
                 .with_trust(ContentTrust::Mixed),
@@ -313,7 +320,10 @@ impl TopScheduler {
                 .append_event(NewEvent::new(
                     "top-scheduler",
                     "scheduler.triage_deferred",
-                    "No policy model is wired; the candidate awaits human triage",
+                    tr!(
+                        "No policy model is wired; the candidate awaits human triage",
+                        "未接入策略模型；候选问题等待人工分诊"
+                    ),
                 ))
                 .await?;
             return Ok(TriageOutcome::DeferredToHuman);
@@ -350,7 +360,10 @@ impl TopScheduler {
                         NewEvent::new(
                             "top-scheduler",
                             "scheduler.candidate_merged",
-                            "The Scheduler merged a candidate into an existing Issue",
+                            tr!(
+                                "The Scheduler merged a candidate into an existing Issue",
+                                "调度器将候选问题并入了已有 Issue"
+                            ),
                         )
                         .with_issue(issue_id)
                         .with_payload(json!({ "candidate_id": candidate.candidate_id })),
@@ -364,7 +377,10 @@ impl TopScheduler {
                         NewEvent::new(
                             "top-scheduler",
                             "scheduler.candidate_rejected",
-                            "The Scheduler rejected a candidate as noise or duplicate",
+                            tr!(
+                                "The Scheduler rejected a candidate as noise or duplicate",
+                                "调度器判定候选问题为噪声或重复并已拒绝"
+                            ),
                         )
                         .with_payload(json!({ "candidate_id": candidate.candidate_id })),
                     )
@@ -446,14 +462,20 @@ impl TopScheduler {
             self.record_job_event(
                 &job,
                 "scheduler.job_revised",
-                "The Scheduler dispatched a revising Job carrying human feedback",
+                tr!(
+                    "The Scheduler dispatched a revising Job carrying human feedback",
+                    "调度器派发了携带人工反馈的修订任务"
+                ),
             )
             .await?;
         } else {
             self.record_job_event(
                 &job,
                 "scheduler.job_dispatched",
-                "The Scheduler created and dispatched a Job",
+                tr!(
+                    "The Scheduler created and dispatched a Job",
+                    "调度器创建并派发了任务"
+                ),
             )
             .await?;
         }
@@ -484,7 +506,10 @@ impl TopScheduler {
         self.record_job_event(
             &next,
             "scheduler.job_superseded",
-            "The Scheduler created a superseding Job from a new Snapshot",
+            tr!(
+                "The Scheduler created a superseding Job from a new Snapshot",
+                "调度器基于新快照创建了替代任务"
+            ),
         )
         .await?;
         Ok(next)
@@ -575,7 +600,10 @@ impl TopScheduler {
                     NewEvent::new(
                         "top-scheduler",
                         "scheduler.job_failed",
-                        format!("The Job failed and awaits human review: {failure_summary}"),
+                        tr!(
+                            format!("The Job failed and awaits human review: {failure_summary}"),
+                            format!("任务失败，等待人工审核：{failure_summary}")
+                        ),
                     )
                     .with_issue(next.issue_id)
                     .with_job(next.job_id)
@@ -603,12 +631,22 @@ impl TopScheduler {
         let Some(policy) = &self.policy else {
             return Ok(NextStep {
                 decision: NextStepDecision::AskHuman {
-                    question: format!(
-                        "Job `{job_id}` finished with outcome `{:?}`; choose the next step",
-                        result.outcome
+                    question: tr!(
+                        format!(
+                            "Job `{job_id}` finished with outcome `{:?}`; choose the next step",
+                            result.outcome
+                        ),
+                        format!(
+                            "任务 `{job_id}` 以 `{:?}` 结束；请选择下一步",
+                            result.outcome
+                        )
                     ),
                 },
-                rationale: "no policy model is wired; deferring to a human".to_string(),
+                rationale: tr!(
+                    "no policy model is wired; deferring to a human",
+                    "未接入策略模型；交由人工决定"
+                )
+                .to_string(),
             });
         };
 
@@ -694,7 +732,10 @@ impl TopScheduler {
                 NewEvent::new(
                     "top-scheduler",
                     "scheduler.action_created",
-                    "The Scheduler converted a Team proposal into an ActionRun",
+                    tr!(
+                        "The Scheduler converted a Team proposal into an ActionRun",
+                        "调度器将团队的提议转换为一个操作（ActionRun）"
+                    ),
                 )
                 .with_issue(job.issue_id)
                 .with_job(originating_job_id)
@@ -710,11 +751,18 @@ impl TopScheduler {
             .claim_idempotency_key(&action.idempotency_key, action.action_run_id)
             .await?
         {
-            let rationale = format!(
-                "duplicate: ActionRun {holder} already holds idempotency key `{}` (it may yet \
-                 run, is running, or succeeded); a retry is allowed only after it fails or is \
-                 cancelled",
-                action.idempotency_key
+            let rationale = tr!(
+                format!(
+                    "duplicate: ActionRun {holder} already holds idempotency key `{}` (it may \
+                     yet run, is running, or succeeded); a retry is allowed only after it fails \
+                     or is cancelled",
+                    action.idempotency_key
+                ),
+                format!(
+                    "重复操作：ActionRun {holder} 已持有幂等键 `{}`（它可能尚未执行、正在执行或已成功）；\
+                     只有在它失败或被取消后才允许重试",
+                    action.idempotency_key
+                )
             );
             return self
                 .deny_action(
@@ -800,7 +848,10 @@ impl TopScheduler {
                 NewEvent::new(
                     "top-scheduler",
                     "scheduler.action_denied",
-                    format!("Denied by rule; awaiting human review: {rationale}"),
+                    tr!(
+                        format!("Denied by rule; awaiting human review: {rationale}"),
+                        format!("已按规则拒绝，等待人工审核：{rationale}")
+                    ),
                 )
                 .with_issue(job.issue_id)
                 .with_job(job.job_id)
@@ -833,7 +884,10 @@ impl TopScheduler {
                 NewEvent::new(
                     "human",
                     "human.action_approved",
-                    format!("{approved_by} approved the action"),
+                    tr!(
+                        format!("{approved_by} approved the action"),
+                        format!("{approved_by} 批准了该操作")
+                    ),
                 )
                 .with_issue(next.issue_id)
                 .with_job(next.originating_job_id)
@@ -870,8 +924,14 @@ impl TopScheduler {
                     "human",
                     "human.action_rejected",
                     match &denial.comment {
-                        Some(comment) => format!("{rejected_by} rejected the action: {comment}"),
-                        None => format!("{rejected_by} rejected the action"),
+                        Some(comment) => tr!(
+                            format!("{rejected_by} rejected the action: {comment}"),
+                            format!("{rejected_by} 拒绝了该操作：{comment}")
+                        ),
+                        None => tr!(
+                            format!("{rejected_by} rejected the action"),
+                            format!("{rejected_by} 拒绝了该操作")
+                        ),
                     },
                 )
                 .with_issue(next.issue_id)
@@ -948,7 +1008,10 @@ impl TopScheduler {
                 NewEvent::new(
                     "top-scheduler",
                     "action.started",
-                    "The Scheduler handed an ActionRun to the Agents Platform",
+                    tr!(
+                        "The Scheduler handed an ActionRun to the Agents Platform",
+                        "调度器已将操作交给 Agents 平台执行"
+                    ),
                 )
                 .with_issue(running.issue_id)
                 .with_action(action_run_id),
@@ -960,7 +1023,10 @@ impl TopScheduler {
             Err(error) => PlatformOperationResult::new(
                 false,
                 None,
-                format!("the Agents Platform failed before reporting a result: {error}"),
+                tr!(
+                    format!("the Agents Platform failed before reporting a result: {error}"),
+                    format!("Agents 平台在返回结果前出错：{error}")
+                ),
             ),
         };
         let mut next = running.clone();
@@ -1036,7 +1102,10 @@ impl TopScheduler {
                         None,
                         false,
                         None,
-                        format!("after-Snapshot capture failed: {error}; effect unverified"),
+                        tr!(
+                            format!("after-Snapshot capture failed: {error}; effect unverified"),
+                            format!("操作后快照采集失败：{error}；效果未验证")
+                        ),
                     )
                     .await;
             }
@@ -1047,10 +1116,16 @@ impl TopScheduler {
             .classify(&action.runbook_id, &action.arguments);
 
         if action.dry_run {
-            let summary = format!(
-                "dry run: commands were rendered and recorded, not executed; not evidence of \
-                 remediation (after Snapshot {})",
-                after.snapshot_id
+            let summary = tr!(
+                format!(
+                    "dry run: commands were rendered and recorded, not executed; not evidence \
+                     of remediation (after Snapshot {})",
+                    after.snapshot_id
+                ),
+                format!(
+                    "演练：命令仅被渲染并记录，未实际执行；不构成修复证据（操作后快照 {}）",
+                    after.snapshot_id
+                )
             );
             return self
                 .record_verification_result(
@@ -1063,9 +1138,15 @@ impl TopScheduler {
                 .await;
         }
         if class.is_some_and(|class| !class.is_mutating()) {
-            let summary = format!(
-                "observation completed; no state change expected (after Snapshot {})",
-                after.snapshot_id
+            let summary = tr!(
+                format!(
+                    "observation completed; no state change expected (after Snapshot {})",
+                    after.snapshot_id
+                ),
+                format!(
+                    "观测已完成；不涉及状态变更（操作后快照 {}）",
+                    after.snapshot_id
+                )
             );
             return self
                 .record_verification_result(
@@ -1090,18 +1171,28 @@ impl TopScheduler {
         for target in &action.target_ids {
             let Some(resource) = after.resources.iter().find(|r| &r.resource_id == target) else {
                 passed = false;
-                lines.push(format!("`{target}` is absent from the after Snapshot"));
+                lines.push(tr!(
+                    format!("`{target}` is absent from the after Snapshot"),
+                    format!("`{target}` 未出现在操作后快照中")
+                ));
                 continue;
             };
             if resource.health != HealthState::Healthy {
                 passed = false;
-                lines.push(format!("`{target}` is {:?}", resource.health));
+                lines.push(tr!(
+                    format!("`{target}` is {:?}", resource.health),
+                    format!("`{target}` 状态为 {:?}", resource.health)
+                ));
                 continue;
             }
             if resource.observed_at <= started_at {
                 passed = false;
-                lines.push(format!(
-                    "`{target}` was last observed before the action started; no fresh evidence"
+                lines.push(tr!(
+                    format!(
+                        "`{target}` was last observed before the action started; no fresh \
+                         evidence"
+                    ),
+                    format!("`{target}` 的最近观测早于操作开始时间；没有新证据")
                 ));
                 continue;
             }
@@ -1112,8 +1203,9 @@ impl TopScheduler {
                     .any(|fact| fact.name == format!("probe.{probe}"));
                 if !ran {
                     passed = false;
-                    lines.push(format!(
-                        "verification probe `{probe}` did not run on `{target}`"
+                    lines.push(tr!(
+                        format!("verification probe `{probe}` did not run on `{target}`"),
+                        format!("验证探针 `{probe}` 未在 `{target}` 上运行")
                     ));
                 }
             }
@@ -1125,9 +1217,12 @@ impl TopScheduler {
                 && depth.value > 0.0
             {
                 passed = false;
-                lines.push(format!(
-                    "`{target}` still reports queue.depth = {} after the purge",
-                    depth.value
+                lines.push(tr!(
+                    format!(
+                        "`{target}` still reports queue.depth = {} after the purge",
+                        depth.value
+                    ),
+                    format!("清空队列后 `{target}` 的 queue.depth 仍为 {}", depth.value)
                 ));
             }
             let was_healthy = before
@@ -1135,12 +1230,16 @@ impl TopScheduler {
                 .and_then(|snapshot| snapshot.resources.iter().find(|r| &r.resource_id == target))
                 .is_some_and(|r| r.health == HealthState::Healthy);
             if was_healthy {
-                lines.push(format!(
-                    "`{target}` is Healthy, but was already Healthy before the action"
+                lines.push(tr!(
+                    format!("`{target}` is Healthy, but was already Healthy before the action"),
+                    format!("`{target}` 为 Healthy，但操作前就已是 Healthy")
                 ));
             } else {
                 changed = true;
-                lines.push(format!("`{target}` is Healthy (was not before the action)"));
+                lines.push(tr!(
+                    format!("`{target}` is Healthy (was not before the action)"),
+                    format!("`{target}` 为 Healthy（操作前不是）")
+                ));
             }
         }
         let evidence = if !passed {
@@ -1153,11 +1252,12 @@ impl TopScheduler {
         let summary = format!(
             "{}: {}",
             match evidence {
-                None => "expected effect absent",
-                Some(VerificationEvidence::Weak) => {
-                    "postcondition holds, but it already held before (weak evidence)"
-                }
-                _ => "expected effect observed",
+                None => tr!("expected effect absent", "未观察到预期效果"),
+                Some(VerificationEvidence::Weak) => tr!(
+                    "postcondition holds, but it already held before (weak evidence)",
+                    "后置条件成立，但操作前已成立（弱证据）"
+                ),
+                _ => tr!("expected effect observed", "已观察到预期效果"),
             },
             lines.join("; ")
         );
@@ -1238,7 +1338,10 @@ impl TopScheduler {
                 NewEvent::new(
                     "top-scheduler",
                     "scheduler.issue_reconciled",
-                    format!("Issue moved from {:?} to {next:?}: {reason}", issue.status),
+                    tr!(
+                        format!("Issue moved from {:?} to {next:?}: {reason}", issue.status),
+                        format!("Issue 状态由 {:?} 变为 {next:?}：{reason}", issue.status)
+                    ),
                 )
                 .with_issue(issue_id)
                 .with_payload(json!({ "from": issue.status, "to": next, "reason": reason })),
@@ -1271,10 +1374,14 @@ impl TopScheduler {
                     "human",
                     "human.issue_closed",
                     match &comment {
-                        Some(comment) => {
-                            format!("{closed_by} closed the Issue as {closure:?}: {comment}")
-                        }
-                        None => format!("{closed_by} closed the Issue as {closure:?}"),
+                        Some(comment) => tr!(
+                            format!("{closed_by} closed the Issue as {closure:?}: {comment}"),
+                            format!("{closed_by} 将 Issue 关闭为 {closure:?}：{comment}")
+                        ),
+                        None => tr!(
+                            format!("{closed_by} closed the Issue as {closure:?}"),
+                            format!("{closed_by} 将 Issue 关闭为 {closure:?}")
+                        ),
                     },
                 )
                 .with_issue(issue_id)
@@ -1296,15 +1403,19 @@ impl TopScheduler {
         action_run_id: Option<ActionRunId>,
     ) -> AgentResult<EventRecord> {
         let summary = match &review.decision {
-            crate::domain::ReviewDecision::Acknowledged => {
+            crate::domain::ReviewDecision::Acknowledged => tr!(
                 format!(
                     "{} acknowledged the item; no further automatic work",
                     review.reviewer
-                )
-            }
-            crate::domain::ReviewDecision::SentUpstream { job_id } => format!(
-                "{} sent the item back upstream as Job {job_id}",
-                review.reviewer
+                ),
+                format!("{} 已知悉该事项；不再自动处理", review.reviewer)
+            ),
+            crate::domain::ReviewDecision::SentUpstream { job_id } => tr!(
+                format!(
+                    "{} sent the item back upstream as Job {job_id}",
+                    review.reviewer
+                ),
+                format!("{} 将该事项送回上游，生成任务 {job_id}", review.reviewer)
             ),
         };
         let mut event = NewEvent::new("human", "human.review_recorded", summary)
@@ -1395,7 +1506,10 @@ impl TopScheduler {
             let mut next = job.clone();
             next.complete(JobResult::new(
                 JobOutcome::Failed,
-                "interrupted by a controller restart; no Team was running this Job any more",
+                tr!(
+                    "interrupted by a controller restart; no Team was running this Job any more",
+                    "被控制器重启中断；已没有团队在运行该任务"
+                ),
             ))?;
             self.store.update_job_if(job, next).await?;
             self.store
@@ -1403,7 +1517,10 @@ impl TopScheduler {
                     NewEvent::new(
                         "top-scheduler",
                         "scheduler.job_failed",
-                        "The Job was interrupted by a controller restart and awaits human review",
+                        tr!(
+                            "The Job was interrupted by a controller restart and awaits human review",
+                            "任务被控制器重启中断，等待人工审核"
+                        ),
                     )
                     .with_issue(job.issue_id)
                     .with_job(job.job_id),
@@ -1415,21 +1532,26 @@ impl TopScheduler {
 
         for action in &actions {
             let interrupted = |reason: &str| {
-                Denial::by_policy(format!("interrupted by a controller restart {reason}"))
+                Denial::by_policy(tr!(
+                    format!("interrupted by a controller restart {reason}"),
+                    format!("被控制器重启中断{reason}")
+                ))
             };
             match action.status {
                 ActionStatus::Proposed => {
                     let mut next = action.clone();
-                    next.deny(interrupted(
+                    next.deny(interrupted(tr!(
                         "before authority was evaluated; propose it again if still needed",
-                    ))?;
+                        "，尚未完成权限评估；如仍需要请重新提议"
+                    )))?;
                     self.store.update_action_run_if(action, next).await?;
                 }
                 ActionStatus::Ready => {
                     let mut next = action.clone();
-                    next.deny(interrupted(
+                    next.deny(interrupted(tr!(
                         "before execution started; propose it again if still needed",
-                    ))?;
+                        "，尚未开始执行；如仍需要请重新提议"
+                    )))?;
                     self.store.update_action_run_if(action, next).await?;
                 }
                 ActionStatus::Running => {
@@ -1437,8 +1559,11 @@ impl TopScheduler {
                     next.record_execution_result(PlatformOperationResult::new(
                         false,
                         None,
-                        "interrupted by a controller restart while executing; the command may \
-                         or may not have completed — check the machine before retrying",
+                        tr!(
+                            "interrupted by a controller restart while executing; the command \
+                             may or may not have completed — check the machine before retrying",
+                            "执行过程中被控制器重启中断；命令可能已完成也可能没有——重试前请先检查机器"
+                        ),
                     ))?;
                     self.store.update_action_run_if(action, next).await?;
                 }
@@ -1456,8 +1581,11 @@ impl TopScheduler {
                             None,
                             false,
                             None,
-                            "controller restarted before verification; no after-Snapshot was \
-                             captured, so the effect is unverified",
+                            tr!(
+                                "controller restarted before verification; no after-Snapshot \
+                                 was captured, so the effect is unverified",
+                                "验证前控制器已重启；未采集操作后快照，效果未验证"
+                            ),
                         )?;
                         self.store.update_action_run_if(action, next).await?;
                     }
@@ -1470,9 +1598,12 @@ impl TopScheduler {
                     NewEvent::new(
                         "top-scheduler",
                         "scheduler.action_interrupted",
-                        format!(
-                            "ActionRun was {:?} at restart and was reconciled into the inbox",
-                            action.status
+                        tr!(
+                            format!(
+                                "ActionRun was {:?} at restart and was reconciled into the inbox",
+                                action.status
+                            ),
+                            format!("重启时操作处于 {:?} 状态，已整理进收件箱", action.status)
                         ),
                     )
                     .with_issue(action.issue_id)
@@ -1538,11 +1669,20 @@ impl TopScheduler {
                 NewEvent::new(
                     "top-scheduler",
                     "scheduler.recovered",
-                    format!(
-                        "The Scheduler reconciled {} interrupted Job(s) and {} action(s) and is {:?}",
-                        summary.interrupted_job_ids.len(),
-                        summary.interrupted_action_ids.len(),
-                        summary.final_mode
+                    tr!(
+                        format!(
+                            "The Scheduler reconciled {} interrupted Job(s) and {} action(s) and \
+                             is {:?}",
+                            summary.interrupted_job_ids.len(),
+                            summary.interrupted_action_ids.len(),
+                            summary.final_mode
+                        ),
+                        format!(
+                            "调度器整理了 {} 个被中断的任务和 {} 个操作，当前模式 {:?}",
+                            summary.interrupted_job_ids.len(),
+                            summary.interrupted_action_ids.len(),
+                            summary.final_mode
+                        )
                     ),
                 )
                 .with_payload(serde_json::to_value(&summary)?),
@@ -1677,7 +1817,10 @@ impl TopScheduler {
         let mut event = NewEvent::new(
             "scheduler-policy",
             "scheduler.policy_consulted",
-            "The Scheduler consulted the policy model at a fixed decision point",
+            tr!(
+                "The Scheduler consulted the policy model at a fixed decision point",
+                "调度器在固定决策点咨询了策略模型"
+            ),
         )
         .with_payload(json!({
             "decision_point": decision_point,
@@ -1726,7 +1869,10 @@ impl TopScheduler {
                 NewEvent::new(
                     "top-scheduler",
                     "scheduler.issue_created",
-                    "The Scheduler created a formal Issue",
+                    tr!(
+                        "The Scheduler created a formal Issue",
+                        "调度器创建了正式 Issue"
+                    ),
                 )
                 .with_issue(issue.issue_id)
                 .with_payload(serde_json::to_value(issue)?),
@@ -1768,20 +1914,33 @@ impl TopScheduler {
         }
 
         let (kind, summary) = match next {
-            SchedulerMode::Running => {
-                ("scheduler.resumed", "The Scheduler resumed normal dispatch")
-            }
+            SchedulerMode::Running => (
+                "scheduler.resumed",
+                tr!(
+                    "The Scheduler resumed normal dispatch",
+                    "调度器已恢复正常派发"
+                ),
+            ),
             SchedulerMode::DispatchFrozen => (
                 "scheduler.dispatch_frozen",
-                "The Scheduler stopped creating and superseding Jobs",
+                tr!(
+                    "The Scheduler stopped creating and superseding Jobs",
+                    "调度器已停止创建和替代任务"
+                ),
             ),
             SchedulerMode::FullyFrozen => (
                 "scheduler.fully_frozen",
-                "The Scheduler froze new Jobs and new ActionRuns",
+                tr!(
+                    "The Scheduler froze new Jobs and new ActionRuns",
+                    "调度器已冻结新任务和新操作"
+                ),
             ),
             SchedulerMode::Recovering => (
                 "scheduler.recovery_started",
-                "The Scheduler is recovering unfinished state",
+                tr!(
+                    "The Scheduler is recovering unfinished state",
+                    "调度器正在恢复未完成的状态"
+                ),
             ),
         };
         self.store
@@ -1801,7 +1960,10 @@ fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStat
         .iter()
         .any(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running))
     {
-        return Some((IssueStatus::Investigating, "a Job is running".to_string()));
+        return Some((
+            IssueStatus::Investigating,
+            tr!("a Job is running", "有任务正在运行").to_string(),
+        ));
     }
     if actions
         .iter()
@@ -1809,7 +1971,7 @@ fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStat
     {
         return Some((
             IssueStatus::Mitigating,
-            "an action is ready or executing".to_string(),
+            tr!("an action is ready or executing", "有操作就绪或正在执行").to_string(),
         ));
     }
     if actions
@@ -1818,7 +1980,7 @@ fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStat
     {
         return Some((
             IssueStatus::Verifying,
-            "an action awaits verification".to_string(),
+            tr!("an action awaits verification", "有操作等待验证").to_string(),
         ));
     }
     let waiting = actions
@@ -1834,7 +1996,11 @@ fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStat
     if waiting {
         return Some((
             IssueStatus::WaitingForHuman,
-            "an inbox item or a Job waits for a human".to_string(),
+            tr!(
+                "an inbox item or a Job waits for a human",
+                "有收件箱事项或任务在等待人工"
+            )
+            .to_string(),
         ));
     }
     let latest_job = jobs.iter().max_by_key(|job| (job.created_at, job.job_id))?;
@@ -1845,7 +2011,11 @@ fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStat
     {
         return Some((
             IssueStatus::Resolved,
-            "the latest pass reported the problem solved".to_string(),
+            tr!(
+                "the latest pass reported the problem solved",
+                "最近一轮处理报告问题已解决"
+            )
+            .to_string(),
         ));
     }
     let remediated = actions.iter().any(|action| {
@@ -1856,11 +2026,19 @@ fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStat
     if remediated {
         return Some((
             IssueStatus::Resolved,
-            "an action of the latest pass succeeded with verified evidence".to_string(),
+            tr!(
+                "an action of the latest pass succeeded with verified evidence",
+                "最近一轮处理中有操作成功并通过验证"
+            )
+            .to_string(),
         ));
     }
     Some((
         IssueStatus::WaitingForHuman,
-        "nothing automatic remains; a human closes the Issue or sends it on".to_string(),
+        tr!(
+            "nothing automatic remains; a human closes the Issue or sends it on",
+            "没有可自动进行的工作了；由人工关闭该 Issue 或送回继续处理"
+        )
+        .to_string(),
     ))
 }

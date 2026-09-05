@@ -1,6 +1,7 @@
 import { AlertTriangle, Ban, CheckCircle2, ClipboardList, Inbox as InboxIcon, ShieldQuestion, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import type { ActionRun, Inbox as InboxData, Job, Revision, Status } from "../types";
 import { Page } from "./Shell";
@@ -30,6 +31,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState<Revision | null>(null);
+  const { t, status: label, time } = useT();
 
   useEffect(() => {
     api.inbox().then(setInbox).catch((e) => setError((e as Error).message));
@@ -68,11 +70,11 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
     <div className="mt-4 grid gap-2">
       <Textarea rows={2} value={comment(id)} placeholder={placeholder} onChange={(e) => setComment(id, e.target.value)} />
       <div className="flex gap-2">
-        <Button size="sm" disabled={busy === id} onClick={send} title="A revising Job runs now with the reason and your comment as input">
-          Send back upstream
+        <Button size="sm" disabled={busy === id} onClick={send} title={t("btn.sendUpstream.title")}>
+          {t("btn.sendUpstream")}
         </Button>
         <Button size="sm" variant="outline" disabled={busy === id} onClick={ack}>
-          Acknowledge
+          {t("btn.acknowledge")}
         </Button>
       </div>
     </div>
@@ -85,9 +87,9 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
   return (
     <Page
       icon={InboxIcon}
-      title="Inbox"
-      subtitle="Everything that waits for a human, in three categories. Items leave only through a recorded decision made in your name."
-      actions={status?.dry_run ? <Badge variant="warning">Platform dry-run: approved actions are rendered, not executed</Badge> : status ? <Badge variant="danger">Platform LIVE</Badge> : null}
+      title={t("inbox.title")}
+      subtitle={t("inbox.subtitle")}
+      actions={status?.dry_run ? <Badge variant="warning">{t("inbox.dryRunBadge")}</Badge> : status ? <Badge variant="danger">{t("inbox.liveBadge")}</Badge> : null}
     >
       {error && (
         <Alert icon={AlertTriangle}>
@@ -98,9 +100,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
         <Alert tone="info" icon={CheckCircle2}>
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
-              <p className="font-medium">
-                Revision ran: job <span className="font-mono">{revision.job.job_id.slice(0, 8)}…</span> is {revision.job.status.replace(/_/g, " ")}
-              </p>
+              <p className="font-medium">{t("inbox.revision.title", { id: `${revision.job.job_id.slice(0, 8)}…`, status: label(revision.job.status) })}</p>
               {revision.job.result && <p className="mt-0.5 text-muted-foreground">{revision.job.result.summary}</p>}
               {revision.actions.length > 0 && (
                 <ul className="mt-1 font-mono text-xs">
@@ -113,37 +113,37 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
               )}
             </div>
             <Button size="sm" variant="ghost" onClick={() => setRevision(null)}>
-              Dismiss
+              {t("inbox.dismiss")}
             </Button>
           </div>
         </Alert>
       )}
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <StatTile label="Permission requests" value={inbox.permission_requests.length} icon={ShieldQuestion} tone={inbox.permission_requests.length > 0 ? "warn" : "default"} hint="approve, or reject with a comment" />
-        <StatTile label="Permission denied" value={inbox.permission_denied.length} icon={Ban} tone={inbox.permission_denied.length > 0 ? "alert" : "default"} hint="review the reason; send upstream or acknowledge" />
-        <StatTile label="Failed" value={failedCount} icon={XCircle} tone={failedCount > 0 ? "alert" : "default"} hint={`${inbox.failed_jobs.length} jobs · ${inbox.failed_actions.length} actions`} />
+        <StatTile label={t("tile.requests")} value={inbox.permission_requests.length} icon={ShieldQuestion} tone={inbox.permission_requests.length > 0 ? "warn" : "default"} hint={t("tile.requests.hint")} />
+        <StatTile label={t("tile.denied")} value={inbox.permission_denied.length} icon={Ban} tone={inbox.permission_denied.length > 0 ? "alert" : "default"} hint={t("tile.denied.hint")} />
+        <StatTile label={t("tile.failed")} value={failedCount} icon={XCircle} tone={failedCount > 0 ? "alert" : "default"} hint={t("tile.failed.hint", { jobs: inbox.failed_jobs.length, actions: inbox.failed_actions.length })} />
       </div>
 
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <CardTitle className="text-base">Waiting for you</CardTitle>
-            <CardDescription className="mt-1">{total === 0 ? "Nothing waits for a human." : `${total} item(s)`}</CardDescription>
+            <CardTitle className="text-base">{t("inbox.waiting.title")}</CardTitle>
+            <CardDescription className="mt-1">{total === 0 ? t("inbox.waiting.none") : t("inbox.waiting.count", { count: total })}</CardDescription>
           </div>
           <Segmented
             value={filter}
             onChange={setFilter}
             options={[
-              { id: "all", label: "All", count: total },
-              { id: "requests", label: "Requests", count: inbox.permission_requests.length },
-              { id: "denied", label: "Denied", count: inbox.permission_denied.length },
-              { id: "failed", label: "Failed", count: failedCount },
+              { id: "all", label: t("filter.all"), count: total },
+              { id: "requests", label: t("filter.requests"), count: inbox.permission_requests.length },
+              { id: "denied", label: t("filter.denied"), count: inbox.permission_denied.length },
+              { id: "failed", label: t("filter.failed"), count: failedCount },
             ]}
           />
         </CardHeader>
         <CardContent className="grid gap-3">
-          {total === 0 && <EmptyState icon={InboxIcon} title="Inbox zero" hint="Denials and failures land here with their reasons; permission requests with the Team's reasoning." />}
+          {total === 0 && <EmptyState icon={InboxIcon} title={t("inbox.zero.title")} hint={t("inbox.zero.hint")} />}
 
           {show("requests") &&
             inbox.permission_requests.map((a) => (
@@ -151,26 +151,26 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-sm font-medium">{a.runbook_id}</span>
                   <span className="font-mono text-xs text-muted-foreground">on {a.target_ids.join(", ")}</span>
-                  <Badge variant="warning">needs approval</Badge>
-                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{new Date(a.created_at).toLocaleTimeString()}</span>
+                  <Badge variant="warning">{t("badge.needsApproval")}</Badge>
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{time(a.created_at)}</span>
                 </div>
                 <Kv
                   rows={[
-                    { k: "Why", v: a.reason || "—" },
-                    { k: "Expected effect", v: a.expected_effect || "—" },
-                    { k: "Verification", v: <span className="text-muted-foreground">every target must be Healthy in the after-Snapshot; a dry run passes as dry-run evidence only</span> },
+                    { k: t("kv.why"), v: a.reason || "—" },
+                    { k: t("kv.expected"), v: a.expected_effect || "—" },
+                    { k: t("kv.verification"), v: <span className="text-muted-foreground">{t("kv.verification.hint")}</span> },
                   ]}
                 />
                 <div className="mt-4 grid gap-2">
-                  <Textarea rows={2} value={comment(a.action_run_id)} placeholder="Comment (recorded with a rejection; the agent sees it if the denial is sent back)" onChange={(e) => setComment(a.action_run_id, e.target.value)} />
+                  <Textarea rows={2} value={comment(a.action_run_id)} placeholder={t("comment.request.placeholder")} onChange={(e) => setComment(a.action_run_id, e.target.value)} />
                   <div className="flex gap-2">
                     <Button size="sm" disabled={busy === a.action_run_id} onClick={() => approve(a)}>
                       <CheckCircle2 />
-                      Approve and run
+                      {t("btn.approve")}
                     </Button>
                     <Button size="sm" variant="outline" className="text-destructive" disabled={busy === a.action_run_id} onClick={() => reject(a)}>
                       <XCircle />
-                      Reject
+                      {t("btn.reject")}
                     </Button>
                   </div>
                 </div>
@@ -183,17 +183,17 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-sm font-medium">{a.runbook_id}</span>
                   <span className="font-mono text-xs text-muted-foreground">on {a.target_ids.join(", ")}</span>
-                  <Badge variant="danger">denied by {a.denial?.source === "human" ? a.denial.decided_by ?? "a human" : "rule"}</Badge>
-                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{a.denial && new Date(a.denial.decided_at).toLocaleTimeString()}</span>
+                  <Badge variant="danger">{t("badge.deniedBy", { who: a.denial?.source === "human" ? a.denial.decided_by ?? t("who.human") : t("who.rule") })}</Badge>
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{a.denial && time(a.denial.decided_at)}</span>
                 </div>
                 <Kv
                   rows={[
-                    { k: "Proposed because", v: a.reason || "—" },
-                    { k: "Denial reason", v: a.denial?.reason ?? "—" },
-                    ...(a.denial?.comment ? [{ k: "Comment", v: a.denial.comment }] : []),
+                    { k: t("kv.proposedBecause"), v: a.reason || "—" },
+                    { k: t("kv.denialReason"), v: a.denial?.reason ?? "—" },
+                    ...(a.denial?.comment ? [{ k: t("kv.comment"), v: a.denial.comment }] : []),
                   ]}
                 />
-                {reviewControls(a.action_run_id, "What should the next pass do differently?", () => reviewAction(a, "send_upstream"), () => reviewAction(a, "acknowledge"))}
+                {reviewControls(a.action_run_id, t("comment.next.placeholder"), () => reviewAction(a, "send_upstream"), () => reviewAction(a, "acknowledge"))}
               </ItemCard>
             ))}
 
@@ -201,17 +201,17 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
             inbox.failed_jobs.map((j) => (
               <ItemCard key={j.job_id} accent="muted">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-sm font-medium">job {j.job_id.slice(0, 8)}…</span>
-                  <Badge variant="danger">job failed</Badge>
-                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{new Date(j.created_at).toLocaleTimeString()}</span>
+                  <span className="font-mono text-sm font-medium">{t("records.job", { id: `${j.job_id.slice(0, 8)}…` })}</span>
+                  <Badge variant="danger">{t("badge.jobFailed")}</Badge>
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{time(j.created_at)}</span>
                 </div>
-                <p className="mt-2 text-sm">{j.result?.summary ?? "no result was recorded"}</p>
+                <p className="mt-2 text-sm">{j.result?.summary ?? t("noResult")}</p>
                 {j.result?.artifact_ids.map((id) => (
                   <a key={id} className="mr-3 font-mono text-xs text-primary underline-offset-4 hover:underline" href={`/api/artifacts/${id}/body`} target="_blank" rel="noreferrer">
-                    transcript {id.slice(0, 8)}…
+                    {t("transcript", { id: `${id.slice(0, 8)}…` })}
                   </a>
                 ))}
-                {reviewControls(j.job_id, "Anything the next pass should know?", () => reviewJob(j, "send_upstream"), () => reviewJob(j, "acknowledge"))}
+                {reviewControls(j.job_id, t("comment.job.placeholder"), () => reviewJob(j, "send_upstream"), () => reviewJob(j, "acknowledge"))}
               </ItemCard>
             ))}
           {show("failed") &&
@@ -225,12 +225,12 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                 </div>
                 <Kv
                   rows={[
-                    { k: "Proposed because", v: a.reason || "—" },
-                    { k: "Execution", v: a.execution_summary ?? "—" },
-                    { k: "Verification", v: a.verification_summary ?? "not reached" },
+                    { k: t("kv.proposedBecause"), v: a.reason || "—" },
+                    { k: t("kv.execution"), v: a.execution_summary ?? "—" },
+                    { k: t("kv.verification"), v: a.verification_summary ?? t("kv.verificationNotReached") },
                   ]}
                 />
-                {reviewControls(a.action_run_id, "What should the next pass do differently?", () => reviewAction(a, "send_upstream"), () => reviewAction(a, "acknowledge"))}
+                {reviewControls(a.action_run_id, t("comment.next.placeholder"), () => reviewAction(a, "send_upstream"), () => reviewAction(a, "acknowledge"))}
               </ItemCard>
             ))}
         </CardContent>
@@ -240,23 +240,23 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <ClipboardList className="h-4 w-4" />
-            History
+            {t("history.title")}
           </CardTitle>
-          <CardDescription>Every decided action, newest first.</CardDescription>
+          <CardDescription>{t("history.desc")}</CardDescription>
         </CardHeader>
         <CardContent>
-          {history.length === 0 && <p className="text-sm text-muted-foreground">No decided actions yet.</p>}
+          {history.length === 0 && <p className="text-sm text-muted-foreground">{t("history.none")}</p>}
           {history.length > 0 && (
             <div className="overflow-x-auto rounded-lg border">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
-                    <th className="px-3 py-2 font-medium">Runbook</th>
-                    <th className="px-3 py-2 font-medium">Targets</th>
-                    <th className="px-3 py-2 font-medium">Status</th>
-                    <th className="px-3 py-2 font-medium">Approval</th>
-                    <th className="px-3 py-2 font-medium">Outcome</th>
-                    <th className="px-3 py-2 font-medium">Review</th>
+                    <th className="px-3 py-2 font-medium">{t("col.runbook")}</th>
+                    <th className="px-3 py-2 font-medium">{t("col.targets")}</th>
+                    <th className="px-3 py-2 font-medium">{t("col.status")}</th>
+                    <th className="px-3 py-2 font-medium">{t("col.approval")}</th>
+                    <th className="px-3 py-2 font-medium">{t("col.outcome")}</th>
+                    <th className="px-3 py-2 font-medium">{t("col.review")}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y">
@@ -268,8 +268,8 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                         <StatusBadge value={a.status} />
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">
-                        {a.approval.replace(/_/g, " ")}
-                        {a.approved_by && <> by {a.approved_by}</>}
+                        {label(a.approval)}
+                        {a.approved_by && t("approval.by", { who: a.approved_by })}
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">
                         {a.denial ? `${a.denial.reason}${a.denial.comment ? ` — ${a.denial.comment}` : ""}` : a.verification_summary ?? a.execution_summary ?? "—"}
@@ -280,7 +280,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                         )}
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">
-                        {a.review ? `${a.review.reviewer}: ${a.review.decision.decision === "sent_upstream" ? `sent upstream (job ${a.review.decision.job_id.slice(0, 8)}…)` : "acknowledged"}` : "—"}
+                        {a.review ? `${a.review.reviewer}: ${a.review.decision.decision === "sent_upstream" ? t("review.sentUpstream", { id: `${a.review.decision.job_id.slice(0, 8)}…` }) : t("review.acknowledged")}` : "—"}
                       </td>
                     </tr>
                   ))}

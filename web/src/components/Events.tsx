@@ -1,6 +1,7 @@
 import { Radio, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api, streamEvents } from "../api";
+import { useT } from "../i18n";
 import type { EventRecord } from "../types";
 import { Page } from "./Shell";
 import { Badge, Card, CardContent } from "./ui";
@@ -16,6 +17,7 @@ export function Events() {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [live, setLive] = useState(false);
   const list = useRef<HTMLDivElement>(null);
+  const { t } = useT();
 
   useEffect(() => {
     let stop: (() => void) | null = null;
@@ -46,19 +48,19 @@ export function Events() {
   return (
     <Page
       icon={ScrollText}
-      title="Events"
-      subtitle="The append-only log every component writes to. Model output is recorded as data, never as authority."
+      title={t("events.title")}
+      subtitle={t("events.subtitle")}
       actions={
         <Badge variant={live ? "success" : "outline"}>
           <Radio className="h-3 w-3" />
-          {live ? "live" : "not connected"}
+          {live ? t("events.live") : t("events.disconnected")}
         </Badge>
       }
     >
       <Card>
         <CardContent className="p-0">
           <div ref={list} className="max-h-[calc(100vh-14rem)] overflow-y-auto font-mono text-xs">
-            {events.length === 0 && <p className="p-6 text-sm text-muted-foreground">No events yet.</p>}
+            {events.length === 0 && <p className="p-6 text-sm text-muted-foreground">{t("events.none")}</p>}
             {events.map((e) => (
               <div key={e.sequence} className="grid grid-cols-[3.5rem_5rem_18rem_8rem_1fr] gap-3 border-b border-dashed px-4 py-1.5 last:border-b-0 hover:bg-accent/30">
                 <span className="text-right text-muted-foreground tabular-nums">{e.sequence}</span>

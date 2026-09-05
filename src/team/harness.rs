@@ -32,6 +32,7 @@ use crate::domain::{
 use crate::error::{AgentError, AgentResult};
 use crate::policy::RunbookRegistry;
 use crate::ports::{AgentTeamPort, CancelSignal, StateStore, TeamCallbackSink};
+use crate::tr;
 use crate::view::FileArtifactStore;
 
 /// Operate Team that delegates diagnosis to a model through the agent harness.
@@ -317,9 +318,10 @@ impl AgentTeamPort for HarnessOperateTeam {
              registered runbooks ({}). Proposals are decided by an authority matrix you do not \
              control: they may run automatically, wait for a human, or be denied. Do not propose \
              anything the evidence does not support.\n\
-             Finish by calling submit_diagnosis with your conclusion and any unresolved questions.",
+             Finish by calling submit_diagnosis with your conclusion and any unresolved questions.{}",
             job.allowed_target_ids.join(", "),
             runbook_ids.join(", "),
+            crate::i18n::language().model_instruction(),
         );
         // Operator feedback is the control plane's own principal speaking; it is presented as
         // trusted input so the model treats it as direction, not as quoted data. The same text
@@ -401,21 +403,34 @@ impl AgentTeamPort for HarnessOperateTeam {
             // runtime enforces structure; it does not guess at unstructured output.
             AgentOutcome::Text(_) => JobResult::new(
                 JobOutcome::Failed,
-                "the model ended without calling submit_diagnosis",
+                tr!(
+                    "the model ended without calling submit_diagnosis",
+                    "模型结束时未调用 submit_diagnosis"
+                ),
             ),
             AgentOutcome::Cancelled => JobResult::new(
                 JobOutcome::Failed,
-                "cancelled before completing the diagnosis",
+                tr!(
+                    "cancelled before completing the diagnosis",
+                    "诊断完成前已被取消"
+                ),
             ),
             AgentOutcome::LimitReached { reason } => JobResult::new(
                 JobOutcome::Failed,
-                format!("stopped by the harness: {reason}"),
+                tr!(
+                    format!("stopped by the harness: {reason}"),
+                    format!("已被运行框架停止：{reason}")
+                ),
             ),
         };
         result.artifact_ids.push(transcript_artifact.artifact_id);
 
-        let mut callback = TeamCallback::new(job.issue_id, job.job_id, "Model run finished")
-            .with_final_result(result);
+        let mut callback = TeamCallback::new(
+            job.issue_id,
+            job.job_id,
+            tr!("Model run finished", "模型运行结束"),
+        )
+        .with_final_result(result);
         callback.artifact_ids.push(transcript_artifact.artifact_id);
         sink.deliver(callback).await
     }

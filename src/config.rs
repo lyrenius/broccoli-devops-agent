@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::{AgentError, AgentResult};
+use crate::i18n::Language;
 use crate::platform::PlatformConfig;
 
 /// Default environment variable holding the model API key.
@@ -134,6 +135,15 @@ impl ModelConfig {
     }
 }
 
+/// Agent-wide behaviour: the language everything the agent writes comes out in.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSection {
+    /// `en` or `zh-CN`. Fixed for the life of the process; the consoles switch their own
+    /// language at runtime independently.
+    pub language: Language,
+}
+
 /// HTTP API section of the agent config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -158,6 +168,8 @@ impl Default for ApiConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    /// Agent-wide behaviour (output language).
+    pub agent: AgentSection,
     /// Store and artifact location.
     pub data: DataConfig,
     /// Topology file location.

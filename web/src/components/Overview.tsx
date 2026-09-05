@@ -1,7 +1,7 @@
 import { Activity, AlertTriangle, Camera, EyeOff, Inbox as InboxIcon, LayoutDashboard, ListChecks, Server } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { ageOf } from "../lib/prefs";
+import { useT } from "../i18n";
 import type { Issue, Snapshot, Status } from "../types";
 import { Page } from "./Shell";
 import { StatusBadge } from "./status";
@@ -15,6 +15,7 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
   const [missing, setMissing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t, status: label, age } = useT();
 
   useEffect(() => {
     api
@@ -50,45 +51,53 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
   return (
     <Page
       icon={LayoutDashboard}
-      title="Overview"
+      title={t("overview.title")}
       subtitle={
         snapshot
-          ? `Snapshot captured ${ageOf(snapshot.created_at)} · ${snapshot.cause.replace(/_/g, " ")} · topology ${snapshot.topology_revision}`
-          : "The latest Snapshot of the deployment, with its coverage gaps."
+          ? t("overview.subtitle.snapshot", { age: age(snapshot.created_at), cause: label(snapshot.cause), rev: snapshot.topology_revision })
+          : t("overview.subtitle.default")
       }
       actions={
         <Button onClick={capture} disabled={busy}>
           <Camera />
-          {busy ? "Capturing…" : "Capture now"}
+          {busy ? t("overview.capturing") : t("overview.capture")}
         </Button>
       }
     >
       {error && (
         <Alert icon={AlertTriangle}>
-          <p className="font-medium">Capture failed</p>
+          <p className="font-medium">{t("overview.captureFailed")}</p>
           <p className="mt-0.5 text-muted-foreground">{error}</p>
         </Alert>
       )}
       {frozenAfterRecovery && status && (
         <Alert tone="warning" icon={AlertTriangle}>
-          <p className="font-medium">Recovered from a restart; the Scheduler is {status.mode.replace(/_/g, " ")}.</p>
+          <p className="font-medium">{t("overview.recovered.title", { mode: label(status.mode) })}</p>
           <p className="mt-0.5">
-            {status.recovery!.interrupted_job_ids.length + status.recovery!.interrupted_action_ids.length} interrupted item(s) were put in the Inbox
-            {status.recovery!.previous_mode !== "running" && <> · the previous process was {status.recovery!.previous_mode.replace(/_/g, " ")}</>}. Check the Inbox, then press Resume in the sidebar.
+            {t("overview.recovered.body", {
+              count: status.recovery!.interrupted_job_ids.length + status.recovery!.interrupted_action_ids.length,
+              previous: status.recovery!.previous_mode !== "running" ? t("overview.recovered.previous", { mode: label(status.recovery!.previous_mode) }) : "",
+            })}
           </p>
         </Alert>
       )}
       {stale && (
         <Alert tone="info" icon={AlertTriangle}>
-          This Snapshot is old; the probes may have changed since. Capture now for the current picture.
+          {t("overview.stale")}
         </Alert>
       )}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatTile label="Healthy resources" value={snapshot ? `${healthy} / ${total}` : "—"} icon={Server} tone={snapshot && healthy < total ? "warn" : "default"} />
-        <StatTile label="Inbox" value={status?.inbox.total ?? "—"} icon={InboxIcon} tone={status && status.inbox.total > 0 ? "alert" : "default"} hint={status ? `${status.inbox.permission_requests} requests · ${status.inbox.permission_denied} denied · ${status.inbox.failed_jobs + status.inbox.failed_actions} failed` : undefined} />
-        <StatTile label="Open issues" value={liveIssues} icon={ListChecks} hint={`${issues.length} total`} />
-        <StatTile label="Events" value={status?.counts.events ?? "—"} icon={Activity} hint={status ? `${status.counts.jobs} jobs · ${status.counts.actions} actions` : undefined} />
+        <StatTile label={t("stat.healthy")} value={snapshot ? `${healthy} / ${total}` : "—"} icon={Server} tone={snapshot && healthy < total ? "warn" : "default"} />
+        <StatTile
+          label={t("stat.inbox")}
+          value={status?.inbox.total ?? "—"}
+          icon={InboxIcon}
+          tone={status && status.inbox.total > 0 ? "alert" : "default"}
+          hint={status ? t("stat.inboxHint", { requests: status.inbox.permission_requests, denied: status.inbox.permission_denied, failed: status.inbox.failed_jobs + status.inbox.failed_actions }) : undefined}
+        />
+        <StatTile label={t("stat.openIssues")} value={liveIssues} icon={ListChecks} hint={t("stat.total", { count: issues.length })} />
+        <StatTile label={t("stat.events")} value={status?.counts.events ?? "—"} icon={Activity} hint={status ? t("stat.eventsHint", { jobs: status.counts.jobs, actions: status.counts.actions }) : undefined} />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">
@@ -96,22 +105,22 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Server className="h-4 w-4" />
-              Resources
+              {t("resources.title")}
             </CardTitle>
-            <CardDescription>Every resource in the topology as the Collector last observed it.</CardDescription>
+            <CardDescription>{t("resources.desc")}</CardDescription>
           </CardHeader>
           <CardContent>
-            {missing && <EmptyState icon={Camera} title="No Snapshot yet" hint="Capture one to see the deployment." />}
+            {missing && <EmptyState icon={Camera} title={t("resources.empty.title")} hint={t("resources.empty.hint")} />}
             {snapshot && (
               <div className="overflow-x-auto rounded-lg border">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
-                      <th className="px-3 py-2 font-medium">Resource</th>
-                      <th className="px-3 py-2 font-medium">Kind</th>
-                      <th className="px-3 py-2 font-medium">Health</th>
-                      <th className="px-3 py-2 font-medium">Signals</th>
-                      <th className="px-3 py-2 text-right font-medium">Latency</th>
+                      <th className="px-3 py-2 font-medium">{t("col.resource")}</th>
+                      <th className="px-3 py-2 font-medium">{t("col.kind")}</th>
+                      <th className="px-3 py-2 font-medium">{t("col.health")}</th>
+                      <th className="px-3 py-2 font-medium">{t("col.signals")}</th>
+                      <th className="px-3 py-2 text-right font-medium">{t("col.latency")}</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y">
@@ -143,12 +152,12 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <EyeOff className="h-4 w-4" />
-              Coverage gaps
+              {t("gaps.title")}
             </CardTitle>
-            <CardDescription>What the Collector could not observe. A gap is a fact, never assumed healthy.</CardDescription>
+            <CardDescription>{t("gaps.desc")}</CardDescription>
           </CardHeader>
           <CardContent>
-            {snapshot && snapshot.coverage_gaps.length === 0 && <p className="text-sm text-muted-foreground">None — every resource was observed.</p>}
+            {snapshot && snapshot.coverage_gaps.length === 0 && <p className="text-sm text-muted-foreground">{t("gaps.none")}</p>}
             {snapshot && snapshot.coverage_gaps.length > 0 && (
               <ul className="divide-y rounded-lg border bg-card">
                 {snapshot.coverage_gaps.map((gap, i) => (

@@ -181,6 +181,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
         "dry_run": state.runner.dry_run(),
         "deployment": state.runner.topology().deployment,
         "uptime_secs": state.started.elapsed().as_secs(),
+        "language": state.config.agent.language.tag(),
         "recovery": state.recovery,
         "counts": {
             "issues": store.list_issues().await?.len(),

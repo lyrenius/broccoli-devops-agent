@@ -12,6 +12,7 @@ pub mod collector;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod i18n;
 pub mod platform;
 pub mod policy;
 pub mod ports;

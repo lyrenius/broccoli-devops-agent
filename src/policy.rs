@@ -22,6 +22,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{ApprovalState, NamedValue, OperationMode, ResourceId, ResourceKind};
+use crate::tr;
 
 /// What the matrix says about one operation class in one mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,16 +391,17 @@ impl RunbookRegistry {
                 .iter()
                 .any(|argument| argument.name == *required && !argument.value.trim().is_empty());
             if !present {
-                return Err(format!(
-                    "runbook `{runbook_id}` requires argument `{required}`"
+                return Err(tr!(
+                    format!("runbook `{runbook_id}` requires argument `{required}`"),
+                    format!("runbook `{runbook_id}` 需要参数 `{required}`")
                 ));
             }
         }
         for argument in arguments {
             if argument.value.contains(SHELL_METACHARACTERS) {
-                return Err(format!(
-                    "argument `{}` contains shell metacharacters",
-                    argument.name
+                return Err(tr!(
+                    format!("argument `{}` contains shell metacharacters", argument.name),
+                    format!("参数 `{}` 包含 shell 元字符", argument.name)
                 ));
             }
         }
@@ -561,38 +563,58 @@ impl AuthorityPolicy {
             .ok_or_else(|| {
                 (
                     None,
-                    format!("runbook `{runbook_id}` is not in the Runbook Registry"),
+                    tr!(
+                        format!("runbook `{runbook_id}` is not in the Runbook Registry"),
+                        format!("runbook `{runbook_id}` 不在 Runbook 注册表中")
+                    ),
                 )
             })?;
         let fail = |reason: String| (Some(class), reason);
 
         if target_ids.is_empty() {
-            return Err(fail("the proposal names no target".to_string()));
+            return Err(fail(
+                tr!("the proposal names no target", "提议未指定任何目标").to_string(),
+            ));
         }
         if !allowed_capabilities.iter().any(|c| c == class.capability()) {
-            return Err(fail(format!(
-                "the Job does not hold capability `{}` required by row {} ({class:?})",
-                class.capability(),
-                class.row()
+            return Err(fail(tr!(
+                format!(
+                    "the Job does not hold capability `{}` required by row {} ({class:?})",
+                    class.capability(),
+                    class.row()
+                ),
+                format!(
+                    "任务不具备第 {} 行（{class:?}）所需的能力 `{}`",
+                    class.row(),
+                    class.capability()
+                )
             )));
         }
         for target in target_ids {
             if !allowed_target_ids.iter().any(|allowed| allowed == target) {
-                return Err(fail(format!(
-                    "target `{target}` is outside the Job's target scope"
+                return Err(fail(tr!(
+                    format!("target `{target}` is outside the Job's target scope"),
+                    format!("目标 `{target}` 超出了任务的目标范围")
                 )));
             }
             let Some(kind) = self.resources.get(target) else {
-                return Err(fail(format!(
-                    "target `{target}` is not in the resource catalog"
+                return Err(fail(tr!(
+                    format!("target `{target}` is not in the resource catalog"),
+                    format!("目标 `{target}` 不在资源目录中")
                 )));
             };
             if let Some(kinds) = class.target_kinds()
                 && !kinds.contains(kind)
             {
-                return Err(fail(format!(
-                    "row {} ({class:?}) does not apply to `{target}`, a {kind:?} resource",
-                    class.row()
+                return Err(fail(tr!(
+                    format!(
+                        "row {} ({class:?}) does not apply to `{target}`, a {kind:?} resource",
+                        class.row()
+                    ),
+                    format!(
+                        "第 {} 行（{class:?}）不适用于 `{target}`（其类型为 {kind:?}）",
+                        class.row()
+                    )
                 )));
             }
         }
@@ -618,23 +640,40 @@ impl AuthorityPolicy {
         ) {
             Ok(class) => class,
             Err((class, reason)) => {
-                return AuthorityDecision::denied(class, mode, format!("scope: {reason}"));
+                return AuthorityDecision::denied(
+                    class,
+                    mode,
+                    tr!(format!("scope: {reason}"), format!("范围校验：{reason}")),
+                );
             }
         };
         let base = class.authority(mode);
         let (authority, rationale) = match base {
             Authority::Auto if proposal.recent_auto_repeat => (
                 Authority::Approve,
-                format!(
-                    "row {} is auto in {mode:?}, escalated to approve: the same action ran \
-                     automatically on this target within the last {}s",
-                    class.row(),
-                    self.auto_repeat_window.as_secs()
+                tr!(
+                    format!(
+                        "row {} is auto in {mode:?}, escalated to approve: the same action ran \
+                         automatically on this target within the last {}s",
+                        class.row(),
+                        self.auto_repeat_window.as_secs()
+                    ),
+                    format!(
+                        "第 {} 行在 {mode:?} 模式下为自动执行，但已升级为需审批：最近 {} 秒内同一操作已在该目标上自动执行过",
+                        class.row(),
+                        self.auto_repeat_window.as_secs()
+                    )
                 ),
             ),
             other => (
                 other,
-                format!("row {} ({class:?}) is {other:?} in {mode:?}", class.row()),
+                tr!(
+                    format!("row {} ({class:?}) is {other:?} in {mode:?}", class.row()),
+                    format!(
+                        "第 {} 行（{class:?}）在 {mode:?} 模式下为 {other:?}",
+                        class.row()
+                    )
+                ),
             ),
         };
         AuthorityDecision {

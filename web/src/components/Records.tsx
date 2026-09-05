@@ -1,6 +1,7 @@
 import { AlertTriangle, CheckCircle2, ListChecks, MessageSquareQuote, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import type { Issue, Job } from "../types";
 import { Page } from "./Shell";
@@ -15,6 +16,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [comments, setComments] = useState<Record<string, string>>({});
+  const { t, status: label, dateTime } = useT();
 
   useEffect(() => {
     api.issues().then((list) => setIssues([...list].reverse())).catch(() => undefined);
@@ -36,13 +38,13 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
   };
 
   return (
-    <Page icon={ListChecks} title="Issues & jobs" subtitle="Each Issue with every pass a Team made on it. Status is derived from outstanding work; a human closes an Issue.">
+    <Page icon={ListChecks} title={t("records.title")} subtitle={t("records.subtitle")}>
       {error && (
         <Alert icon={AlertTriangle}>
           <p>{error}</p>
         </Alert>
       )}
-      {issues.length === 0 && <EmptyState icon={ListChecks} title="No issues filed yet" hint="File a report to open one." />}
+      {issues.length === 0 && <EmptyState icon={ListChecks} title={t("records.empty.title")} hint={t("records.empty.hint")} />}
       {issues.map((issue) => {
         const related = jobs.filter((j) => j.issue_id === issue.issue_id);
         const live = LIVE.has(issue.status);
@@ -51,41 +53,41 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
             <CardHeader>
               <div className="flex flex-wrap items-center gap-2">
                 <CardTitle className="text-base">{issue.title}</CardTitle>
-                <Badge variant="secondary">{issue.priority.replace(/_/g, " ")}</Badge>
+                <Badge variant="secondary">{label(issue.priority)}</Badge>
                 <StatusBadge value={issue.status} />
-                <span className="ml-auto text-xs text-muted-foreground">{new Date(issue.created_at).toLocaleString()}</span>
+                <span className="ml-auto text-xs text-muted-foreground">{dateTime(issue.created_at)}</span>
               </div>
               <CardDescription>{issue.description}</CardDescription>
               {live && (
                 <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <Input className="max-w-xs" placeholder="closing comment" value={comments[issue.issue_id] ?? ""} onChange={(e) => setComments((c) => ({ ...c, [issue.issue_id]: e.target.value }))} />
-                  <Button size="sm" disabled={busy === issue.issue_id} onClick={() => close(issue, "resolved")} title="The problem is fixed or was not a problem">
+                  <Input className="max-w-xs" placeholder={t("records.closingComment")} value={comments[issue.issue_id] ?? ""} onChange={(e) => setComments((c) => ({ ...c, [issue.issue_id]: e.target.value }))} />
+                  <Button size="sm" disabled={busy === issue.issue_id} onClick={() => close(issue, "resolved")} title={t("btn.resolve.title")}>
                     <CheckCircle2 />
-                    Resolve
+                    {t("btn.resolve")}
                   </Button>
-                  <Button size="sm" variant="outline" disabled={busy === issue.issue_id} onClick={() => close(issue, "cancelled")} title="Stop working on it without claiming it is fixed">
+                  <Button size="sm" variant="outline" disabled={busy === issue.issue_id} onClick={() => close(issue, "cancelled")} title={t("btn.cancel.title")}>
                     <XCircle />
-                    Cancel
+                    {t("btn.cancel")}
                   </Button>
                 </div>
               )}
             </CardHeader>
             <CardContent>
-              {related.length === 0 && <p className="text-sm text-muted-foreground">No Job yet.</p>}
+              {related.length === 0 && <p className="text-sm text-muted-foreground">{t("records.noJob")}</p>}
               {related.length > 0 && (
                 <ul className="divide-y rounded-lg border bg-muted/20">
                   {related.map((job) => (
                     <li key={job.job_id} className="p-3">
                       <div className="flex flex-wrap items-center gap-2 text-sm">
-                        <span className="font-mono text-xs text-muted-foreground">job {job.job_id.slice(0, 8)}…</span>
+                        <span className="font-mono text-xs text-muted-foreground">{t("records.job", { id: `${job.job_id.slice(0, 8)}…` })}</span>
                         <span className="text-muted-foreground">·</span>
-                        <span className="text-xs">{job.team_kind}</span>
+                        <span className="text-xs">{label(job.team_kind)}</span>
                         <StatusBadge value={job.status} />
-                        {job.result && <Badge variant="outline">{job.result.outcome.replace(/_/g, " ")}</Badge>}
-                        {job.revises_job_id && <Badge variant="outline">revises {job.revises_job_id.slice(0, 8)}…</Badge>}
+                        {job.result && <Badge variant="outline">{label(job.result.outcome)}</Badge>}
+                        {job.revises_job_id && <Badge variant="outline">{t("records.revises", { id: `${job.revises_job_id.slice(0, 8)}…` })}</Badge>}
                         {job.review && (
                           <Badge variant="outline">
-                            reviewed by {job.review.reviewer}: {job.review.decision.decision === "sent_upstream" ? "sent upstream" : "acknowledged"}
+                            {t("records.reviewedBy", { who: job.review.reviewer, decision: job.review.decision.decision === "sent_upstream" ? t("review.sentUpstream", { id: `${job.review.decision.job_id.slice(0, 8)}…` }) : t("review.acknowledged") })}
                           </Badge>
                         )}
                       </div>
@@ -98,17 +100,17 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                                 <span className="font-medium">{f.reviewer}</span>{" "}
                                 {f.origin.kind === "denied_action" && (
                                   <>
-                                    on the denied <span className="font-mono">{f.origin.runbook_id}</span>: {f.origin.denial.reason}
+                                    {t("records.feedback.denied", { runbook: f.origin.runbook_id, reason: f.origin.denial.reason })}
                                     {f.origin.denial.comment && <> — {f.origin.denial.comment}</>}
                                   </>
                                 )}
                                 {f.origin.kind === "failed_action" && (
                                   <>
-                                    on the failed <span className="font-mono">{f.origin.runbook_id}</span>: {f.origin.summary}
+                                    {t("records.feedback.failed", { runbook: f.origin.runbook_id, summary: f.origin.summary })}
                                     {f.origin.evidence && <pre className="mt-1 whitespace-pre-wrap rounded bg-muted/60 p-2 font-mono text-[11px] text-muted-foreground">{f.origin.evidence}</pre>}
                                   </>
                                 )}
-                                {f.origin.kind === "failed_job" && <>on the failed job: {f.origin.summary}</>}
+                                {f.origin.kind === "failed_job" && <>{t("records.feedback.job", { summary: f.origin.summary })}</>}
                                 {f.comment && <span className="text-muted-foreground"> · “{f.comment}”</span>}
                               </div>
                             </li>
@@ -127,7 +129,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                           )}
                           {job.result.proposed_actions.length > 0 && (
                             <div className="mt-1 text-xs text-muted-foreground">
-                              proposed:{" "}
+                              {t("records.proposed")}{" "}
                               {job.result.proposed_actions.map((p, i) => (
                                 <span key={i} className="font-mono">
                                   {p.runbook_id} on {p.target_ids.join(",")}
@@ -139,7 +141,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                           <div className="mt-1">
                             {job.result.artifact_ids.map((id) => (
                               <a key={id} className="mr-3 font-mono text-xs text-primary underline-offset-4 hover:underline" href={`/api/artifacts/${id}/body`} target="_blank" rel="noreferrer">
-                                transcript {id.slice(0, 8)}…
+                                {t("transcript", { id: `${id.slice(0, 8)}…` })}
                               </a>
                             ))}
                           </div>

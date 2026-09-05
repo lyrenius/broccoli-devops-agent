@@ -39,6 +39,7 @@ use crate::scheduler::{IssueClosure, RecoverySummary, TopScheduler};
 use crate::store::file::FileStateStore;
 use crate::team::{HarnessOperateTeam, ReadOnlyOperateTeam};
 use crate::topology::DeploymentTopology;
+use crate::tr;
 use crate::view::{FileArtifactStore, PROFILE_OPERATE_READONLY, RedactingViewBuilder};
 
 /// Characters of execution evidence handed to the next pass, at most.
@@ -318,11 +319,18 @@ impl SliceRunner {
             let current = self.store.get_job(job.job_id).await?;
             if !current.status.is_terminal() {
                 sink.deliver(
-                    TeamCallback::new(job.issue_id, job.job_id, "The Team backend failed")
-                        .with_final_result(JobResult::new(
-                            JobOutcome::Failed,
+                    TeamCallback::new(
+                        job.issue_id,
+                        job.job_id,
+                        tr!("The Team backend failed", "团队后端出错"),
+                    )
+                    .with_final_result(JobResult::new(
+                        JobOutcome::Failed,
+                        tr!(
                             format!("the Team backend failed: {error}"),
-                        )),
+                            format!("团队后端出错：{error}")
+                        ),
+                    )),
                 )
                 .await?;
             }
@@ -439,7 +447,10 @@ impl SliceRunner {
                 summary: match (&action.verification_summary, &action.execution_summary) {
                     (Some(verification), _) => verification.clone(),
                     (None, Some(execution)) => execution.clone(),
-                    (None, None) => format!("execution ended as {:?}", action.status),
+                    (None, None) => tr!(
+                        format!("execution ended as {:?}", action.status),
+                        format!("执行以 {:?} 结束", action.status)
+                    ),
                 },
                 evidence: self.execution_evidence(&action).await,
             },
@@ -477,7 +488,7 @@ impl SliceRunner {
                 .result
                 .as_ref()
                 .map(|result| result.summary.clone())
-                .unwrap_or_else(|| "no result was recorded".to_string()),
+                .unwrap_or_else(|| tr!("no result was recorded", "未记录任何结果").to_string()),
         };
         self.review(
             job.issue_id,

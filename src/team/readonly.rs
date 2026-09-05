@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use crate::domain::{Artifact, HealthState, Job, JobOutcome, JobResult, TeamCallback, TeamKind};
 use crate::error::AgentResult;
 use crate::ports::{AgentTeamPort, CancelSignal, TeamCallbackSink};
+use crate::tr;
 use crate::view::FileArtifactStore;
 
 /// Read-only Operate Team that reasons deterministically over the Snapshot View.
@@ -44,7 +45,10 @@ impl AgentTeamPort for ReadOnlyOperateTeam {
         sink.deliver(TeamCallback::new(
             job.issue_id,
             job.job_id,
-            "Verifying and reading the Snapshot View",
+            tr!(
+                "Verifying and reading the Snapshot View",
+                "正在校验并读取快照视图"
+            ),
         ))
         .await?;
 
@@ -54,10 +58,13 @@ impl AgentTeamPort for ReadOnlyOperateTeam {
         let view: serde_json::Value = serde_json::from_slice(&bytes)?;
 
         if cancel.is_cancelled() {
-            let result = JobResult::new(JobOutcome::Failed, "Cancelled before diagnosis");
+            let result = JobResult::new(
+                JobOutcome::Failed,
+                tr!("Cancelled before diagnosis", "诊断前已被取消"),
+            );
             return sink
                 .deliver(
-                    TeamCallback::new(job.issue_id, job.job_id, "Cancelled")
+                    TeamCallback::new(job.issue_id, job.job_id, tr!("Cancelled", "已取消"))
                         .with_final_result(result),
                 )
                 .await;
@@ -86,35 +93,53 @@ impl AgentTeamPort for ReadOnlyOperateTeam {
             let to = dep["to_resource_id"].as_str().unwrap_or("?");
             let from = dep["from_resource_id"].as_str().unwrap_or("?");
             if critical && unhealthy.iter().any(|(id, _)| id == to) {
-                threatened.push(format!("`{from}` critically depends on unhealthy `{to}`."));
+                threatened.push(tr!(
+                    format!("`{from}` critically depends on unhealthy `{to}`."),
+                    format!("`{from}` 关键依赖于不健康的 `{to}`。")
+                ));
             }
         }
 
         let mut lines = Vec::new();
         let feedback = view["human_feedback"].as_array().unwrap_or(&empty);
         if !feedback.is_empty() {
-            lines.push(format!(
-                "Revision pass after {} human feedback item(s): {}",
-                feedback.len(),
-                feedback
-                    .iter()
-                    .filter_map(|item| item["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
+            let texts = feedback
+                .iter()
+                .filter_map(|item| item["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            lines.push(tr!(
+                format!(
+                    "Revision pass after {} human feedback item(s): {texts}",
+                    feedback.len()
+                ),
+                format!("修订轮次，已收到 {} 条人工反馈：{texts}", feedback.len())
             ));
         }
         if unhealthy.is_empty() {
-            lines.push("All probed resources report healthy.".to_string());
+            lines.push(
+                tr!(
+                    "All probed resources report healthy.",
+                    "所有已探测的资源均为健康。"
+                )
+                .to_string(),
+            );
         } else {
             for (id, health) in &unhealthy {
-                lines.push(format!("`{id}` is {health:?}."));
+                lines.push(tr!(
+                    format!("`{id}` is {health:?}."),
+                    format!("`{id}` 的状态为 {health:?}。")
+                ));
             }
         }
         lines.extend(threatened.iter().cloned());
         if !gaps.is_empty() {
-            lines.push(format!(
-                "{} coverage gap(s) limit this diagnosis; see the View for details.",
-                gaps.len()
+            lines.push(tr!(
+                format!(
+                    "{} coverage gap(s) limit this diagnosis; see the View for details.",
+                    gaps.len()
+                ),
+                format!("{} 处观测盲区限制了本次诊断；详见快照视图。", gaps.len())
             ));
         }
 
@@ -122,16 +147,21 @@ impl AgentTeamPort for ReadOnlyOperateTeam {
         result.artifact_ids.push(snapshot_view.artifact_id);
         for gap in gaps {
             if let Some(probe) = gap["probe_id"].as_str() {
-                result.unresolved_questions.push(format!(
-                    "No observation from probe `{probe}` on `{}`",
-                    gap["resource_id"].as_str().unwrap_or("?")
+                let resource = gap["resource_id"].as_str().unwrap_or("?");
+                result.unresolved_questions.push(tr!(
+                    format!("No observation from probe `{probe}` on `{resource}`"),
+                    format!("探针 `{probe}` 在 `{resource}` 上没有观测结果")
                 ));
             }
         }
 
         sink.deliver(
-            TeamCallback::new(job.issue_id, job.job_id, "Diagnosis complete")
-                .with_final_result(result),
+            TeamCallback::new(
+                job.issue_id,
+                job.job_id,
+                tr!("Diagnosis complete", "诊断完成"),
+            )
+            .with_final_result(result),
         )
         .await
     }

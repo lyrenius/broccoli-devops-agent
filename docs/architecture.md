@@ -456,6 +456,15 @@ tooling) and a terminal console (`crates/tui`, ratatui). Everything a console ca
 file a report, approve or reject a held action, capture a Snapshot, freeze or
 resume the Scheduler — is an API call onto an existing runner operation, so the
 authority matrix and the event log apply to UI actions exactly as to CLI ones.
+Language is two settings, deliberately. The agent's output language (`[agent]
+language`, `en` or `zh-CN`) is fixed for the life of the process: every event
+summary, denial rationale, verification and execution summary, Team diagnosis,
+and the feedback text the model reads comes out in it, and the model is
+instructed to write its diagnoses in it while identifiers stay untouched. The
+log therefore never switches language mid-incident and transcripts replay as
+written. The consoles translate their own chrome at runtime, per viewer,
+defaulting to the agent's language.
+
 The inbox is the console's centre, in its three categories (§4.10): permission
 requests are decided with the Team's reason and expected effect in view;
 denials show who refused and why, take a comment, and can be sent back

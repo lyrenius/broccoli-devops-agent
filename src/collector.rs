@@ -648,7 +648,10 @@ impl TopologyCollector {
                 NewEvent::new(
                     "collector",
                     "collector.resource_observed",
-                    format!("Observed `{}`: {:?}", resource.id, health),
+                    crate::tr!(
+                        format!("Observed `{}`: {:?}", resource.id, health),
+                        format!("观测到 `{}`：{:?}", resource.id, health)
+                    ),
                 )
                 .with_payload(json!({
                     "resource_id": resource.id,

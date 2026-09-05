@@ -36,6 +36,7 @@ use crate::error::AgentResult;
 use crate::policy::{ClassificationLists, RunbookRegistry, SHELL_METACHARACTERS};
 use crate::ports::{AgentsPlatformPort, StateStore};
 use crate::topology::DeploymentTopology;
+use crate::tr;
 use crate::view::FileArtifactStore;
 
 /// Bytes of stdout or stderr kept per command in the ActionOutput Artifact.
@@ -272,7 +273,10 @@ impl LocalCommandPlatform {
             .collect();
         if !unknown.is_empty() {
             return Err((
-                format!("refused: unknown target(s) {}", unknown.join(", ")),
+                tr!(
+                    format!("refused: unknown target(s) {}", unknown.join(", ")),
+                    format!("已拒绝：未知目标 {}", unknown.join(", "))
+                ),
                 json!({ "refused": "unknown targets", "targets": unknown }),
             ));
         }
@@ -281,9 +285,15 @@ impl LocalCommandPlatform {
             .classify(&action.runbook_id, &action.arguments)
         else {
             return Err((
-                format!(
-                    "refused: runbook `{}` is not in the Runbook Registry",
-                    action.runbook_id
+                tr!(
+                    format!(
+                        "refused: runbook `{}` is not in the Runbook Registry",
+                        action.runbook_id
+                    ),
+                    format!(
+                        "已拒绝：runbook `{}` 不在 Runbook 注册表中",
+                        action.runbook_id
+                    )
                 ),
                 json!({ "refused": "unknown runbook", "runbook_id": action.runbook_id }),
             ));
@@ -293,10 +303,18 @@ impl LocalCommandPlatform {
                 let kind = self.resources[target];
                 if !kinds.contains(&kind) {
                     return Err((
-                        format!(
-                            "refused: `{}` (row {}) does not apply to `{target}`, a {kind:?} resource",
-                            action.runbook_id,
-                            class.row()
+                        tr!(
+                            format!(
+                                "refused: `{}` (row {}) does not apply to `{target}`, a {kind:?} \
+                                 resource",
+                                action.runbook_id,
+                                class.row()
+                            ),
+                            format!(
+                                "已拒绝：`{}`（第 {} 行）不适用于 `{target}`（其类型为 {kind:?}）",
+                                action.runbook_id,
+                                class.row()
+                            )
                         ),
                         json!({ "refused": "target kind", "target": target, "kind": kind }),
                     ));
@@ -306,7 +324,10 @@ impl LocalCommandPlatform {
         if let Err(reason) =
             RunbookRegistry::validate_arguments(&action.runbook_id, &action.arguments)
         {
-            return Err((format!("refused: {reason}"), json!({ "refused": reason })));
+            return Err((
+                tr!(format!("refused: {reason}"), format!("已拒绝：{reason}")),
+                json!({ "refused": reason }),
+            ));
         }
         Ok(())
     }
@@ -330,9 +351,17 @@ impl LocalCommandPlatform {
                 .iter()
                 .find(|argument| argument.name == name)
                 .map(|argument| argument.value.clone())
-                .ok_or_else(|| format!("runbook requires argument `{name}`"))?;
+                .ok_or_else(|| {
+                    tr!(
+                        format!("runbook requires argument `{name}`"),
+                        format!("runbook 需要参数 `{name}`")
+                    )
+                })?;
             if value.contains(SHELL_METACHARACTERS) {
-                return Err(format!("argument `{name}` contains shell metacharacters"));
+                return Err(tr!(
+                    format!("argument `{name}` contains shell metacharacters"),
+                    format!("参数 `{name}` 包含 shell 元字符")
+                ));
             }
             rendered.replace_range(start..=end, &value);
         }
@@ -381,9 +410,12 @@ impl AgentsPlatformPort for LocalCommandPlatform {
                 .finish(
                     action,
                     false,
-                    format!(
-                        "refused: no command is configured for runbook `{}`",
-                        action.runbook_id
+                    tr!(
+                        format!(
+                            "refused: no command is configured for runbook `{}`",
+                            action.runbook_id
+                        ),
+                        format!("已拒绝：runbook `{}` 未配置命令", action.runbook_id)
                     ),
                     json!({ "refused": "no command configured", "runbook_id": action.runbook_id }),
                 )
@@ -399,7 +431,7 @@ impl AgentsPlatformPort for LocalCommandPlatform {
                         .finish(
                             action,
                             false,
-                            format!("refused: {reason}"),
+                            tr!(format!("refused: {reason}"), format!("已拒绝：{reason}")),
                             json!({ "refused": reason, "target": target }),
                         )
                         .await;
@@ -412,10 +444,17 @@ impl AgentsPlatformPort for LocalCommandPlatform {
                 .finish(
                     action,
                     true,
-                    format!(
-                        "dry run: would execute {} command(s) for `{}`",
-                        commands.len(),
-                        action.runbook_id
+                    tr!(
+                        format!(
+                            "dry run: would execute {} command(s) for `{}`",
+                            commands.len(),
+                            action.runbook_id
+                        ),
+                        format!(
+                            "演练：本应为 `{}` 执行 {} 条命令",
+                            action.runbook_id,
+                            commands.len()
+                        )
                     ),
                     json!({ "dry_run": true, "commands": commands }),
                 )
@@ -435,17 +474,24 @@ impl AgentsPlatformPort for LocalCommandPlatform {
             let outcome = run_command(command, timeout).await;
             if !outcome.succeeded() {
                 all_ok = false;
+                let exit_code = outcome
+                    .exit_code
+                    .map_or("none".to_string(), |code| code.to_string());
                 problems.push(match (&outcome.spawn_error, outcome.timed_out) {
-                    (Some(error), _) => format!("`{target}`: could not start ({error})"),
-                    (None, true) => format!(
-                        "`{target}`: timed out after {}s and was killed",
-                        timeout.as_secs()
+                    (Some(error), _) => tr!(
+                        format!("`{target}`: could not start ({error})"),
+                        format!("`{target}`：无法启动（{error}）")
                     ),
-                    (None, false) => format!(
-                        "`{target}`: exit code {}",
-                        outcome
-                            .exit_code
-                            .map_or("none".to_string(), |code| code.to_string())
+                    (None, true) => tr!(
+                        format!(
+                            "`{target}`: timed out after {}s and was killed",
+                            timeout.as_secs()
+                        ),
+                        format!("`{target}`：{} 秒后超时并已被终止", timeout.as_secs())
+                    ),
+                    (None, false) => tr!(
+                        format!("`{target}`: exit code {exit_code}"),
+                        format!("`{target}`：退出码 {exit_code}")
                     ),
                 });
             }
@@ -457,16 +503,27 @@ impl AgentsPlatformPort for LocalCommandPlatform {
         self.finish(
             action,
             all_ok,
-            format!(
-                "executed {} command(s) for `{}`: {}",
-                commands.len(),
-                action.runbook_id,
-                if all_ok {
-                    "all exited 0".to_string()
+            {
+                let outcome_text = if all_ok {
+                    tr!("all exited 0", "全部以退出码 0 结束").to_string()
                 } else {
                     problems.join("; ")
-                }
-            ),
+                };
+                tr!(
+                    format!(
+                        "executed {} command(s) for `{}`: {}",
+                        commands.len(),
+                        action.runbook_id,
+                        outcome_text
+                    ),
+                    format!(
+                        "已为 `{}` 执行 {} 条命令：{}",
+                        action.runbook_id,
+                        commands.len(),
+                        outcome_text
+                    )
+                )
+            },
             json!({ "dry_run": false, "runs": runs }),
         )
         .await

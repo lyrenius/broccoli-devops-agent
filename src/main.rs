@@ -288,6 +288,8 @@ fn effective_config(cli: &Cli) -> Result<AppConfig, Box<dyn std::error::Error>> 
     if let Some(data) = &cli.data {
         config.data.dir = data.clone();
     }
+    // The output language is fixed for the life of the process, from the config file.
+    broccoli_devops_agent::i18n::set_language(config.agent.language);
     Ok(config)
 }
 

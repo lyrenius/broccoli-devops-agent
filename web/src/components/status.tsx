@@ -1,3 +1,5 @@
+import { useT } from "../i18n";
+import { cn } from "../lib/cn";
 import { Badge } from "./ui";
 
 /** Maps a health, status, or mode string onto Broccoli's badge tones. */
@@ -34,19 +36,21 @@ export function tone(value: string): "success" | "warning" | "danger" | "outline
 }
 
 export function StatusBadge({ value, className }: { value: string; className?: string }) {
+  const { status, locale } = useT();
   return (
     <Badge variant={tone(value)} className={className}>
-      <span className="font-mono font-medium">{value.replace(/_/g, " ")}</span>
+      <span className={cn("font-medium", locale === "en" && "font-mono")}>{status(value)}</span>
     </Badge>
   );
 }
 
 export function EvidenceBadge({ evidence }: { evidence: "dry_run" | "weak" | "strong" | null }) {
+  const { t } = useT();
   if (!evidence) return null;
   const variant = evidence === "strong" ? "success" : evidence === "weak" ? "warning" : "outline";
   return (
     <Badge variant={variant}>
-      <span className="font-normal">{evidence.replace("_", " ")} evidence</span>
+      <span className="font-normal">{t(`evidence.${evidence}`)}</span>
     </Badge>
   );
 }

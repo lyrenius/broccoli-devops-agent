@@ -47,13 +47,3 @@ export function useOperator(): [string, (name: string) => void] {
   }, [name]);
   return [name, setName];
 }
-
-/** Relative age of an ISO timestamp, e.g. "3 min ago". */
-export function ageOf(iso: string, now = Date.now()): string {
-  const seconds = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
-  if (seconds < 5) return "just now";
-  if (seconds < 90) return `${seconds}s ago`;
-  if (seconds < 5400) return `${Math.round(seconds / 60)} min ago`;
-  if (seconds < 172800) return `${Math.round(seconds / 3600)} h ago`;
-  return `${Math.round(seconds / 86400)} d ago`;
-}

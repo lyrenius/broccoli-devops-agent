@@ -3,6 +3,12 @@
 # Copy to config/agent.toml. This file may be committed and shown to a frontend: it never holds
 # credentials. The model API key is read from the environment variable named in `api_key_env`.
 
+[agent]
+language = "en"                       # "en" or "zh-CN": the language everything the agent writes
+                                      # (diagnoses, denial reasons, event log, model output).
+                                      # Fixed for the life of the process; the consoles switch
+                                      # their own language at runtime.
+
 [data]
 dir = "data"                          # file-backed store, event log, artifact bodies
 
