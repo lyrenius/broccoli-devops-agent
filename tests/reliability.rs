@@ -448,6 +448,7 @@ async fn recovery_reconciles_interrupted_work_and_restores_the_freeze() {
     assert_eq!(summary.interrupted_job_ids, vec![running_job_id]);
     assert_eq!(summary.interrupted_action_ids, vec![running_action_id]);
     assert!(summary.touched_anything());
+    assert!(!summary.is_clean_restart());
 
     let store = restarted.store();
     let job = store.get_job(running_job_id).await.unwrap();
@@ -520,7 +521,26 @@ async fn recovery_reconciles_interrupted_work_and_restores_the_freeze() {
     let clean = again.recover().await.unwrap();
     assert_eq!(clean.previous_mode, SchedulerMode::Running);
     assert!(!clean.touched_anything());
+    assert!(clean.is_clean_restart());
     assert_eq!(clean.final_mode, SchedulerMode::DispatchFrozen);
+
+    // Recovery's own freeze is bookkeeping, not a human decision: a third restart with nothing
+    // resumed in between is still a clean restart.
+    let third = SliceRunner::wire(
+        topology(
+            OperationMode::Rehearsal,
+            worker_port,
+            closed_port(),
+            closed_port(),
+        ),
+        dir.path(),
+        TeamBackend::ReadOnly,
+        echo_platform(),
+    )
+    .unwrap();
+    let still_clean = third.recover().await.unwrap();
+    assert_eq!(still_clean.previous_mode, SchedulerMode::Running);
+    assert!(still_clean.is_clean_restart());
     drop(worker);
 }
 

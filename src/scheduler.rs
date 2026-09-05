@@ -51,8 +51,12 @@ pub enum SchedulerMode {
 /// Summary of what Scheduler recovery found and did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoverySummary {
-    /// The mode the previous process had persisted last (`Running` when none was recorded).
+    /// The mode a human had set last (`Running` when none was recorded). The freezes recovery
+    /// itself writes are not counted: they are bookkeeping, not a decision.
     pub previous_mode: SchedulerMode,
+    /// An earlier recovery reconciled interrupted work and nobody has resumed since, so the
+    /// inbox still holds items no human has looked at.
+    pub pending_recovery_review: bool,
     /// Issue IDs that were unfinished when recovery started.
     pub issue_ids: Vec<IssueId>,
     /// Job IDs that were unfinished when recovery started.
@@ -79,6 +83,14 @@ impl RecoverySummary {
             || !self.interrupted_action_ids.is_empty()
             || !self.verified_action_ids.is_empty()
             || !self.reconstructed_review_job_ids.is_empty()
+    }
+
+    /// Whether dispatch may resume without a human: the last human decision was `Running`,
+    /// this recovery touched nothing, and no earlier recovery is still waiting for a look.
+    pub fn is_clean_restart(&self) -> bool {
+        self.previous_mode == SchedulerMode::Running
+            && !self.touched_anything()
+            && !self.pending_recovery_review
     }
 }
 
@@ -1356,7 +1368,7 @@ impl TopScheduler {
         &self,
         after_capture: Option<CaptureRequest>,
     ) -> AgentResult<RecoverySummary> {
-        let previous_mode = self.persisted_mode().await?;
+        let (previous_mode, pending_recovery_review) = self.persisted_mode().await?;
         self.set_mode(SchedulerMode::Recovering).await?;
 
         let issues = self.store.list_unfinished_issues().await?;
@@ -1364,6 +1376,7 @@ impl TopScheduler {
         let actions = self.store.list_unfinished_action_runs().await?;
         let mut summary = RecoverySummary {
             previous_mode,
+            pending_recovery_review,
             issue_ids: issues.iter().map(|issue| issue.issue_id).collect(),
             job_ids: jobs.iter().map(|job| job.job_id).collect(),
             action_run_ids: actions.iter().map(|a| a.action_run_id).collect(),
@@ -1538,20 +1551,45 @@ impl TopScheduler {
         Ok(summary)
     }
 
-    /// Reads the last mode the previous process persisted, from the event log.
+    /// Reads the last human-set mode from the event log, and whether an earlier recovery is
+    /// still waiting for a human to look at what it reconciled.
     ///
-    /// `Recovering` is transient and ignored; a log with no mode event at all means `Running`.
-    async fn persisted_mode(&self) -> AgentResult<SchedulerMode> {
+    /// Mode events written between `scheduler.recovery_started` and `scheduler.recovered` are
+    /// recovery's own bookkeeping and do not count as a human decision; otherwise every restart
+    /// after a recovery would stay frozen forever. A log with no human mode event means
+    /// `Running`. `Recovering` is transient and ignored.
+    async fn persisted_mode(&self) -> AgentResult<(SchedulerMode, bool)> {
         let mut mode = SchedulerMode::Running;
+        let mut inside_recovery = false;
+        let mut pending_review = false;
         for event in self.store.list_events().await? {
-            mode = match event.kind.as_str() {
-                "scheduler.resumed" => SchedulerMode::Running,
-                "scheduler.dispatch_frozen" => SchedulerMode::DispatchFrozen,
-                "scheduler.fully_frozen" => SchedulerMode::FullyFrozen,
-                _ => mode,
-            };
+            match event.kind.as_str() {
+                "scheduler.recovery_started" => inside_recovery = true,
+                "scheduler.recovered" => {
+                    inside_recovery = false;
+                    let touched = ["interrupted_job_ids", "interrupted_action_ids"]
+                        .iter()
+                        .any(|key| {
+                            event.payload[key]
+                                .as_array()
+                                .is_some_and(|ids| !ids.is_empty())
+                        });
+                    pending_review |= touched;
+                }
+                "scheduler.resumed" if !inside_recovery => {
+                    mode = SchedulerMode::Running;
+                    pending_review = false;
+                }
+                "scheduler.dispatch_frozen" if !inside_recovery => {
+                    mode = SchedulerMode::DispatchFrozen;
+                }
+                "scheduler.fully_frozen" if !inside_recovery => {
+                    mode = SchedulerMode::FullyFrozen;
+                }
+                _ => {}
+            }
         }
-        Ok(mode)
+        Ok((mode, pending_review))
     }
 
     /// Verifies that the Scheduler currently permits Job creation or supersession.

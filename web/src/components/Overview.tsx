@@ -19,6 +19,7 @@ export function Overview({ tick, onChanged }: { tick: number; onChanged: () => v
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [missing, setMissing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -32,13 +33,23 @@ export function Overview({ tick, onChanged }: { tick: number; onChanged: () => v
 
   const capture = async () => {
     setBusy(true);
+    setError(null);
     try {
       setSnapshot(await api.capture());
       setMissing(false);
       onChanged();
+    } catch (e) {
+      setError((e as Error).message);
     } finally {
       setBusy(false);
     }
+  };
+
+  const age = (iso: string): string => {
+    const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+    if (seconds < 90) return `${seconds}s ago`;
+    if (seconds < 5400) return `${Math.round(seconds / 60)} min ago`;
+    return `${Math.round(seconds / 3600)} h ago`;
   };
 
   return (
@@ -47,8 +58,8 @@ export function Overview({ tick, onChanged }: { tick: number; onChanged: () => v
         <div className="card-head">
           <h2>Latest Snapshot</h2>
           {snapshot && (
-            <span className="meta">
-              {new Date(snapshot.created_at).toLocaleString()} · {snapshot.cause} · rev {snapshot.topology_revision}
+            <span className="meta" title={new Date(snapshot.created_at).toLocaleString()}>
+              captured {age(snapshot.created_at)} · {snapshot.cause} · rev {snapshot.topology_revision}
             </span>
           )}
           <div className="spacer" style={{ flex: 1 }} />
@@ -56,7 +67,11 @@ export function Overview({ tick, onChanged }: { tick: number; onChanged: () => v
             {busy ? "Capturing…" : "Capture now"}
           </button>
         </div>
+        {error && <p className="error">capture failed: {error}</p>}
         {missing && <p className="muted">No Snapshot yet. Capture one to see the deployment.</p>}
+        {snapshot && Date.now() - new Date(snapshot.created_at).getTime() > 10 * 60 * 1000 && (
+          <p className="muted">This Snapshot is old; the probes may have changed since. Capture now for the current picture.</p>
+        )}
         {snapshot && (
           <table>
             <thead>

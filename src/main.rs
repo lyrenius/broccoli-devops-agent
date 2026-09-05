@@ -22,9 +22,7 @@ use broccoli_devops_agent::config::AppConfig;
 use broccoli_devops_agent::domain::{HumanReport, IssuePriority, SnapshotCause};
 use broccoli_devops_agent::ports::StateStore;
 use broccoli_devops_agent::runner::{InboxDecision, SliceRunner, TeamBackend};
-use broccoli_devops_agent::scheduler::{
-    IssueClosure, RecoverySummary, SchedulerMode, TopScheduler,
-};
+use broccoli_devops_agent::scheduler::{IssueClosure, RecoverySummary, TopScheduler};
 use broccoli_devops_agent::store::file::FileStateStore;
 use broccoli_devops_agent::topology::DeploymentTopology;
 use uuid::Uuid;
@@ -532,14 +530,22 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             // waits for a human, who can see why in the console.
             let summary = runner.recover().await?;
             print_recovery(&summary);
-            let clean_restart =
-                summary.previous_mode == SchedulerMode::Running && !summary.touched_anything();
-            if clean_restart && !stay_frozen {
+            if summary.is_clean_restart() && !stay_frozen {
                 runner.scheduler().resume().await?;
                 println!("clean restart: dispatch resumed");
             } else {
+                let why = if stay_frozen {
+                    "--stay-frozen was given".to_string()
+                } else if summary.touched_anything() {
+                    "this recovery reconciled interrupted work into the inbox".to_string()
+                } else if summary.pending_recovery_review {
+                    "an earlier recovery put items in the inbox and nobody has resumed since"
+                        .to_string()
+                } else {
+                    format!("a human left the Scheduler {:?}", summary.previous_mode)
+                };
                 println!(
-                    "scheduler stays {:?}: resume from a console when the inbox has been checked",
+                    "scheduler stays {:?} because {why}: check the inbox, then resume from a console",
                     runner.scheduler().mode().await
                 );
             }
