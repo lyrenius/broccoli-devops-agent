@@ -78,6 +78,13 @@ pub struct ModelConfig {
 fn default_api_key_env() -> String {
     DEFAULT_API_KEY_ENV.to_string()
 }
+
+/// Whether `name` is a plausible environment variable name rather than a value.
+fn is_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 fn default_timeout_secs() -> u64 {
     120
 }
@@ -166,9 +173,31 @@ pub struct AppConfig {
 impl AppConfig {
     /// Parses a configuration from TOML text.
     pub fn from_toml(text: &str) -> AgentResult<Self> {
-        toml::from_str(text).map_err(|error| {
+        let config: Self = toml::from_str(text).map_err(|error| {
             AgentError::InvalidInput(format!("agent config parse failed: {error}"))
-        })
+        })?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Rejects a config that would put a secret where a variable name belongs.
+    ///
+    /// `api_key_env` must be the name of an environment variable. When it holds anything else —
+    /// typically the key itself, pasted in by mistake — the error explains the fix without
+    /// echoing the value, so the secret does not end up in a terminal or a log.
+    fn validate(&self) -> AgentResult<()> {
+        if let Some(model) = &self.model
+            && !is_env_var_name(&model.api_key_env)
+        {
+            return Err(AgentError::InvalidInput(format!(
+                "[model].api_key_env must be the NAME of an environment variable (for example \
+                 `{DEFAULT_API_KEY_ENV}`), but the config holds a value that is not one — it \
+                 looks like the key itself. Remove it from the file, set \
+                 `api_key_env = \"{DEFAULT_API_KEY_ENV}\"`, and export the key: \
+                 `export {DEFAULT_API_KEY_ENV}=...`"
+            )));
+        }
+        Ok(())
     }
 
     /// Loads a configuration file from disk.
@@ -206,6 +235,29 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key pasted into `api_key_env` is refused at load time without being echoed back.
+    #[test]
+    fn a_pasted_key_is_refused_without_being_echoed() {
+        let error = AppConfig::from_toml(
+            r#"
+            [model]
+            base_url = "https://relay.example/v1"
+            model = "m"
+            api_key_env = "sk-1234567890abcdef"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("must be the NAME of an environment variable"));
+        assert!(
+            !error.contains("sk-1234"),
+            "the secret must not be echoed: {error}"
+        );
+        assert!(is_env_var_name("BROCCOLI_MODEL_API_KEY"));
+        assert!(!is_env_var_name("sk-abc"));
+        assert!(!is_env_var_name(""));
+    }
 
     #[test]
     fn defaults_apply_when_sections_are_omitted() {
