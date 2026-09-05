@@ -23,7 +23,8 @@ The control plane exposes an HTTP + SSE API (`serve`), and two user interfaces a
 # is restored; dispatch resumes on its own only after a clean restart (--stay-frozen to never).
 cargo run -- serve
 
-# Terminal 2: the web console — plain React + Vite, no Broccoli dependencies.
+# Terminal 2: the web console — plain React + Vite + Tailwind, styled after Broccoli's own
+# web UI (same design tokens, sidebar, cards, badges) but depending on no Broccoli package.
 cd web && pnpm install && pnpm dev          # http://localhost:5180, /api proxied to :4720
 
 # Or the terminal console.
@@ -46,7 +47,7 @@ The repository is a Cargo workspace with three crates and a strict dependency di
 - **`broccoli-devops-agent`** (root) — the control plane: domain model, ports, Scheduler, Collector, stores, Platform, authority policy, Teams, the HTTP API, and CLI. Its ports (`AgentTeamPort`, `SchedulerPolicyPort`, `SnapshotJudgePort`) are the backend-neutral seam for model-backed work.
 - **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call budgets, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (the OpenAI-compatible relay client lives behind its `openai` feature) and knows nothing about Broccoli.
 - **[`crates/tui`](./crates/tui)** (`broccoli-tui`) — the terminal console, a pure HTTP client of the API.
-- **[`web/`](./web)** — the web console (React 19 + Vite + TypeScript), also a pure API client, served by Vite separately.
+- **[`web/`](./web)** — the web console (React 19 + Vite + TypeScript + Tailwind v4), also a pure API client, served by Vite separately. It mirrors Broccoli's web UI — the same colour tokens, sidebar navigation, cards, badges, and page headers — so operators move between the judge's admin pages and the console without a visual seam, while sharing no code with Broccoli's plugin system.
 
 The control plane depends on the harness, never the reverse; the UIs depend on nothing but the API. Model-backed integrations meet the Scheduler only at the ports: `team::HarnessOperateTeam` adapts `AgentTeamPort` onto the harness today, and a codex-backed Team implementing the same port directly is the planned second option — the Scheduler cannot tell any of them apart.
 

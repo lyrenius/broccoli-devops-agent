@@ -449,8 +449,10 @@ restructuring later.
 The control plane exposes an HTTP + SSE API (`src/api.rs`) bound to localhost
 by default and optionally protected by a bearer token. Two consoles are pure
 clients of it and hold no state of their own: a web console (`web/`, plain
-React + Vite, deliberately independent of Broccoli's plugin system for now)
-and a terminal console (`crates/tui`, ratatui). Everything a console can do —
+React + Vite + Tailwind, deliberately independent of Broccoli's plugin system
+for now, but styled with Broccoli's own design tokens and layout — sidebar,
+page headers, cards, badges — so it reads as part of the same operator
+tooling) and a terminal console (`crates/tui`, ratatui). Everything a console can do —
 file a report, approve or reject a held action, capture a Snapshot, freeze or
 resume the Scheduler — is an API call onto an existing runner operation, so the
 authority matrix and the event log apply to UI actions exactly as to CLI ones.

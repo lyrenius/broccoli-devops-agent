@@ -1,6 +1,16 @@
+import { Radio, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api, streamEvents } from "../api";
 import type { EventRecord } from "../types";
+import { Page } from "./Shell";
+import { Badge, Card, CardContent } from "./ui";
+
+function actorTone(actor: string): string {
+  if (actor === "human") return "text-primary";
+  if (actor === "agent-team" || actor === "scheduler-policy") return "text-purple-600 dark:text-purple-400";
+  if (actor === "agents-platform") return "text-amber-600 dark:text-amber-400";
+  return "text-muted-foreground";
+}
 
 export function Events() {
   const [events, setEvents] = useState<EventRecord[]>([]);
@@ -29,28 +39,40 @@ export function Events() {
   }, []);
 
   useEffect(() => {
-    // Scroll only the log container, so the top bar and tabs stay in place.
     const node = list.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [events.length]);
 
   return (
-    <>
-      <div className="card-head">
-        <h2>Event log</h2>
-        <span className={`pill ${live ? "mode-running" : ""}`}>{live ? "live" : "not connected"}</span>
-      </div>
-      <div className="events" ref={list}>
-        {events.map((e) => (
-          <div key={e.sequence} className="row">
-            <span className="seq">{e.sequence}</span>
-            <span>{e.occurred_at.slice(11, 19)}</span>
-            <span className="kind">{e.kind}</span>
-            <span className="actor">{e.actor}</span>
-            <span className="summary">{e.summary}</span>
+    <Page
+      icon={ScrollText}
+      title="Events"
+      subtitle="The append-only log every component writes to. Model output is recorded as data, never as authority."
+      actions={
+        <Badge variant={live ? "success" : "outline"}>
+          <Radio className="h-3 w-3" />
+          {live ? "live" : "not connected"}
+        </Badge>
+      }
+    >
+      <Card>
+        <CardContent className="p-0">
+          <div ref={list} className="max-h-[calc(100vh-14rem)] overflow-y-auto font-mono text-xs">
+            {events.length === 0 && <p className="p-6 text-sm text-muted-foreground">No events yet.</p>}
+            {events.map((e) => (
+              <div key={e.sequence} className="grid grid-cols-[3.5rem_5rem_18rem_8rem_1fr] gap-3 border-b border-dashed px-4 py-1.5 last:border-b-0 hover:bg-accent/30">
+                <span className="text-right text-muted-foreground tabular-nums">{e.sequence}</span>
+                <span className="tabular-nums">{e.occurred_at.slice(11, 19)}</span>
+                <span className="truncate text-primary" title={e.kind}>
+                  {e.kind}
+                </span>
+                <span className={`truncate ${actorTone(e.actor)}`}>{e.actor}</span>
+                <span className="whitespace-pre-wrap break-words">{e.summary}</span>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
-    </>
+        </CardContent>
+      </Card>
+    </Page>
   );
 }
