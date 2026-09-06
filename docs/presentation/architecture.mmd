@@ -1,0 +1,57 @@
+%% Broccoli DevOps Agent — system architecture (presentation graph)
+%% Source of truth: docs/architecture.md §3 and the operator's Excalidraw diagram.
+%% Three paths: observation (left), control (centre), execution (right).
+flowchart TB
+    classDef machine fill:#f4f4f2,stroke:#5e6b63,color:#1b2620
+    classDef observe fill:#eef5f0,stroke:#1f5a3c,color:#1b2620
+    classDef control fill:#e8f0fb,stroke:#2f5c9e,color:#1b2620
+    classDef human fill:#fff4e0,stroke:#d98e27,color:#1b2620
+    classDef exec fill:#f9ebe7,stroke:#b54b3a,color:#1b2620
+
+    subgraph deployment["Broccoli deployment · contest LAN"]
+        M["Machines and services<br/>PostgreSQL · Redis · CephFS · API server · frontend · judge workers · stations"]
+    end
+
+    subgraph observation["Observation path"]
+        C["Collector<br/>probe registry · periodic capture · redaction"]
+        S[("AutoLog DB / Snapshot Store<br/>immutable Snapshots · append-only EventLog · Artifacts")]
+        J["Snapshot Judge<br/>rules + LLM over a sanitized Judge View"]
+        R["Reporter Agent<br/>status reports for the maintainer"]
+    end
+
+    subgraph controlpath["Control path"]
+        H["Human report<br/>HumanTop priority, reserved for humans"]
+        TS["Top Scheduler<br/>deterministic harness around a policy model<br/>Issues · Jobs · priorities · freeze · recovery"]
+        T["Operate Team<br/>harness-backed model + typed tools, or read-only rules<br/>one pass = one immutable Snapshot View"]
+        IN["Inbox<br/>Permission Request · Permission Denied · Failed"]
+        OP["Operator<br/>web console · TUI · CLI"]
+    end
+
+    subgraph execution["Execution path"]
+        P["Agents Platform<br/>joint-scope re-check · runbook commands · per-target lanes · dry-run by default"]
+    end
+
+    M -- "status · metrics · logs · heartbeats" --> C
+    C --> S
+    S -- "Judge View" --> J
+    S --> R
+    J -- "issue candidates" --> TS
+    H --> TS
+    TS -- "capture and probe requests<br/>(the only control edge into observation)" --> C
+    S -. "Snapshot · replayable View" .-> TS
+    TS -- "sanitized Snapshot View<br/>problem · scope · earlier passes · human feedback" --> T
+    T -- "diagnosis · proposals · probe request · progress" --> TS
+    T -- "inspect: non-mutating runbooks only" --> P
+    TS -- "ActionRun: auto row, or approved by a human" --> P
+    P -- "runbook over SSH" --> M
+    P -- "execution output · Artifact · verification" --> TS
+    TS -- "permission requests · denials · failures" --> IN
+    IN --> OP
+    OP -- "approve · reject · send back upstream · close · freeze" --> TS
+    R -.-> OP
+
+    class M machine
+    class C,S,J,R observe
+    class TS,T control
+    class H,IN,OP human
+    class P exec
