@@ -10,10 +10,14 @@ name = "broccoli-tui"
 path = "src/main.rs"
 
 [dependencies]
+chrono = "0.4.43"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.28"
 ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time"] }
+# Same features as the control plane: a session file read back and sent on must keep its bytes,
+# so the artifact hashes the server checks on import still match.
+serde_json = { version = "1.0.149", features = ["preserve_order", "float_roundtrip"] }
+tokio = { version = "1.49.0", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+unicode-width = "0.2"

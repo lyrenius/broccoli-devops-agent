@@ -1,31 +1,40 @@
 //! Terminal operator console for the Broccoli DevOps Agent.
 //!
-//! A pure client of the control plane's HTTP API: it refreshes status, the latest Snapshot, the
-//! inbox, issues, and the event tail once a second, and lets an operator work the inbox —
-//! approve, reject with a comment, acknowledge, or send an item back upstream — close Issues,
-//! capture a Snapshot, and freeze or resume the Scheduler. It has no state of its own and no
-//! access to machines — everything it can do, the API and therefore the authority matrix allow.
+//! A pure client of the control plane's HTTP API with the same reach as the web console: the
+//! Overview with the latest Snapshot, what runs now, and what it cost; the Inbox with its
+//! three categories and the history of decided actions; Issues & jobs with filters, search,
+//! export, and import; the Trace of an Issue's pass chain, transcript by transcript, live while
+//! a pass runs; the live event log; filing a report and watching it run; and the Settings
+//! configurator. It has no state of its own and no access to machines — everything it can do,
+//! the API and therefore the authority matrix allow, and every decision is recorded in the
+//! operator's name (`--as`).
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod api;
+mod app;
+mod format;
+mod screens;
+#[cfg(test)]
+mod tests;
 mod ui;
 
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use tokio::sync::mpsc;
 
-use api::{ApiClient, EventRow, Inbox, IssueRow, ResourceRow, Status};
-use ui::Screen;
+use api::ApiClient;
+use app::{App, Msg};
 
 /// Command-line arguments.
 #[derive(Debug, Parser)]
@@ -42,497 +51,27 @@ struct Cli {
     operator: String,
 }
 
-/// Which inbox category an item belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Category {
-    /// Waiting for approval.
-    Request,
-    /// Denied by rule or by a human, awaiting review.
-    Denied,
-    /// A failed Job, awaiting review.
-    FailedJob,
-    /// A failed action, awaiting review.
-    FailedAction,
-}
-
-impl Category {
-    /// Short label for the list.
-    pub fn label(self) -> &'static str {
-        match self {
-            Category::Request => "request",
-            Category::Denied => "denied",
-            Category::FailedJob => "failed job",
-            Category::FailedAction => "failed action",
-        }
-    }
-}
-
-/// One selectable inbox row.
-#[derive(Debug, Clone)]
-pub struct InboxItem {
-    /// Category.
-    pub category: Category,
-    /// ActionRun or Job ID.
-    pub id: String,
-    /// What it is: runbook and targets, or the Job.
-    pub title: String,
-    /// Status string.
-    pub status: String,
-    /// Detail lines for the lower pane.
-    pub detail: String,
-}
-
-impl InboxItem {
-    fn from_action(category: Category, action: &api::Action) -> Self {
-        let mut detail = format!(
-            "id: {}\napproval: {}\nreason: {}",
-            action.action_run_id, action.approval, action.reason
-        );
-        if let Some(denial) = &action.denial {
-            detail.push_str(&format!(
-                "\ndenied by {}: {}",
-                denial.decided_by.as_deref().unwrap_or(&denial.source),
-                denial.reason
-            ));
-            if let Some(comment) = &denial.comment {
-                detail.push_str(&format!("\ncomment: {comment}"));
-            }
-        }
-        if let Some(summary) = &action.execution_summary {
-            detail.push_str(&format!("\nexecution: {summary}"));
-        }
-        if let Some(summary) = &action.verification_summary {
-            detail.push_str(&format!(
-                "\nverification: {summary}{}",
-                action
-                    .verification_evidence
-                    .as_deref()
-                    .map(|evidence| format!(" [{evidence} evidence]"))
-                    .unwrap_or_default()
-            ));
-        }
-        if let Some(review) = &action.review {
-            detail.push_str(&format!(
-                "\nreviewed by {}: {}",
-                review["reviewer"].as_str().unwrap_or("?"),
-                review["decision"]["decision"].as_str().unwrap_or("?")
-            ));
-        }
-        Self {
-            category,
-            id: action.action_run_id.clone(),
-            title: format!("{} on {}", action.runbook_id, action.target_ids.join(",")),
-            status: action.status.clone(),
-            detail,
-        }
-    }
-
-    fn from_job(job: &api::JobRow) -> Self {
-        Self {
-            category: Category::FailedJob,
-            id: job.job_id.clone(),
-            title: format!("job {}", &job.job_id[..job.job_id.len().min(8)]),
-            status: job.status.clone(),
-            detail: format!(
-                "id: {}\nissue: {}\n{}",
-                job.job_id,
-                job.issue_id,
-                job.result
-                    .as_ref()
-                    .map_or("no result was recorded", |r| r.summary.as_str())
-            ),
-        }
-    }
-}
-
-/// What a footer prompt will do with its text once entered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pending {
-    /// Reject the selected request with the text as comment.
-    Reject,
-    /// Send the selected item back upstream with the text as feedback.
-    SendUpstream,
-    /// Acknowledge the selected item with the text as comment.
-    Acknowledge,
-    /// Resolve the selected Issue with the text as comment.
-    ResolveIssue,
-    /// Cancel the selected Issue with the text as comment.
-    CancelIssue,
-}
-
-/// A one-line text prompt in the footer.
-#[derive(Debug, Clone)]
-pub struct Prompt {
-    /// What the text is for.
-    pub pending: Pending,
-    /// Text entered so far.
-    pub buffer: String,
-}
-
-impl Prompt {
-    /// Footer label.
-    pub fn label(&self) -> &'static str {
-        match self.pending {
-            Pending::Reject => "reject — comment (Enter to submit, Esc to cancel): ",
-            Pending::SendUpstream => "send upstream — feedback for the next pass: ",
-            Pending::Acknowledge => "acknowledge — comment (optional): ",
-            Pending::ResolveIssue => "resolve issue — comment (optional): ",
-            Pending::CancelIssue => "cancel issue — comment (optional): ",
-        }
-    }
-}
-
-/// Everything the screens render.
-#[derive(Debug, Default)]
-pub struct App {
-    /// Active screen.
-    pub screen: Screen,
-    /// Operator name recorded with decisions.
-    pub operator: String,
-    /// Latest `/api/status`.
-    pub status: Status,
-    /// Latest Snapshot resources.
-    pub resources: Vec<ResourceRow>,
-    /// Inbox rows: requests, then denials, then failures.
-    pub inbox: Vec<InboxItem>,
-    /// All Issues.
-    pub issues: Vec<IssueRow>,
-    /// Event tail.
-    pub events: Vec<EventRow>,
-    /// Selected inbox index.
-    pub selected: usize,
-    /// Selected issue index.
-    pub selected_issue: usize,
-    /// Active footer prompt, if any.
-    pub prompt: Option<Prompt>,
-    /// Transient footer message (last error or confirmation).
-    pub message: Option<String>,
-}
-
-impl App {
-    /// Flattens the inbox into selectable rows.
-    fn set_inbox(&mut self, inbox: Inbox) {
-        let mut rows = Vec::new();
-        rows.extend(
-            inbox
-                .permission_requests
-                .iter()
-                .map(|a| InboxItem::from_action(Category::Request, a)),
-        );
-        rows.extend(
-            inbox
-                .permission_denied
-                .iter()
-                .map(|a| InboxItem::from_action(Category::Denied, a)),
-        );
-        rows.extend(inbox.failed_jobs.iter().map(InboxItem::from_job));
-        rows.extend(
-            inbox
-                .failed_actions
-                .iter()
-                .map(|a| InboxItem::from_action(Category::FailedAction, a)),
-        );
-        self.inbox = rows;
-        if self.selected >= self.inbox.len() {
-            self.selected = self.inbox.len().saturating_sub(1);
-        }
-    }
-
-    /// Refreshes every list from the API; failures become a footer message, never a crash.
-    async fn refresh(&mut self, client: &ApiClient) {
-        match client.status().await {
-            Ok(status) => self.status = status,
-            Err(error) => {
-                self.message = Some(format!("api: {error}"));
-                return;
-            }
-        }
-        if let Ok(resources) = client.latest_resources().await {
-            self.resources = resources;
-        }
-        if let Ok(inbox) = client.inbox().await {
-            self.set_inbox(inbox);
-        }
-        if let Ok(issues) = client.issues().await {
-            self.issues = issues;
-            if self.selected_issue >= self.issues.len() {
-                self.selected_issue = self.issues.len().saturating_sub(1);
-            }
-        }
-        if let Ok(events) = client.events(200).await {
-            self.events = events;
-        }
-    }
-
-    /// Applies one key press; returns false when the app should quit.
-    async fn handle_key(
-        &mut self,
-        key: KeyCode,
-        modifiers: KeyModifiers,
-        client: &ApiClient,
-    ) -> bool {
-        if let Some(prompt) = &mut self.prompt {
-            match key {
-                KeyCode::Esc => {
-                    self.prompt = None;
-                    self.message = Some("cancelled".to_string());
-                }
-                KeyCode::Enter => {
-                    let prompt = self.prompt.take().expect("prompt is active");
-                    self.submit(client, prompt).await;
-                }
-                KeyCode::Backspace => {
-                    prompt.buffer.pop();
-                }
-                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                    prompt.buffer.push(c);
-                }
-                KeyCode::Char('c') => return false,
-                _ => {}
-            }
-            return true;
-        }
-
-        self.message = None;
-        match key {
-            KeyCode::Char('q') => return false,
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return false,
-            KeyCode::Char('1') => self.screen = Screen::Overview,
-            KeyCode::Char('2') => self.screen = Screen::Inbox,
-            KeyCode::Char('3') => self.screen = Screen::Issues,
-            KeyCode::Char('4') => self.screen = Screen::Events,
-            KeyCode::Tab => {
-                let index = Screen::ALL
-                    .iter()
-                    .position(|s| *s == self.screen)
-                    .unwrap_or(0);
-                self.screen = Screen::ALL[(index + 1) % Screen::ALL.len()];
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.screen == Screen::Issues {
-                    if self.selected_issue + 1 < self.issues.len() {
-                        self.selected_issue += 1;
-                    }
-                } else if self.selected + 1 < self.inbox.len() {
-                    self.selected += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if self.screen == Screen::Issues {
-                    self.selected_issue = self.selected_issue.saturating_sub(1);
-                } else {
-                    self.selected = self.selected.saturating_sub(1);
-                }
-            }
-            KeyCode::Char('a') => self.approve(client).await,
-            KeyCode::Char('r') => self.open_prompt(Pending::Reject),
-            KeyCode::Char('b') => self.open_prompt(Pending::SendUpstream),
-            KeyCode::Char('x') => self.open_prompt(Pending::Acknowledge),
-            KeyCode::Char('R') => self.open_issue_prompt(Pending::ResolveIssue),
-            KeyCode::Char('C') => self.open_issue_prompt(Pending::CancelIssue),
-            KeyCode::Char('s') => {
-                self.message = Some(match client.capture().await {
-                    Ok(_) => "Snapshot captured".to_string(),
-                    Err(error) => format!("capture failed: {error}"),
-                });
-            }
-            KeyCode::Char('c') => self.interrupt(client).await,
-            KeyCode::Char('f') => self.transition(client, "freeze-dispatch").await,
-            KeyCode::Char('F') => self.transition(client, "freeze-all").await,
-            KeyCode::Char('u') => self.transition(client, "resume").await,
-            _ => {}
-        }
-        true
-    }
-
-    /// The selected inbox item, or a footer message explaining why there is none.
-    fn selected_item(&mut self) -> Option<InboxItem> {
-        let item = self.inbox.get(self.selected).cloned();
-        if item.is_none() {
-            self.message = Some("no inbox item selected".to_string());
-        }
-        item
-    }
-
-    /// Opens a footer prompt for the selected Issue, when it is still live.
-    fn open_issue_prompt(&mut self, pending: Pending) {
-        let Some(issue) = self.issues.get(self.selected_issue) else {
-            self.message = Some("no issue selected".to_string());
-            return;
-        };
-        if matches!(issue.status.as_str(), "resolved" | "cancelled" | "failed") {
-            self.message = Some(format!("issue is already {}", issue.status));
-            return;
-        }
-        self.screen = Screen::Issues;
-        self.prompt = Some(Prompt {
-            pending,
-            buffer: String::new(),
-        });
-    }
-
-    /// Opens a footer prompt for the selected item, if the decision applies to it.
-    fn open_prompt(&mut self, pending: Pending) {
-        let Some(item) = self.selected_item() else {
-            return;
-        };
-        let applies = match pending {
-            Pending::Reject => item.category == Category::Request,
-            Pending::SendUpstream | Pending::Acknowledge => item.category != Category::Request,
-            Pending::ResolveIssue | Pending::CancelIssue => false,
-        };
-        if !applies {
-            self.message = Some(format!(
-                "{:?} does not apply to a {} item",
-                pending,
-                item.category.label()
-            ));
-            return;
-        }
-        self.screen = Screen::Inbox;
-        self.prompt = Some(Prompt {
-            pending,
-            buffer: String::new(),
-        });
-    }
-
-    async fn approve(&mut self, client: &ApiClient) {
-        let Some(item) = self.selected_item() else {
-            return;
-        };
-        if item.category != Category::Request {
-            self.message = Some(format!("cannot approve a {} item", item.category.label()));
-            return;
-        }
-        self.message = Some(match client.approve(&item.id, &self.operator).await {
-            Ok(value) => format!("approved → {}", value["status"].as_str().unwrap_or("?")),
-            Err(error) => format!("approve failed: {error}"),
-        });
-    }
-
-    /// Submits a finished prompt.
-    async fn submit(&mut self, client: &ApiClient, prompt: Prompt) {
-        let comment = prompt.buffer.trim();
-        if matches!(prompt.pending, Pending::ResolveIssue | Pending::CancelIssue) {
-            let Some(issue) = self.issues.get(self.selected_issue).cloned() else {
-                self.message = Some("no issue selected".to_string());
-                return;
-            };
-            let outcome = if prompt.pending == Pending::ResolveIssue {
-                "resolved"
-            } else {
-                "cancelled"
-            };
-            self.message = Some(
-                match client
-                    .close_issue(&issue.issue_id, &self.operator, outcome, comment)
-                    .await
-                {
-                    Ok(value) => format!(
-                        "issue {} → {}",
-                        issue.title,
-                        value["status"].as_str().unwrap_or("?")
-                    ),
-                    Err(error) => format!("close failed: {error}"),
-                },
-            );
-            return;
-        }
-        let Some(item) = self.selected_item() else {
-            return;
-        };
-        let result = match prompt.pending {
-            Pending::ResolveIssue | Pending::CancelIssue => {
-                unreachable!("issue prompts are submitted above")
-            }
-            Pending::Reject => client.reject(&item.id, &self.operator, comment).await,
-            Pending::SendUpstream | Pending::Acknowledge => {
-                let decision = if prompt.pending == Pending::SendUpstream {
-                    "send_upstream"
-                } else {
-                    "acknowledge"
-                };
-                if item.category == Category::FailedJob {
-                    client
-                        .review_job(&item.id, &self.operator, decision, comment)
-                        .await
-                } else {
-                    client
-                        .review_action(&item.id, &self.operator, decision, comment)
-                        .await
-                }
-            }
-        };
-        self.message = Some(match (prompt.pending, result) {
-            (Pending::Reject, Ok(value)) => {
-                format!("rejected → {}", value["status"].as_str().unwrap_or("?"))
-            }
-            (Pending::SendUpstream, Ok(value)) => {
-                let job = &value["revision"]["job"];
-                format!(
-                    "sent upstream → revision job {} is {}: {}",
-                    job["job_id"].as_str().unwrap_or("?"),
-                    job["status"].as_str().unwrap_or("?"),
-                    job["result"]["summary"].as_str().unwrap_or("no result")
-                )
-            }
-            (Pending::Acknowledge, Ok(_)) => "acknowledged".to_string(),
-            (Pending::ResolveIssue | Pending::CancelIssue, Ok(_)) => "issue closed".to_string(),
-            (_, Err(error)) => format!("{:?} failed: {error}", prompt.pending),
-        });
-    }
-
-    /// Interrupts the pass that has been running longest.
-    ///
-    /// Cooperative: the Team stops at its next step boundary and still delivers a final
-    /// callback, so the Job lands in the Failed inbox with its transcript rather than vanishing.
-    async fn interrupt(&mut self, client: &ApiClient) {
-        let Some(pass) = self.status.running.first().cloned() else {
-            self.message = Some("no pass is running".to_string());
-            return;
-        };
-        let short = pass.job_id.chars().take(8).collect::<String>();
-        self.message = Some(
-            match client.cancel_job(&pass.job_id, &self.operator).await {
-                Ok(_) => {
-                    let others = self.status.running.len().saturating_sub(1);
-                    let rest = if others > 0 {
-                        format!("; {others} other pass(es) still running")
-                    } else {
-                        String::new()
-                    };
-                    format!("interrupting Job {short}…{rest}")
-                }
-                Err(error) => format!("interrupt failed: {error}"),
-            },
-        );
-        self.refresh(client).await;
-    }
-
-    async fn transition(&mut self, client: &ApiClient, transition: &str) {
-        self.message = Some(match client.transition(transition).await {
-            Ok(value) => format!("scheduler mode → {}", value["mode"].as_str().unwrap_or("?")),
-            Err(error) => format!("{transition} failed: {error}"),
-        });
-    }
-}
-
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let cli = Cli::parse();
     let client = ApiClient::new(&cli.api, cli.token);
-    let mut app = App {
-        operator: cli.operator,
-        ..App::default()
-    };
-    app.refresh(&client).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut app = App::new(client, cli.operator, cli.api, tx);
+
+    // A panic must not leave the terminal in raw mode with the alternate screen up.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        default_hook(info);
+    }));
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let outcome = run(&mut terminal, &mut app, &client).await;
+    let outcome = run(&mut terminal, &mut app, &mut rx).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -540,127 +79,25 @@ async fn main() -> io::Result<()> {
     outcome
 }
 
-/// The draw / input / refresh loop.
+/// The draw / input / message loop. Reads never block it: every call runs in a task and
+/// reports back through the channel.
 async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
-    client: &ApiClient,
+    rx: &mut mpsc::UnboundedReceiver<Msg>,
 ) -> io::Result<()> {
-    let mut last_refresh = Instant::now();
     loop {
+        app.tick();
         terminal.draw(|frame| ui::draw(frame, app))?;
-        if event::poll(Duration::from_millis(200))?
+        while let Ok(msg) = rx.try_recv() {
+            app.handle_msg(msg);
+        }
+        if event::poll(Duration::from_millis(100))?
             && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && !app.handle_key(key)
         {
-            if key.kind == KeyEventKind::Press
-                && !app.handle_key(key.code, key.modifiers, client).await
-            {
-                return Ok(());
-            }
-            if app.prompt.is_none() {
-                app.refresh(client).await;
-                last_refresh = Instant::now();
-            }
+            return Ok(());
         }
-        // Do not reshuffle the list under a prompt the operator is typing into.
-        if app.prompt.is_none() && last_refresh.elapsed() >= Duration::from_secs(1) {
-            app.refresh(client).await;
-            last_refresh = Instant::now();
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::backend::TestBackend;
-
-    fn action(id: &str, runbook: &str, status: &str, approval: &str) -> api::Action {
-        api::Action {
-            action_run_id: id.into(),
-            runbook_id: runbook.into(),
-            target_ids: vec!["redis-mq".into()],
-            status: status.into(),
-            approval: approval.into(),
-            reason: "queue is stuck".into(),
-            denial: None,
-            review: None,
-            execution_summary: None,
-            verification_summary: None,
-            verification_evidence: None,
-        }
-    }
-
-    /// The inbox screen renders every category with its affordances.
-    #[test]
-    fn inbox_screen_renders_categories() {
-        let mut app = App {
-            screen: Screen::Inbox,
-            ..App::default()
-        };
-        app.status.inbox.total = 3;
-        let mut denied = action("01a0-denied", "mode.set", "cancelled", "rejected");
-        denied.denial = Some(api::Denial {
-            source: "policy".into(),
-            reason: "row 26 is human-only".into(),
-            comment: None,
-            decided_by: None,
-        });
-        app.set_inbox(Inbox {
-            permission_requests: vec![action(
-                "01a0-test",
-                "mq.purge",
-                "waiting_for_approval",
-                "pending",
-            )],
-            permission_denied: vec![denied],
-            failed_jobs: vec![api::JobRow {
-                job_id: "01a0-job-failed".into(),
-                issue_id: "issue".into(),
-                status: "failed".into(),
-                result: Some(api::JobResultRow {
-                    summary: "the model ended without calling submit_diagnosis".into(),
-                }),
-            }],
-            failed_actions: Vec::new(),
-        });
-        let backend = TestBackend::new(140, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(rendered.contains("mq.purge"));
-        assert!(rendered.contains("waiting_for_approval"));
-        assert!(rendered.contains("queue is stuck"));
-        assert!(rendered.contains("denied"));
-        assert!(rendered.contains("failed job"));
-        assert!(rendered.contains("inbox 3"));
-    }
-
-    /// A prompt captures typed text and Esc cancels it.
-    #[test]
-    fn prompt_collects_text() {
-        let mut app = App::default();
-        app.set_inbox(Inbox {
-            permission_requests: vec![action(
-                "01a0-test",
-                "mq.purge",
-                "waiting_for_approval",
-                "pending",
-            )],
-            ..Inbox::default()
-        });
-        app.open_prompt(Pending::Reject);
-        let prompt = app.prompt.as_mut().unwrap();
-        prompt.buffer.push_str("too risky");
-        assert!(app.prompt.as_ref().unwrap().label().starts_with("reject"));
-        app.open_prompt(Pending::SendUpstream);
-        // Send-upstream does not apply to a request; the reject prompt stays.
-        assert_eq!(app.prompt.as_ref().unwrap().pending, Pending::Reject);
     }
 }

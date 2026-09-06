@@ -533,7 +533,10 @@ clients of it and hold no state of their own: a web console (`web/`, plain
 React + Vite + Tailwind, deliberately independent of Broccoli's plugin system
 for now, but styled with Broccoli's own design tokens and layout — sidebar,
 page headers, cards, badges — so it reads as part of the same operator
-tooling) and a terminal console (`crates/tui`, ratatui). Everything a console can do —
+tooling) and a terminal console (`crates/tui`, ratatui) with the same seven
+screens — overview, inbox with history, issues and jobs with export and
+import, the live trace, the event tail, the report form, the configurator —
+so an operator on a jump host loses nothing. Everything a console can do —
 file a report, approve or reject a held action, capture a Snapshot, freeze or
 resume the Scheduler — is an API call onto an existing runner operation, so the
 authority matrix and the event log apply to UI actions exactly as to CLI ones.
