@@ -70,7 +70,11 @@ Collector  <── capture / probe requests ── Top Scheduler
    └──> Reporter Agent
 ```
 
-The Collector runs its own periodic capture schedule. In addition, the Top
+The Collector runs its own periodic capture schedule: while `serve` runs, one
+Snapshot at startup and then one every `[collector] snapshot_interval_secs`
+(two minutes by default; zero switches it off). It is observation only, so it
+keeps going in every Scheduler mode, frozen included, and pauses only during
+recovery. In addition, the Top
 Scheduler — and only the Top Scheduler — can request captures on demand: after
 a human report, when a Team requests additional Probes, and immediately before
 and after an ActionRun. This control edge is the only arrow pointing back into
@@ -547,6 +551,25 @@ requests are decided with the Team's reason and expected effect in view;
 denials show who refused and why, take a comment, and can be sent back
 upstream or acknowledged; failures show the Job's or Platform's summary and
 take the same two decisions. Every decision records the human's name.
+
+#### The configurator
+
+The config file is read once at startup, but its values fall into three
+classes (`src/settings.rs`). **Live** values — the capture cadence, passes per
+chain, per-pass budgets, the price list, the spend ceiling — sit behind one
+shared lock that the runner, the Team adapter, the Platform, and the authority
+matrix read at the moment of each decision, so a change applies to the next
+pass without touching anything in flight. **Policy** values — `dry_run`, the
+command timeout, the auto-repeat window, the classification lists, the runbook
+commands — read the same way, but the API accepts a change only while the
+Scheduler is frozen, under an operator's name, and refuses to turn dry-run off
+without an explicit confirmation. **Startup** values — paths, the relay, the
+listener, the output language — are refused at runtime. `PATCH /api/settings`
+takes a partial config in the file's shape, validates the merged result as a
+whole config, writes the changed keys back into the file itself (comments kept,
+via `toml_edit`), puts the live subset in force, and appends
+`human.settings_changed` with every before-and-after value. The console's
+Settings page is a client of exactly that route.
 
 #### Context history: traces and session files
 
@@ -1194,9 +1217,12 @@ Resolved as hybrid: deterministic alert rules always run, plus an LLM that
 correlates Snapshot evidence and proposes issue candidates. The LLM consumes a
 sanitized Judge View, never the canonical Snapshot. See §4.3.
 
-### OD-4: Snapshot cadence and retention
+### OD-4: Snapshot cadence and retention — PARTIALLY DECIDED
 
-- Periodic frequency.
+- Periodic frequency: **decided** — `[collector] snapshot_interval_secs`,
+  default 120, first capture at startup, runs in every mode but `Recovering`,
+  zero disables. Periodic Snapshots are stored and shown; feeding them to the
+  Snapshot Judge for automatic intake is still open.
 - Event-triggered Snapshot rules.
 - Raw log retention and artifact size limits.
 - How long post-contest replay data is retained.

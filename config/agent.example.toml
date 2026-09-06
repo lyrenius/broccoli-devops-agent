@@ -2,6 +2,7 @@
 #
 # Copy to config/agent.toml. This file may be committed and shown to a frontend: it never holds
 # credentials. The model API key is read from the environment variable named in `api_key_env`.
+# The console's Settings page writes accepted changes back into this file, comments kept.
 
 [agent]
 language = "en"                       # "en" or "zh-CN": the language everything the agent writes
@@ -12,6 +13,10 @@ max_auto_passes = 3                   # passes per report or send-back: observe,
 
 [data]
 dir = "data"                          # file-backed store, event log, artifact bodies
+
+[collector]
+snapshot_interval_secs = 120            # periodic Snapshot while `serve` runs (first one at startup);
+                                        # observation only, runs even while frozen; 0 = off
 
 [topology]
 path = "config/topology.toml"         # machines, endpoints, and probes (PostgreSQL, Redis, CephFS, ...)

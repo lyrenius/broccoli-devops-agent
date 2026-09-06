@@ -10,6 +10,9 @@
 # are committed on purpose -- only what a run produces is ignored.
 /data-testbed/
 /testbed/.log/
+# What `cargo run --example live_demo` and `seed_demo` write.
+/data-live/
+/data-demo/
 
 # Web console build outputs and dependencies.
 /web/node_modules/

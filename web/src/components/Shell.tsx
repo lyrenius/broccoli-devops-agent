@@ -10,6 +10,7 @@ import {
   Play,
   ScrollText,
   ShieldAlert,
+  SlidersHorizontal,
   Snowflake,
   Sprout,
   Sun,
@@ -23,7 +24,7 @@ import { cn } from "../lib/cn";
 import { useOperator, useTheme } from "../lib/prefs";
 import type { Status } from "../types";
 
-export type Tab = "overview" | "inbox" | "records" | "events" | "report";
+export type Tab = "overview" | "inbox" | "records" | "events" | "report" | "settings";
 
 const NAV: { id: Tab; label: Key; icon: LucideIcon }[] = [
   { id: "overview", label: "nav.overview", icon: LayoutDashboard },
@@ -31,6 +32,7 @@ const NAV: { id: Tab; label: Key; icon: LucideIcon }[] = [
   { id: "records", label: "nav.records", icon: ListChecks },
   { id: "events", label: "nav.events", icon: ScrollText },
   { id: "report", label: "nav.report", icon: FilePlus2 },
+  { id: "settings", label: "nav.settings", icon: SlidersHorizontal },
 ];
 
 const MODE_KEY: Record<string, Key> = {

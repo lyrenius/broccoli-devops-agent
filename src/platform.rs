@@ -44,6 +44,7 @@ use crate::domain::{
 use crate::error::AgentResult;
 use crate::policy::{ClassificationLists, RunbookRegistry, SHELL_METACHARACTERS};
 use crate::ports::{AgentsPlatformPort, InspectionRequest, StateStore};
+use crate::settings::SharedSettings;
 use crate::topology::DeploymentTopology;
 use crate::tr;
 use crate::view::FileArtifactStore;
@@ -247,29 +248,29 @@ enum Producer {
 
 /// Command-executing Platform over the operator's runbook templates.
 pub struct LocalCommandPlatform {
-    config: PlatformConfig,
+    /// Dry-run, timeouts, classification, and commands — read at each operation, so a change
+    /// on the Settings page applies to the next one.
+    settings: SharedSettings,
     artifacts: FileArtifactStore,
     store: Arc<dyn StateStore>,
-    registry: RunbookRegistry,
     resources: HashMap<ResourceId, ResourceKind>,
     lanes: ExecutionLanes,
 }
 
 impl LocalCommandPlatform {
-    /// Builds the Platform over the operator's config, the artifact body store, the state store
-    /// (where ActionOutput Artifacts are registered), and the topology's resource catalog.
+    /// Builds the Platform over the shared live settings (whose `platform` section is the
+    /// operator's config), the artifact body store, the state store (where ActionOutput
+    /// Artifacts are registered), and the topology's resource catalog.
     pub fn new(
-        config: PlatformConfig,
+        settings: SharedSettings,
         artifacts: FileArtifactStore,
         store: Arc<dyn StateStore>,
         topology: &DeploymentTopology,
     ) -> Self {
-        let registry = RunbookRegistry::new(config.classification.clone());
         Self {
-            config,
+            settings,
             artifacts,
             store,
-            registry,
             resources: topology
                 .resources
                 .iter()
@@ -277,6 +278,19 @@ impl LocalCommandPlatform {
                 .collect(),
             lanes: ExecutionLanes::default(),
         }
+    }
+
+    /// The Platform section of the live settings, as of now.
+    fn config(&self) -> PlatformConfig {
+        self.settings.read(|settings| settings.platform.clone())
+    }
+
+    /// The Runbook Registry over the classification lists as of now.
+    fn registry(&self) -> RunbookRegistry {
+        RunbookRegistry::new(
+            self.settings
+                .read(|settings| settings.platform.classification.clone()),
+        )
     }
 
     /// Runbook IDs that are configured with a command and classify as non-mutating — the set a
@@ -323,7 +337,7 @@ impl LocalCommandPlatform {
                 json!({ "refused": "unknown targets", "targets": unknown }),
             ));
         }
-        let Some(class) = self.registry.classify(runbook_id, arguments) else {
+        let Some(class) = self.registry().classify(runbook_id, arguments) else {
             return Err((
                 tr!(
                     format!("refused: runbook `{runbook_id}` is not in the Runbook Registry"),
@@ -380,7 +394,7 @@ impl LocalCommandPlatform {
 
     /// Whether the Platform is in dry-run mode.
     pub fn dry_run(&self) -> bool {
-        self.config.dry_run
+        self.settings.read(|settings| settings.platform.dry_run)
     }
 
     /// Renders one command template for one target, or explains what is missing.
@@ -457,8 +471,8 @@ impl LocalCommandPlatform {
         {
             return self.finish(producer, false, summary, record).await;
         }
-        let Some(runbook) = self
-            .config
+        let config = self.config();
+        let Some(runbook) = config
             .runbooks
             .iter()
             .find(|runbook| runbook.id == runbook_id)
@@ -493,7 +507,7 @@ impl LocalCommandPlatform {
             }
         }
 
-        if self.config.dry_run {
+        if config.dry_run {
             return self
                 .finish(
                     producer,
@@ -516,7 +530,7 @@ impl LocalCommandPlatform {
         // starts, and the lanes are released only after the last one has. Inspections take
         // the lanes too, so a log read never interleaves with a restart of the same target.
         let _lanes = self.lanes.acquire(target_ids).await;
-        let timeout = Duration::from_secs(self.config.command_timeout_secs);
+        let timeout = Duration::from_secs(config.command_timeout_secs);
         let mut runs = Vec::new();
         let mut all_ok = true;
         let mut problems = Vec::new();

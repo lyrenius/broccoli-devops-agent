@@ -22,6 +22,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{ApprovalState, NamedValue, OperationMode, ResourceId, ResourceKind};
+use crate::settings::SharedSettings;
 use crate::tr;
 
 /// What the matrix says about one operation class in one mode.
@@ -503,6 +504,9 @@ pub struct AuthorityPolicy {
     registry: RunbookRegistry,
     auto_repeat_window: Duration,
     resources: HashMap<ResourceId, ResourceKind>,
+    /// When set, the classification lists and the repeat window are read from the live
+    /// settings at every decision, so a change on the Settings page applies to the next one.
+    settings: Option<SharedSettings>,
 }
 
 impl Default for AuthorityPolicy {
@@ -520,7 +524,14 @@ impl AuthorityPolicy {
             registry: RunbookRegistry::new(lists),
             auto_repeat_window,
             resources: HashMap::new(),
+            settings: None,
         }
+    }
+
+    /// Reads the lists and the repeat window from the live settings from now on.
+    pub fn with_settings(mut self, settings: SharedSettings) -> Self {
+        self.settings = Some(settings);
+        self
     }
 
     /// Supplies the resource catalog (ID to kind) the target-kind check is decided against.
@@ -534,12 +545,22 @@ impl AuthorityPolicy {
 
     /// The window inside which a repeated automatic action escalates to approval.
     pub fn auto_repeat_window(&self) -> Duration {
-        self.auto_repeat_window
+        match &self.settings {
+            Some(settings) => {
+                settings.read(|live| Duration::from_secs(live.platform.auto_repeat_window_secs))
+            }
+            None => self.auto_repeat_window,
+        }
     }
 
-    /// The registry, for prompts and validation.
-    pub fn registry(&self) -> &RunbookRegistry {
-        &self.registry
+    /// The registry as of now, for prompts and validation.
+    pub fn registry(&self) -> RunbookRegistry {
+        match &self.settings {
+            Some(settings) => {
+                RunbookRegistry::new(settings.read(|live| live.platform.classification.clone()))
+            }
+            None => self.registry().clone(),
+        }
     }
 
     /// The resource catalog in force.

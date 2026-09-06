@@ -9,6 +9,7 @@
 //! optional bearer token protects it when an operator chooses to bind wider.
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,7 @@ use axum::{Json, Router};
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 
@@ -32,13 +34,16 @@ use crate::ports::StateStore;
 use crate::runner::{InboxDecision, SliceRunner};
 use crate::scheduler::{IssueClosure, RecoverySummary};
 use crate::session::SessionBundle;
+use crate::settings::{self, SettingsRequest};
 
 /// Shared state behind every route.
 pub struct ApiState {
     /// The wired control plane.
     pub runner: Arc<SliceRunner>,
-    /// Effective configuration, served redacted.
-    pub config: AppConfig,
+    /// Effective configuration, served redacted; the Settings page changes it in place.
+    pub config: RwLock<AppConfig>,
+    /// Where the configuration lives, for the Settings page to write changes back to.
+    pub config_path: Option<PathBuf>,
     /// What startup recovery found, shown by the consoles so an operator knows why the
     /// Scheduler may be frozen.
     pub recovery: Option<RecoverySummary>,
@@ -50,10 +55,17 @@ impl ApiState {
     pub fn new(runner: Arc<SliceRunner>, config: AppConfig) -> Self {
         Self {
             runner,
-            config,
+            config: RwLock::new(config),
+            config_path: None,
             recovery: None,
             started: Instant::now(),
         }
+    }
+
+    /// Names the file the Settings page writes accepted changes back to.
+    pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config_path = Some(path.into());
+        self
     }
 
     /// Attaches the startup recovery summary.
@@ -108,6 +120,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route("/api/status", get(status))
         .route("/api/config", get(config))
+        .route("/api/settings", get(settings_page).patch(update_settings))
         .route("/api/topology", get(topology))
         .route("/api/snapshots", post(capture_snapshot))
         .route("/api/snapshots/latest", get(latest_snapshot))
@@ -154,7 +167,7 @@ async fn require_token(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let expected = &state.config.api.token;
+    let expected = state.config.read().await.api.token.clone();
     if expected.is_empty() {
         return next.run(request).await;
     }
@@ -183,13 +196,16 @@ struct TokenQuery {
 async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
     let store = state.runner.store();
     let inbox = state.runner.inbox().await?;
+    let config = state.config.read().await;
     Ok(Json(json!({
         "mode": state.runner.scheduler().mode().await,
         "team_backend": state.runner.team_label(),
         "dry_run": state.runner.dry_run(),
         "deployment": state.runner.topology().deployment,
         "uptime_secs": state.started.elapsed().as_secs(),
-        "language": state.config.agent.language.tag(),
+        "language": config.agent.language.tag(),
+        // The Collector's cadence, so a console can say how fresh the picture is meant to be.
+        "snapshot_interval_secs": state.runner.settings().read(|live| live.snapshot_interval.as_secs()),
         "recovery": state.recovery,
         // What is happening right now, and what it has cost: both are live, so a console can
         // show a pass in flight and its running bill without polling a second route.
@@ -212,7 +228,54 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
 }
 
 async fn config(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
-    Ok(Json(state.config.effective_json()?))
+    Ok(Json(state.config.read().await.effective_json()?))
+}
+
+/// The effective configuration, where it lives, the Scheduler mode, and which keys the Settings
+/// page may change now — live ones always, policy ones while frozen, startup ones never.
+async fn settings_page(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
+    let config = state.config.read().await;
+    Ok(Json(json!({
+        "config": config.effective_json()?,
+        "path": state.config_path.as_ref().map(|path| path.display().to_string()),
+        "mode": state.runner.scheduler().mode().await,
+        "classes": settings::classes(&config)?,
+    })))
+}
+
+/// One settings change: a partial config in the file's shape, under the operator's name.
+#[derive(Debug, Deserialize)]
+struct SettingsPatch {
+    by: Option<String>,
+    #[serde(default)]
+    confirm_live_execution: bool,
+    changes: Value,
+}
+
+/// Applies a change: validated as a whole config, refused for startup-only keys, policy keys
+/// only while frozen, written back to the file, recorded as an event. The write lock serializes
+/// two operators editing at once.
+async fn update_settings(
+    State(state): State<Arc<ApiState>>,
+    Json(patch): Json<SettingsPatch>,
+) -> ApiResult<Value> {
+    let mut config = state.config.write().await;
+    let outcome = settings::apply_settings(
+        &state.runner,
+        &config,
+        SettingsRequest {
+            by: patch.by.unwrap_or_else(|| "console".to_string()),
+            changes: patch.changes,
+            confirm_live_execution: patch.confirm_live_execution,
+        },
+        state.config_path.as_deref(),
+    )
+    .await?;
+    *config = outcome.config;
+    Ok(Json(json!({
+        "config": config.effective_json()?,
+        "changes": outcome.changes,
+    })))
 }
 
 async fn topology(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {

@@ -32,9 +32,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::collector::TopologyCollector;
+use crate::config::DEFAULT_SNAPSHOT_INTERVAL_SECS;
 use crate::domain::{
     ActionProposal, ActionRun, ActionRunId, ActionStatus, Artifact, FeedbackOrigin, HumanFeedback,
     HumanReport, HumanReview, Issue, IssueId, Job, JobBrief, JobId, JobOutcome, JobResult,
@@ -51,6 +52,7 @@ use crate::ports::{
 };
 use crate::scheduler::{IssueClosure, RecoverySummary, SchedulerMode, TopScheduler};
 use crate::session::{self, ImportSummary, SessionBundle};
+use crate::settings::{LiveSettings, SharedSettings};
 use crate::store::file::FileStateStore;
 use crate::team::{HarnessOperateTeam, ReadOnlyOperateTeam};
 use crate::topology::DeploymentTopology;
@@ -252,12 +254,10 @@ pub struct SliceRunner {
     team: Box<dyn AgentTeamPort>,
     team_label: String,
     artifacts: FileArtifactStore,
-    dry_run: bool,
-    pass_policy: PassPolicy,
-    /// What the relay charges, when the operator configured a price list.
-    pricing: Option<Pricing>,
-    /// The cumulative spend ceiling; reaching it freezes the Scheduler.
-    budget: SpendBudget,
+    /// Everything that may change while the control plane runs; see [`crate::settings`].
+    settings: SharedSettings,
+    /// The periodic capture cadence, for the schedule task to follow changes.
+    capture_interval: watch::Sender<Duration>,
     /// Team runs in flight, by Job, with the handle that stops each one.
     running: Mutex<HashMap<JobId, RunningJob>>,
     /// Live Team callbacks, for a caller that wants to watch a pass it is blocked on.
@@ -294,7 +294,19 @@ impl SliceRunner {
             store.clone() as Arc<dyn StateStore>,
         ));
         let view_builder = Arc::new(RedactingViewBuilder::new(artifacts.clone()));
-        let dry_run = platform.dry_run;
+        // One handle to the live settings, shared with the Platform, the authority matrix, and
+        // the Team, so a change on the Settings page reaches every decision that reads it.
+        let settings = SharedSettings::new(LiveSettings {
+            snapshot_interval: Duration::from_secs(DEFAULT_SNAPSHOT_INTERVAL_SECS),
+            pass_policy,
+            harness: match &backend {
+                TeamBackend::Harness { budget, .. } => budget.clone(),
+                TeamBackend::ReadOnly => Default::default(),
+            },
+            pricing: None,
+            budget: SpendBudget::default(),
+            platform: platform.clone(),
+        });
         let resources: HashMap<ResourceId, ResourceKind> = topology
             .resources
             .iter()
@@ -304,10 +316,11 @@ impl SliceRunner {
             platform.classification.clone(),
             Duration::from_secs(platform.auto_repeat_window_secs),
         )
-        .with_resources(resources);
+        .with_resources(resources)
+        .with_settings(settings.clone());
         let inspection_runbook_ids = LocalCommandPlatform::inspection_runbook_ids(&platform);
         let platform = Arc::new(LocalCommandPlatform::new(
-            platform,
+            settings.clone(),
             artifacts.clone(),
             store.clone() as Arc<dyn StateStore>,
             &topology,
@@ -345,7 +358,8 @@ impl SliceRunner {
                         }),
                         inspection_runbook_ids,
                         pass_policy.max_inspections,
-                    ),
+                    )
+                    .with_settings(settings.clone()),
                 ),
                 format!("harness ({label})"),
             ),
@@ -357,10 +371,8 @@ impl SliceRunner {
             team,
             team_label,
             artifacts: artifacts_for_api,
-            dry_run,
-            pass_policy,
-            pricing: None,
-            budget: SpendBudget::default(),
+            settings,
+            capture_interval: watch::channel(Duration::from_secs(DEFAULT_SNAPSHOT_INTERVAL_SECS)).0,
             running: Mutex::new(HashMap::new()),
             watchers: broadcast::channel(256).0,
             review_lock: Mutex::new(()),
@@ -372,15 +384,36 @@ impl SliceRunner {
     /// Both are optional and independent: a deployment with prices but no ceiling gets cost
     /// reporting and no halt; one with a token ceiling and no prices gets a halt it can enforce
     /// without knowing what anything costs.
-    pub fn with_spend(mut self, pricing: Option<Pricing>, budget: SpendBudget) -> Self {
-        self.pricing = pricing;
-        self.budget = budget;
+    pub fn with_spend(self, pricing: Option<Pricing>, budget: SpendBudget) -> Self {
+        self.settings.replace(LiveSettings {
+            pricing,
+            budget,
+            ..self.settings.current()
+        });
         self
+    }
+
+    /// Replaces every live setting at once, cadence included; see [`crate::settings`].
+    pub fn with_live_settings(self, next: LiveSettings) -> Self {
+        self.apply_live(next);
+        self
+    }
+
+    /// Puts new live settings in force for the next decision that reads them, and tells the
+    /// capture schedule its cadence.
+    pub fn apply_live(&self, next: LiveSettings) {
+        self.capture_interval.send_replace(next.snapshot_interval);
+        self.settings.replace(next);
+    }
+
+    /// The live settings, as shared with every component that reads them.
+    pub fn settings(&self) -> &SharedSettings {
+        &self.settings
     }
 
     /// The investigation-loop budgets in force.
     pub fn pass_policy(&self) -> PassPolicy {
-        self.pass_policy
+        self.settings.read(|settings| settings.pass_policy)
     }
 
     /// Everything spent at the relay so far, priced when a price list is configured.
@@ -398,11 +431,10 @@ impl SliceRunner {
             .into_iter()
             .filter(|event| event.issue_id.is_none_or(|id| !archived.contains(&id)))
             .collect();
-        Ok(UsageTotals::from_events(
-            &events,
-            self.pricing.as_ref(),
-            &self.budget,
-        ))
+        let (pricing, budget) = self
+            .settings
+            .read(|settings| (settings.pricing.clone(), settings.budget.clone()));
+        Ok(UsageTotals::from_events(&events, pricing.as_ref(), &budget))
     }
 
     /// Subscribes to Team callbacks as they are delivered, for live progress in a CLI.
@@ -475,7 +507,7 @@ impl SliceRunner {
     /// a second halted state: recovery already restores a freeze across restarts, and an operator
     /// already knows how to resume one (after raising the ceiling).
     async fn freeze_if_budget_spent(&self) -> AgentResult<Option<String>> {
-        if !self.budget.is_set() {
+        if !self.settings.read(|settings| settings.budget.is_set()) {
             return Ok(None);
         }
         let totals = self.usage_totals().await?;
@@ -520,7 +552,7 @@ impl SliceRunner {
 
     /// Whether the Platform records commands instead of executing them.
     pub fn dry_run(&self) -> bool {
-        self.dry_run
+        self.settings.read(|settings| settings.platform.dry_run)
     }
 
     /// The artifact body store, for serving transcripts and Views to operator UIs.
@@ -576,7 +608,46 @@ impl SliceRunner {
 
     /// The follow-up budget a chain starts with: the policy's passes minus the one being run.
     fn fresh_follow_up_budget(&self) -> u32 {
-        self.pass_policy.max_auto_passes.saturating_sub(1)
+        self.pass_policy().max_auto_passes.saturating_sub(1)
+    }
+
+    /// Starts the Collector's periodic schedule: one Snapshot now, then one every interval the
+    /// live settings name.
+    ///
+    /// Observation only — it dispatches nothing, so it runs in every Scheduler mode, frozen
+    /// included, and the consoles keep a fresh picture of a deployment nobody is allowed to
+    /// touch. The only mode it sits out is `Recovering`, while the Store is being reconciled.
+    /// A failed capture is reported on stderr and the schedule continues; a capture that takes
+    /// longer than the interval delays the next one rather than piling them up. A changed
+    /// cadence takes effect at once, starting with a capture; a cadence of zero pauses the
+    /// schedule until it is set again. Aborting the handle stops it.
+    pub fn spawn_periodic_capture(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let runner = self.clone();
+        let mut cadence = self.capture_interval.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let interval = *cadence.borrow_and_update();
+                if interval.is_zero() {
+                    if cadence.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                if runner.scheduler.mode().await != SchedulerMode::Recovering
+                    && let Err(error) = runner.capture(SnapshotCause::Periodic).await
+                {
+                    eprintln!("periodic snapshot capture failed: {error}");
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(interval) => {}
+                    changed = cadence.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Captures, persists, and returns a Snapshot.
@@ -899,12 +970,12 @@ impl SliceRunner {
                             "Pass {} wanted to continue, but the automatic-pass budget ({}) is \
                              spent; a human continues from the inbox",
                             job.pass_number(),
-                            self.pass_policy.max_auto_passes
+                            self.pass_policy().max_auto_passes
                         ),
                         format!(
                             "第 {} 轮希望继续，但自动轮次预算（{}）已用尽；请由人工从收件箱继续",
                             job.pass_number(),
-                            self.pass_policy.max_auto_passes
+                            self.pass_policy().max_auto_passes
                         )
                     ),
                 )

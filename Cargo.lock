@@ -195,6 +195,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "toml_edit",
  "tower-http",
  "uuid",
 ]

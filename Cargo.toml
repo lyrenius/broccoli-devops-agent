@@ -40,6 +40,8 @@ tokio = { version = "1.49.0", features = [
     "time",
 ] }
 toml = "0.8"
+# The console's Settings page writes changed keys back into agent.toml with comments kept.
+toml_edit = "0.22"
 tower-http = { version = "0.6", features = ["cors"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 

@@ -23,6 +23,7 @@ use broccoli_devops_agent::domain::{HumanReport, IssuePriority, SnapshotCause};
 use broccoli_devops_agent::ports::StateStore;
 use broccoli_devops_agent::runner::{InboxDecision, SliceRunner, TeamBackend};
 use broccoli_devops_agent::scheduler::{IssueClosure, RecoverySummary, TopScheduler};
+use broccoli_devops_agent::settings::LiveSettings;
 use broccoli_devops_agent::store::file::FileStateStore;
 use broccoli_devops_agent::topology::DeploymentTopology;
 use uuid::Uuid;
@@ -373,7 +374,8 @@ fn wire_runner(
             .as_ref()
             .and_then(|model| model.pricing.clone()),
         config.budget.clone(),
-    ))
+    )
+    .with_live_settings(LiveSettings::from_config(config)))
 }
 
 /// Prints Team progress to stderr as it is delivered, leaving stdout for the result.
@@ -690,9 +692,17 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
 
+            // The Collector's own schedule starts once recovery has settled the Store; it
+            // follows the cadence the live settings name, zero included.
+            let _periodic = runner.spawn_periodic_capture();
+            let cadence = match config.collector.snapshot_interval() {
+                Some(interval) => format!("every {} s", interval.as_secs()),
+                None => "off ([collector] snapshot_interval_secs = 0)".to_string(),
+            };
+
             let bind = bind.unwrap_or_else(|| config.api.bind.clone());
             println!(
-                "serving API on http://{bind} · team backend: {} · dry-run: {}",
+                "serving API on http://{bind} · team backend: {} · dry-run: {} · periodic snapshots: {cadence}",
                 runner.team_label(),
                 runner.dry_run()
             );
@@ -703,7 +713,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("warning: binding beyond localhost without an API token");
             }
             let state = Arc::new(
-                broccoli_devops_agent::api::ApiState::new(runner, config).with_recovery(summary),
+                broccoli_devops_agent::api::ApiState::new(runner, config)
+                    .with_recovery(summary)
+                    .with_config_path(cli.config.clone()),
             );
             broccoli_devops_agent::api::serve(state, &bind).await?;
         }

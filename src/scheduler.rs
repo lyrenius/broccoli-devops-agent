@@ -219,8 +219,9 @@ impl TopScheduler {
     /// Captures and persists a Snapshot on the Scheduler's behalf.
     ///
     /// This is the control edge from the Scheduler back to the Collector. It serves human-report
-    /// intake, Team probe requests, and before/after ActionRun verification; periodic collection
-    /// remains the Collector's own schedule.
+    /// intake, Team probe requests, before/after ActionRun verification, and the periodic
+    /// schedule the runner keeps (`SliceRunner::spawn_periodic_capture`); every Snapshot, whatever
+    /// its cause, is persisted and logged here.
     pub async fn request_snapshot(&self, request: CaptureRequest) -> AgentResult<Snapshot> {
         let collector = self.require_collector("request_snapshot")?;
         let snapshot = collector.capture_snapshot(request.clone()).await?;

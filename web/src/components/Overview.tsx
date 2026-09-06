@@ -46,7 +46,11 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
   const healthy = snapshot?.resources.filter((r) => r.health === "healthy").length ?? 0;
   const total = snapshot?.resources.length ?? 0;
   const liveIssues = issues.filter((i) => LIVE.has(i.status)).length;
-  const stale = snapshot ? Date.now() - new Date(snapshot.created_at).getTime() > 10 * 60 * 1000 : false;
+  // Old means well past the configured cadence (or ten minutes when there is none).
+  const cadenceMs = status && status.snapshot_interval_secs > 0 ? status.snapshot_interval_secs * 1000 : 0;
+  const staleAfter = cadenceMs > 0 ? Math.max(3 * cadenceMs, 60 * 1000) : 10 * 60 * 1000;
+  const stale = snapshot ? Date.now() - new Date(snapshot.created_at).getTime() > staleAfter : false;
+  const cadence = (secs: number) => (secs % 60 === 0 ? t("overview.cadence.minutes", { n: secs / 60 }) : t("overview.cadence.seconds", { n: secs }));
   const frozenAfterRecovery = status?.recovery && status.mode !== "running";
 
   return (
@@ -54,9 +58,10 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
       icon={LayoutDashboard}
       title={t("overview.title")}
       subtitle={
-        snapshot
-          ? t("overview.subtitle.snapshot", { age: age(snapshot.created_at), cause: label(snapshot.cause), rev: snapshot.topology_revision })
-          : t("overview.subtitle.default")
+        <>
+          {snapshot ? t("overview.subtitle.snapshot", { age: age(snapshot.created_at), cause: label(snapshot.cause), rev: snapshot.topology_revision }) : t("overview.subtitle.default")}
+          {status && (status.snapshot_interval_secs > 0 ? ` · ${t("overview.cadence", { every: cadence(status.snapshot_interval_secs) })}` : ` · ${t("overview.cadence.off")}`)}
+        </>
       }
       actions={
         <Button onClick={capture} disabled={busy}>

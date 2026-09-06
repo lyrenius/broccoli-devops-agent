@@ -6,6 +6,18 @@
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["--dir", "web", "dev"],
       "port": 5180
+    },
+    {
+      "name": "live-demo",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "--example", "live_demo", "--", "data-live", "127.0.0.1:4721"],
+      "port": 4721
+    },
+    {
+      "name": "console-live",
+      "runtimeExecutable": "env",
+      "runtimeArgs": ["BROCCOLI_API=http://127.0.0.1:4721", "pnpm", "--dir", "web", "dev", "--port", "5181"],
+      "port": 5181
     }
   ]
 }

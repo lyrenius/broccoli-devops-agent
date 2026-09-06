@@ -9,8 +9,9 @@ import { Records } from "./components/Records";
 import { Events } from "./components/Events";
 import { Report } from "./components/Report";
 import { Trace } from "./components/Trace";
+import { Settings } from "./components/Settings";
 
-const TABS: Tab[] = ["overview", "inbox", "records", "events", "report"];
+const TABS: Tab[] = ["overview", "inbox", "records", "events", "report", "settings"];
 
 /** Where the console is: a tab, or the trace of one Issue (optionally opened on one pass). */
 type Route = { tab: Tab } | { tab: "records"; trace: { issueId: string; jobId?: string } };
@@ -65,6 +66,7 @@ export default function App() {
         {"trace" in route && <Trace key={route.trace.issueId} issueId={route.trace.issueId} jobId={route.trace.jobId} tick={tick} />}
         {tab === "events" && <Events />}
         {tab === "report" && <Report onChanged={refresh} />}
+        {tab === "settings" && <Settings status={status} onChanged={refresh} />}
       </Shell>
     </LocaleProvider>
   );

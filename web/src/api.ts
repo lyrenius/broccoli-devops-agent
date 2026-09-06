@@ -1,4 +1,4 @@
-import type { ActionRun, EventRecord, ImportSummary, Inbox, Issue, Job, PassOutcome, ReviewOutcome, SessionBundle, Snapshot, Status, UsageTotals } from "./types";
+import type { ActionRun, AgentConfig, EventRecord, ImportSummary, Inbox, Issue, Job, PassOutcome, ReviewOutcome, SessionBundle, SettingChange, SettingsPage, Snapshot, Status, UsageTotals } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -55,6 +55,14 @@ export const api = {
   session: (issueId: string) => request<SessionBundle>(`/api/issues/${issueId}/session`),
   /** The same document as a file download, with the operator recorded as the exporter. */
   sessionDownloadUrl: (issueId: string, by: string) => `/api/issues/${issueId}/session?download=true&by=${encodeURIComponent(by)}`,
+  /** The effective config, where it lives, and which keys may change now. */
+  settings: () => request<SettingsPage>("/api/settings"),
+  /** Applies a partial config (the file's shape, changed keys only) under the operator's name. */
+  updateSettings: (by: string, changes: unknown, confirmLiveExecution: boolean) =>
+    request<{ config: AgentConfig; changes: SettingChange[] }>("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ by, changes, confirm_live_execution: confirmLiveExecution }),
+    }),
   /** Loads a session file as a read-only archive. */
   importSession: (bundle: SessionBundle, by: string) => post<ImportSummary>(`/api/sessions/import?by=${encodeURIComponent(by)}`, bundle),
   transition: (name: "freeze-dispatch" | "freeze-all" | "resume") => post<{ mode: string }>(`/api/scheduler/${name}`),

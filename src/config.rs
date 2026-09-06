@@ -38,6 +38,35 @@ impl Default for DataConfig {
     }
 }
 
+/// The Collector's own schedule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CollectorConfig {
+    /// Seconds between periodic Snapshots while `serve` runs; the first one is captured as soon
+    /// as the API is up. Observation only: it runs in every Scheduler mode, frozen included, so
+    /// the consoles keep a fresh picture, and it never dispatches anything. Zero disables it.
+    pub snapshot_interval_secs: u64,
+}
+
+/// Two minutes: often enough that the Overview is never far behind the deployment, rare enough
+/// that a contest day's captures stay in the thousands of events.
+pub const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 120;
+
+impl Default for CollectorConfig {
+    fn default() -> Self {
+        Self {
+            snapshot_interval_secs: DEFAULT_SNAPSHOT_INTERVAL_SECS,
+        }
+    }
+}
+
+impl CollectorConfig {
+    /// The capture cadence, or `None` when periodic capture is switched off.
+    pub fn snapshot_interval(&self) -> Option<Duration> {
+        (self.snapshot_interval_secs > 0).then(|| Duration::from_secs(self.snapshot_interval_secs))
+    }
+}
+
 /// Where the deployment topology file lives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -207,6 +236,8 @@ pub struct AppConfig {
     pub data: DataConfig,
     /// Topology file location.
     pub topology: TopologyConfig,
+    /// The Collector's periodic capture schedule.
+    pub collector: CollectorConfig,
     /// Model relay; absent means only the deterministic Team is available.
     pub model: Option<ModelConfig>,
     /// Agents Platform: runbook commands, dry-run, and classification lists.
@@ -232,7 +263,7 @@ impl AppConfig {
     /// `api_key_env` must be the name of an environment variable. When it holds anything else —
     /// typically the key itself, pasted in by mistake — the error explains the fix without
     /// echoing the value, so the secret does not end up in a terminal or a log.
-    fn validate(&self) -> AgentResult<()> {
+    pub fn validate(&self) -> AgentResult<()> {
         if let Some(model) = &self.model
             && !is_env_var_name(&model.api_key_env)
         {
@@ -325,6 +356,26 @@ mod tests {
         assert_eq!(config.data.dir, PathBuf::from("data"));
         assert_eq!(config.topology.path, PathBuf::from("config/topology.toml"));
         assert!(config.model.is_none());
+        assert_eq!(
+            config.collector.snapshot_interval(),
+            Some(Duration::from_secs(120)),
+            "periodic capture is on by default, every two minutes"
+        );
+    }
+
+    #[test]
+    fn the_capture_cadence_is_configurable_and_zero_disables_it() {
+        let tuned = AppConfig::from_toml("[collector]\nsnapshot_interval_secs = 30\n").unwrap();
+        assert_eq!(
+            tuned.collector.snapshot_interval(),
+            Some(Duration::from_secs(30))
+        );
+        let off = AppConfig::from_toml("[collector]\nsnapshot_interval_secs = 0\n").unwrap();
+        assert_eq!(off.collector.snapshot_interval(), None);
+        assert_eq!(
+            off.effective_json().unwrap()["collector"]["snapshot_interval_secs"],
+            0
+        );
     }
 
     #[test]

@@ -42,10 +42,12 @@ use crate::domain::{
 };
 use crate::error::{AgentError, AgentResult};
 use crate::evidence::{EvidenceLimits, summarize_execution_record_with};
+use crate::platform::LocalCommandPlatform;
 use crate::policy::RunbookRegistry;
 use crate::ports::{
     AgentTeamPort, CancelSignal, InspectionPort, InspectionRequest, StateStore, TeamCallbackSink,
 };
+use crate::settings::SharedSettings;
 use crate::tr;
 use crate::view::FileArtifactStore;
 
@@ -205,6 +207,9 @@ pub struct HarnessOperateTeam {
     model_name: String,
     runbook_ids: Vec<String>,
     inspection: Option<InspectionAccess>,
+    /// When set, the run budgets and the inspection allowance are read from here at the start
+    /// of every pass, so a change on the Settings page applies to the next one.
+    settings: Option<SharedSettings>,
 }
 
 impl HarnessOperateTeam {
@@ -230,7 +235,14 @@ impl HarnessOperateTeam {
                 .map(ToString::to_string)
                 .collect(),
             inspection: None,
+            settings: None,
         }
+    }
+
+    /// Reads the run budgets and the inspection allowance from the live settings from now on.
+    pub fn with_settings(mut self, settings: SharedSettings) -> Self {
+        self.settings = Some(settings);
+        self
     }
 
     /// Overrides the default run budgets.
@@ -302,7 +314,12 @@ impl HarnessOperateTeam {
     }
 
     /// The system instructions for one pass.
-    fn instructions(&self, job: &Job, offer_probe_requests: bool) -> String {
+    fn instructions(
+        &self,
+        job: &Job,
+        offer_probe_requests: bool,
+        inspection: Option<&InspectionAccess>,
+    ) -> String {
         let budget = if job.follow_up_budget > 0 {
             tr!(
                 format!(
@@ -323,7 +340,7 @@ impl HarnessOperateTeam {
                     .to_string()
             )
         };
-        let inspect = match &self.inspection {
+        let inspect = match inspection {
             Some(access) => format!(
                 "\n- inspect: run one read-only runbook ({}) on in-scope targets and read its \
                  output, at most {} time(s) this pass. Use it to look at service status or a log \
@@ -392,6 +409,7 @@ impl HarnessOperateTeam {
         progress: mpsc::UnboundedSender<Interim>,
         state: Arc<Mutex<RunState>>,
         offer_probe_requests: bool,
+        inspection: Option<&InspectionAccess>,
     ) -> AgentResult<ToolRegistry> {
         let runbook_ids = Arc::new(self.runbook_ids.clone());
         let allowed_targets = Arc::new(job.allowed_target_ids.clone());
@@ -426,7 +444,7 @@ impl HarnessOperateTeam {
         }
 
         // inspect
-        if let Some(access) = &self.inspection {
+        if let Some(access) = inspection {
             let access = access.clone();
             let state = state.clone();
             let artifacts = self.artifacts.clone();
@@ -860,12 +878,31 @@ impl AgentTeamPort for HarnessOperateTeam {
         let state = Arc::new(Mutex::new(RunState::default()));
         // A probe request spends one automatic pass, so it is only offered while one is left.
         let offer_probe_requests = job.follow_up_budget > 0;
+        // Budgets and the inspection allowance come from the live settings when the control
+        // plane shares them, so a change on the Settings page applies to this pass onward.
+        let live = self.settings.as_ref().map(SharedSettings::current);
+        let config = live
+            .as_ref()
+            .map_or_else(|| self.config.clone(), |live| live.harness.clone());
+        let inspection = self.inspection.as_ref().and_then(|access| {
+            let Some(live) = &live else {
+                return Some(access.clone());
+            };
+            let runbook_ids = LocalCommandPlatform::inspection_runbook_ids(&live.platform);
+            let max_calls = live.pass_policy.max_inspections;
+            (!runbook_ids.is_empty() && max_calls > 0).then(|| InspectionAccess {
+                port: access.port.clone(),
+                runbook_ids: Arc::new(runbook_ids),
+                max_calls,
+            })
+        });
         let registry = self.build_registry(
             job,
             fenced,
             progress_tx,
             state.clone(),
             offer_probe_requests,
+            inspection.as_ref(),
         )?;
 
         // Bridge the control plane's cancellation into the harness's own token.
@@ -876,7 +913,7 @@ impl AgentTeamPort for HarnessOperateTeam {
             harness_handle.cancel();
         });
 
-        let instructions = self.instructions(job, offer_probe_requests);
+        let instructions = self.instructions(job, offer_probe_requests, inspection.as_ref());
         // Operator feedback is the control plane's own principal speaking; it is presented as
         // trusted input so the model treats it as direction, not as quoted data. The same text
         // is also inside the View, so the replayable Artifact is complete on its own.
@@ -932,7 +969,7 @@ impl AgentTeamPort for HarnessOperateTeam {
         let mut agent_run = Box::pin(run_agent_observed(
             self.client.as_ref(),
             &registry,
-            &self.config,
+            &config,
             &instructions,
             initial,
             harness_token,

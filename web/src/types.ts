@@ -78,6 +78,8 @@ export interface Status {
   deployment: { name: string; topology_revision: string; operation_mode: string };
   /** The agent's configured output language, e.g. `en` or `zh-CN`. */
   language: string;
+  /** Seconds between periodic Snapshots while the API runs; 0 when switched off. */
+  snapshot_interval_secs: number;
   recovery: RecoverySummary | null;
   counts: Counts;
   inbox: InboxCounts;
@@ -325,6 +327,71 @@ export interface TraceStep {
 
 export interface ModelUsage extends Usage {
   model: string;
+}
+
+/* ---- Configuration and the Settings page ---- */
+
+export interface RunbookCommand {
+  id: string;
+  command: string;
+}
+
+export interface Pricing {
+  input_per_mtok: number;
+  cached_input_per_mtok: number | null;
+  output_per_mtok: number;
+  currency: string;
+}
+
+/** The agent config file as the API serves it: the token masked, the key shown only as present. */
+export interface AgentConfig {
+  agent: { language: string; max_auto_passes: number };
+  data: { dir: string };
+  collector: { snapshot_interval_secs: number };
+  topology: { path: string };
+  model: null | {
+    base_url: string;
+    model: string;
+    api_key_env: string;
+    wire_api: string;
+    timeout_secs: number;
+    max_model_turns: number;
+    max_tool_calls: number;
+    max_inspections: number;
+    max_tokens_per_run: number;
+    pricing: Pricing | null;
+    api_key_present?: boolean;
+  };
+  platform: {
+    dry_run: boolean;
+    command_timeout_secs: number;
+    auto_repeat_window_secs: number;
+    classification: {
+      tunable_config_keys: string[];
+      contest_config_keys: string[];
+      security_config_keys: string[];
+      known_internal_address_prefixes: string[];
+    };
+    runbooks: RunbookCommand[];
+  };
+  api: { bind: string; token: string };
+  budget: { max_total_tokens: number; max_total_cost: number };
+}
+
+export type SettingClass = "live" | "policy" | "startup";
+
+export interface SettingsPage {
+  config: AgentConfig;
+  path: string | null;
+  mode: string;
+  classes: Record<SettingClass, string[]>;
+}
+
+export interface SettingChange {
+  key: string;
+  class: SettingClass;
+  from: unknown;
+  to: unknown;
 }
 
 /* ---- Session files ---- */
