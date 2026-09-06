@@ -1,5 +1,7 @@
 # Broccoli DevOps Agent
 
+English | [简体中文](./README.zh-CN.md)
+
 An agentic operations control plane for the Broccoli online judging system, written in Rust with its own model-agnostic agent harness.
 
 It loads a static deployment topology, probes real endpoints, builds immutable Snapshots, accepts human reports, dispatches an Operate Job over an exact sanitized Snapshot View (through a deterministic Team or a model-backed one), runs the Job's proposed actions through an approved authority matrix into the Agents Platform, verifies their effect, parks every denial and failure in a three-category inbox for a human, sends human feedback back upstream as a revising Job, persists everything to disk, and recovers control state after a restart. An investigation is a bounded chain of such passes: a pass can inspect a target read-only, ask for specific probes and be superseded by a pass over a fresh Snapshot, or ask for a follow-up pass to check the effect of its actions — and a model's "solved" counts only when the Scheduler can confirm it. Machines are touched only through the runbook commands you configure, and only once you leave dry-run.
