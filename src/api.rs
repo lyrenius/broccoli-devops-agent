@@ -114,6 +114,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/issues/{id}/close", post(close_issue))
         .route("/api/jobs", get(jobs))
         .route("/api/jobs/{id}/review", post(review_job))
+        .route("/api/jobs/{id}/cancel", post(cancel_job))
         .route("/api/reports", post(report))
         .route("/api/inbox", get(inbox))
         .route("/api/actions", get(actions))
@@ -184,6 +185,9 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
         "uptime_secs": state.started.elapsed().as_secs(),
         "language": state.config.agent.language.tag(),
         "recovery": state.recovery,
+        // What is happening right now, and what it has cost: both are live, so a console can
+        // show a pass in flight and its running bill without polling a second route.
+        "running": state.runner.running_passes().await,
         "usage": state.runner.usage_totals().await?,
         "counts": {
             "issues": store.list_issues().await?.len(),
@@ -267,6 +271,26 @@ async fn usage(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
     Ok(Json(serde_json::to_value(
         state.runner.usage_totals().await?,
     )?))
+}
+
+/// Interrupts a pass that is still running.
+///
+/// Cooperative, like every cancellation here: the Team stops at its next step boundary and still
+/// delivers a final callback, so the Job lands in the Failed inbox with its transcript rather than
+/// disappearing. A Job that is no longer running is a 404 — there is nothing to stop, and saying
+/// so is more useful than silently succeeding.
+async fn cancel_job(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<DecisionRequest>,
+) -> ApiResult<Value> {
+    if !state.runner.cancel_pass(id, request.who()).await? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("Job `{id}` is not running; there is nothing to interrupt"),
+        ));
+    }
+    Ok(Json(json!({ "job_id": id, "cancelling": true })))
 }
 
 #[derive(Debug, Deserialize)]

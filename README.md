@@ -31,7 +31,7 @@ cd web && pnpm install && pnpm dev          # http://localhost:5180, /api proxie
 cargo run -p broccoli-tui                   # --api http://127.0.0.1:4720 --token ...
 ```
 
-The web console has the inbox in its three categories — permission requests (approve, or reject with a comment), permission denials (who refused and why; send back upstream or acknowledge), and failures (jobs and actions; the same two decisions) — plus the live Snapshot with coverage gaps, issues and jobs with their feedback and transcript links, a live event stream, freeze/resume controls, the human-report form, and what the model relay has cost so far against its ceiling. Every decision records the operator's name. The console's own language (English or 简体中文) is switched at runtime from the sidebar and remembered per browser; it defaults to the agent's configured language. The TUI covers the same operations from a terminal: `1-4` screens, `j/k` select, `a` approve, `r` reject, `b` send back upstream, `x` acknowledge (the last three prompt for a comment), `s` snapshot, `f`/`F`/`u` freeze dispatch, freeze all, resume; `--as NAME` sets the recorded operator. Its Overview carries the same spend panel. Set `api.token` in the config (and pass `--token` to the TUI) before binding beyond localhost.
+The web console has the inbox in its three categories — permission requests (approve, or reject with a comment), permission denials (who refused and why; send back upstream or acknowledge), and failures (jobs and actions; the same two decisions) — plus the live Snapshot with coverage gaps, issues and jobs with their feedback and transcript links, a live event stream, freeze/resume controls, the human-report form with live progress while a pass runs, the passes in flight with an Interrupt button for each, and what the model relay has cost so far against its ceiling. Every decision records the operator's name. The console's own language (English or 简体中文) is switched at runtime from the sidebar and remembered per browser; it defaults to the agent's configured language. The TUI covers the same operations from a terminal: `1-4` screens, `j/k` select, `a` approve, `r` reject, `b` send back upstream, `x` acknowledge (the last three prompt for a comment), `c` interrupt the running pass, `s` snapshot, `f`/`F`/`u` freeze dispatch, freeze all, resume; `--as NAME` sets the recorded operator. Its Overview carries the same activity and spend panel. Set `api.token` in the config (and pass `--token` to the TUI) before binding beyond localhost.
 
 To try the consoles without a model or a deployment, seed a demo data directory that already holds one item of each inbox category, then serve it with the deterministic Team:
 
@@ -45,7 +45,7 @@ cargo run -- serve --data data-demo --topology data-demo/topology.toml --team re
 The repository is a Cargo workspace with three crates and a strict dependency direction:
 
 - **`broccoli-devops-agent`** (root) — the control plane: domain model, ports, Scheduler, Collector, stores, Platform, authority policy, Teams, the HTTP API, and CLI. Its ports (`AgentTeamPort`, `SchedulerPolicyPort`, `SnapshotJudgePort`) are the backend-neutral seam for model-backed work.
-- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call/token budgets with a low-budget warning and wrap-up turns that offer only the terminal tools, per-request token accounting, retries with backoff on transient backend failures, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (the OpenAI-compatible relay client lives behind its `openai` feature) and knows nothing about Broccoli.
+- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call/token budgets with a low-budget warning and wrap-up turns that offer only the terminal tools, per-request token accounting, step-by-step progress observation, retries with backoff on transient backend failures, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (the OpenAI-compatible relay client lives behind its `openai` feature) and knows nothing about Broccoli.
 - **[`crates/tui`](./crates/tui)** (`broccoli-tui`) — the terminal console, a pure HTTP client of the API.
 - **[`web/`](./web)** — the web console (React 19 + Vite + TypeScript + Tailwind v4), also a pure API client, served by Vite separately. It mirrors Broccoli's web UI — the same colour tokens, sidebar navigation, cards, badges, and page headers — so operators move between the judge's admin pages and the console without a visual seam, while sharing no code with Broccoli's plugin system.
 
@@ -99,7 +99,23 @@ Authority is decided over the whole proposal: the runbook, every target's kind (
 
 The Platform executes runbooks as the commands you map in `config/agent.toml` under `[[platform.runbooks]]` (for example `ssh {target} sudo systemctl restart broccoli-worker`); credentials stay with your SSH agent. It starts in **dry-run** mode — commands are rendered and recorded as Artifacts, not executed — until you set `dry_run = false`. Verification treats a command's exit code zero as evidence only: the target must be Healthy in the after-Snapshot, or the action ends as `VerificationFailed`.
 
-## What a run costs
+## Watching a run, and what it costs
+
+A model-backed pass is a handful of slow remote calls that cost money, so the control plane
+reports both while it is still going.
+
+**Progress.** The agent loop announces every model turn, tool call, retry, and budget wrap-up as
+it happens; those lines join the model's own `report_progress` in one ordered stream, become Team
+callbacks and `team.callback` events, and reach every console over the existing SSE feed. The web
+console shows them live on the report form while the request is still in flight, the Events screen
+streams all of them, the TUI's Overview shows the newest line with the pass that produced it, and
+`report` on the CLI prints them to stderr as they arrive.
+
+**Interruption.** A running pass is registered by Job ID and can be stopped: the Interrupt button
+in the web console, `c` in the TUI, `POST /api/jobs/{id}/cancel`, or Ctrl-C during `report`.
+Cancellation is cooperative — the Team stops at its next step boundary and still delivers a final
+callback, so the transcript is kept and the Job lands in the Failed inbox where a human can send it
+back upstream, rather than vanishing with the process.
 
 **Tokens and cost.** Every backend response's `usage` block is parsed (both wire formats), summed
 over the run, recorded on the Job and as a `model.usage` event, and totalled from that append-only

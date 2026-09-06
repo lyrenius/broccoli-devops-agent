@@ -147,11 +147,11 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
-    // The relay's running bill sits above the Snapshot: it is a live fact the Snapshot cannot
-    // show, and the first thing an operator asks about a model-backed control plane.
+    // A running pass and its bill sit above the Snapshot: both are live facts about right now,
+    // and both are what an operator watching a slow investigation actually wants to see.
     let rows_area = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .constraints([Constraint::Length(4), Constraint::Min(3)])
         .split(area);
     draw_activity(frame, rows_area[0], app);
     let area = rows_area[1];
@@ -195,9 +195,32 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(table, area);
 }
 
-/// What the relay has cost so far.
+/// The passes in flight and what the relay has cost so far.
 fn draw_activity(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = Vec::new();
+    if app.status.running.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no pass running",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for pass in &app.status.running {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "● running ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "Job {} · Issue {} · since {}",
+                    pass.job_id.chars().take(8).collect::<String>(),
+                    pass.issue_id.chars().take(8).collect::<String>(),
+                    pass.started_at.get(11..19).unwrap_or(&pass.started_at)
+                )),
+            ]));
+        }
+    }
     let usage = &app.status.usage;
     let spent = usage.one_line();
     lines.push(Line::from(Span::styled(
@@ -208,12 +231,26 @@ fn draw_activity(frame: &mut Frame, area: Rect, app: &App) {
             _ => Color::DarkGray,
         }),
     )));
+    // The newest progress line, so a pass that reports nothing for a while is visibly stalled
+    // rather than ambiguous.
+    if let Some(latest) = app
+        .events
+        .iter()
+        .rev()
+        .find(|event| event.kind == "team.callback")
+    {
+        lines.push(Line::from(Span::styled(
+            format!("↳ {}", latest.summary),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+    let title = if app.status.running.is_empty() {
+        " activity · model spend ".to_string()
+    } else {
+        " activity · model spend  (c = interrupt the running pass) ".to_string()
+    };
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" model spend "),
-        ),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
 }
@@ -343,7 +380,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let message = app.message.as_deref().unwrap_or(
-        "1-4 screens · j/k select · a approve · r reject · b send upstream · x acknowledge · R/C resolve/cancel issue · s snapshot · f/F freeze · u resume · q quit",
+        "1-4 screens · j/k select · a approve · r reject · b send upstream · x acknowledge · R/C resolve/cancel issue · c interrupt pass · s snapshot · f/F freeze · u resume · q quit",
     );
     let style = if app.message.is_some() {
         Style::default().fg(Color::Yellow)

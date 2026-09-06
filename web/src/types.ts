@@ -24,6 +24,13 @@ export interface RecoverySummary {
   reconstructed_review_job_ids: string[];
 }
 
+/** A pass running right now; `job_id` is what the cancel route takes. */
+export interface RunningPass {
+  job_id: string;
+  issue_id: string;
+  started_at: string;
+}
+
 /** How the totals stand against the configured spend ceiling. */
 export interface BudgetStatus {
   max_total_tokens: number;
@@ -74,6 +81,7 @@ export interface Status {
   recovery: RecoverySummary | null;
   counts: Counts;
   inbox: InboxCounts;
+  running: RunningPass[];
   usage: UsageTotals;
 }
 

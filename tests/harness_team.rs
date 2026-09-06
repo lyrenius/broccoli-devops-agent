@@ -114,13 +114,43 @@ async fn harness_team_runs_a_job_through_the_same_port() {
         .unwrap();
 
     let delivered = sink.delivered.lock().await;
-    assert_eq!(delivered.len(), 2);
-    assert_eq!(delivered[0].kind(), TeamCallbackKind::Progress);
-    assert_eq!(delivered[0].summary, "Reading the view");
-    assert_eq!(delivered[1].kind(), TeamCallbackKind::Completed);
-    assert_eq!(delivered[1].issue_id, issue.issue_id);
+    // Exactly one callback ends the pass, and it comes last; everything before it is progress,
+    // delivered while the run was still going.
+    let (last, progress) = delivered.split_last().unwrap();
+    assert!(
+        progress
+            .iter()
+            .all(|callback| callback.kind() == TeamCallbackKind::Progress)
+    );
+    assert_eq!(last.kind(), TeamCallbackKind::Completed);
+    assert_eq!(last.issue_id, issue.issue_id);
 
-    let result = delivered[1].final_result.as_ref().unwrap();
+    // The loop's own steps and the model's `report_progress` share one ordered stream, so an
+    // operator watching the console sees the pass advance rather than a silent gap.
+    let lines: Vec<&str> = progress
+        .iter()
+        .map(|callback| callback.summary.as_str())
+        .collect();
+    assert!(
+        lines.iter().any(|line| line.contains("model turn 1/")),
+        "each model turn is announced: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Running `read_snapshot_view`")),
+        "each tool call is announced: {lines:?}"
+    );
+    assert_eq!(
+        lines.iter().position(|line| *line == "Reading the view"),
+        lines
+            .iter()
+            .position(|line| line.contains("Running `report_progress`"))
+            .map(|index| index + 1),
+        "the model's own progress line follows the step that produced it"
+    );
+
+    let result = last.final_result.as_ref().unwrap();
     assert_eq!(result.outcome, JobOutcome::DiagnosisOnly);
     assert!(result.summary.contains("postgres-main is down"));
     assert_eq!(result.unresolved_questions.len(), 1);

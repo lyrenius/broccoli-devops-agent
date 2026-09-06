@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use broccoli_agent_harness::testing::{ScriptedModelClient, call, text};
 use broccoli_agent_harness::{
-    AgentConfig, AgentOutcome, HarnessError, Item, ToolRegistry, ToolSpec, Transcript, Trust,
-    Usage, cancel_pair, run_agent, tool_fn,
+    AgentConfig, AgentOutcome, HarnessError, Item, ProgressObserver, RunProgress, RunStep,
+    ToolRegistry, ToolSpec, Transcript, Trust, Usage, cancel_pair, run_agent, run_agent_observed,
+    tool_fn,
 };
 use serde_json::json;
 
@@ -576,4 +577,87 @@ async fn token_budget_ends_the_run_with_a_wrap_up_turn() {
             .any(|item| matches!(item, Item::Notice { text } if text.contains("token budget"))),
         "the model must be told which budget stopped it"
     );
+}
+
+/// The observer sees each turn and tool call while the run is still going, with live counters.
+#[tokio::test]
+async fn progress_is_observed_step_by_step() {
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<RunProgress>>);
+    impl ProgressObserver for Recorder {
+        fn observe(&self, progress: RunProgress) {
+            self.0.lock().unwrap().push(progress);
+        }
+    }
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let client = ScriptedModelClient::new(vec![
+        vec![call("c1", "add", json!({"a": 2, "b": 3}))],
+        vec![call("c2", "nope", json!({}))],
+        vec![call("c3", "finish", json!({"answer": "5"}))],
+    ])
+    .with_usage_per_turn(Usage::reported(100, 0, 10));
+    let (_handle, token) = cancel_pair();
+    let recorder = Recorder::default();
+
+    let report = run_agent_observed(
+        &client,
+        &registry(counter),
+        &AgentConfig::default(),
+        "Add the numbers, then finish.",
+        vec![Item::UserInput {
+            text: "2 + 3".into(),
+            trust: Trust::Trusted,
+        }],
+        token,
+        Some(&recorder),
+    )
+    .await
+    .unwrap();
+
+    let steps = recorder.0.lock().unwrap().clone();
+    let names: Vec<&str> = steps
+        .iter()
+        .map(|progress| match &progress.step {
+            RunStep::TurnStarted => "turn",
+            RunStep::TurnCompleted { .. } => "turn-done",
+            RunStep::ToolStarted { .. } => "tool",
+            RunStep::ToolFinished { .. } => "tool-done",
+            RunStep::Retrying { .. } => "retry",
+            RunStep::WrappingUp { .. } => "wrap-up",
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "turn",
+            "turn-done",
+            "tool",
+            "tool-done", // add
+            "turn",
+            "turn-done",
+            "tool",
+            "tool-done", // unknown tool, refused
+            "turn",
+            "turn-done",
+            "tool",
+            "tool-done", // finish
+        ]
+    );
+    assert!(
+        matches!(&steps[7].step, RunStep::ToolFinished { tool, is_error } if tool == "nope" && *is_error),
+        "a refused call is reported as finished with an error"
+    );
+
+    // Counters travel with each step, so a console can render progress without its own state.
+    let first_turn = &steps[0];
+    assert_eq!(first_turn.model_turns, 1);
+    assert_eq!(
+        first_turn.max_model_turns,
+        AgentConfig::default().max_model_turns
+    );
+    assert_eq!(first_turn.usage.total_tokens(), 0, "nothing billed yet");
+    let last = steps.last().unwrap();
+    assert_eq!(last.usage.total_tokens(), 330);
+    assert_eq!(last.usage, report.usage);
 }

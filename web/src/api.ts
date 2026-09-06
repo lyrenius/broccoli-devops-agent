@@ -42,6 +42,8 @@ export const api = {
   closeIssue: (id: string, outcome: IssueClosure, by: string, comment: string) =>
     post<Issue>(`/api/issues/${id}/close`, { outcome, by, comment }),
   usage: () => request<UsageTotals>("/api/usage"),
+  /** Asks a running pass to stop; the Team still delivers a final result and keeps its transcript. */
+  cancelJob: (id: string, by: string) => post<{ job_id: string }>(`/api/jobs/${id}/cancel`, { by }),
   events: (limit: number) => request<EventRecord[]>(`/api/events?limit=${limit}`),
   transition: (name: "freeze-dispatch" | "freeze-all" | "resume") => post<{ mode: string }>(`/api/scheduler/${name}`),
   report: (body: { title: string; description: string; reporter: string; priority?: string }) =>

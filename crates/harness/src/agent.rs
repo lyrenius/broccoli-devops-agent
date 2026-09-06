@@ -106,6 +106,76 @@ impl CancelToken {
     }
 }
 
+/// One step the loop reached, reported while the run is still going.
+///
+/// A run is a sequence of slow remote calls, so "what is it doing right now" cannot be answered
+/// from the finished report. These steps are the answer: an adapter forwards them to whatever
+/// operators are watching, and the counters travel with each one so a console can render
+/// "turn 3/8 · 5/16 tool calls · 12.4k tokens" without keeping its own state.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunStep {
+    /// The loop is about to ask the model for a turn.
+    TurnStarted,
+    /// A transient backend failure is being retried after a backoff.
+    Retrying {
+        /// Which retry this is, counting from one.
+        attempt: u32,
+        /// What the backend said.
+        reason: String,
+    },
+    /// The model answered; the turn's items are in the transcript.
+    TurnCompleted {
+        /// Tool calls the turn requested.
+        tool_calls: u32,
+        /// Whether the turn carried prose as well.
+        text: bool,
+    },
+    /// A tool is about to run.
+    ToolStarted {
+        /// Tool name.
+        tool: String,
+    },
+    /// A tool call finished, was refused, failed, or timed out.
+    ToolFinished {
+        /// Tool name.
+        tool: String,
+        /// Whether the model receives an error output for this call.
+        is_error: bool,
+    },
+    /// A budget ran out; only the terminal tools are on offer from here.
+    WrappingUp {
+        /// Which budget ran out.
+        reason: String,
+    },
+}
+
+/// A [`RunStep`] with the run's counters at the moment it happened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunProgress {
+    /// What just happened.
+    pub step: RunStep,
+    /// Model turns started so far.
+    pub model_turns: u32,
+    /// The turn budget from [`AgentConfig`].
+    pub max_model_turns: u32,
+    /// Tool calls consumed so far.
+    pub tool_calls: u32,
+    /// The tool-call budget from [`AgentConfig`].
+    pub max_tool_calls: u32,
+    /// Tokens billed so far, as reported by the backend.
+    pub usage: Usage,
+}
+
+/// Receives [`RunProgress`] as the run proceeds.
+///
+/// Deliberately synchronous and infallible: an observer is expected to hand the step to a channel
+/// or a counter and return immediately. Progress reporting must never be able to block, fail, or
+/// otherwise change how a run ends.
+pub trait ProgressObserver: Send + Sync {
+    /// Handles one progress step.
+    fn observe(&self, progress: RunProgress);
+}
+
 /// How one agent run ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentOutcome {
@@ -168,7 +238,32 @@ pub async fn run_agent(
     config: &AgentConfig,
     instructions: &str,
     initial_items: Vec<Item>,
+    cancel: CancelToken,
+) -> HarnessResult<AgentRunReport> {
+    run_agent_observed(
+        client,
+        registry,
+        config,
+        instructions,
+        initial_items,
+        cancel,
+        None,
+    )
+    .await
+}
+
+/// [`run_agent`] with a [`ProgressObserver`] watching each step as it happens.
+///
+/// Same loop, same result; the observer only sees it happen. Adapters use this to stream progress
+/// to operators while a run that takes minutes is still in flight.
+pub async fn run_agent_observed(
+    client: &dyn ModelClient,
+    registry: &ToolRegistry,
+    config: &AgentConfig,
+    instructions: &str,
+    initial_items: Vec<Item>,
     mut cancel: CancelToken,
+    progress: Option<&dyn ProgressObserver>,
 ) -> HarnessResult<AgentRunReport> {
     let mut transcript = Transcript::new(instructions);
     for item in initial_items {
@@ -210,6 +305,21 @@ pub async fn run_agent(
         };
     }
 
+    macro_rules! report {
+        ($step:expr) => {
+            if let Some(observer) = progress {
+                observer.observe(RunProgress {
+                    step: $step,
+                    model_turns,
+                    max_model_turns: config.max_model_turns,
+                    tool_calls,
+                    max_tool_calls: config.max_tool_calls,
+                    usage,
+                });
+            }
+        };
+    }
+
     loop {
         if cancel.is_cancelled() {
             finish!(AgentOutcome::Cancelled);
@@ -245,6 +355,9 @@ pub async fn run_agent(
             }
             wrap_up_used += 1;
             wrapped_up = true;
+            report!(RunStep::WrappingUp {
+                reason: reason.clone(),
+            });
             transcript.push(Item::Notice {
                 text: format!(
                     "{reason}. This is a wrap-up turn: only the terminal tool(s) {terminal_names} \
@@ -254,6 +367,7 @@ pub async fn run_agent(
             });
         }
         model_turns += 1;
+        report!(RunStep::TurnStarted);
 
         let items = transcript.items();
         let request = ModelRequest {
@@ -280,10 +394,14 @@ pub async fn run_agent(
             };
             match attempt {
                 Ok(turn) => break turn,
-                Err(HarnessError::ModelUnavailable(_))
+                Err(HarnessError::ModelUnavailable(reason))
                     if model_retries < config.max_model_retries =>
                 {
                     model_retries += 1;
+                    report!(RunStep::Retrying {
+                        attempt: model_retries,
+                        reason,
+                    });
                     let backoff = config.retry_backoff * model_retries;
                     tokio::select! {
                         () = tokio::time::sleep(backoff) => {}
@@ -324,6 +442,11 @@ pub async fn run_agent(
             }
         }
 
+        report!(RunStep::TurnCompleted {
+            tool_calls: calls.len() as u32,
+            text: !texts.is_empty(),
+        });
+
         if calls.is_empty() {
             finish!(AgentOutcome::Text(texts.join("\n")));
         }
@@ -341,6 +464,17 @@ pub async fn run_agent(
                     trust: Trust::Trusted,
                 });
             };
+            report!(RunStep::ToolStarted {
+                tool: tool_name.clone(),
+            });
+            macro_rules! finished {
+                ($is_error:expr) => {
+                    report!(RunStep::ToolFinished {
+                        tool: tool_name.clone(),
+                        is_error: $is_error,
+                    })
+                };
+            }
             let tool = registry.get(&tool_name);
             if wrapping_up && !tool.is_some_and(|tool| tool.spec.terminal) {
                 refuse(
@@ -350,6 +484,7 @@ pub async fn run_agent(
                          {terminal_names} may be called"
                     ),
                 );
+                finished!(true);
                 continue;
             }
             if !wrapping_up && tool_calls >= config.max_tool_calls {
@@ -367,6 +502,7 @@ pub async fn run_agent(
                         config.max_tool_calls
                     ),
                 );
+                finished!(true);
                 continue;
             }
             tool_calls += 1;
@@ -376,6 +512,7 @@ pub async fn run_agent(
                     &mut transcript,
                     format!("tool `{tool_name}` is not in the allowlist for this run"),
                 );
+                finished!(true);
                 continue;
             };
 
@@ -390,9 +527,11 @@ pub async fn run_agent(
                             config.tool_timeout
                         ),
                     );
+                    finished!(true);
                 }
                 Ok(Err(message)) => {
                     refuse(&mut transcript, message);
+                    finished!(true);
                 }
                 Ok(Ok(value)) => {
                     let terminal = tool.spec.terminal;
@@ -403,6 +542,7 @@ pub async fn run_agent(
                         is_error: false,
                         trust: Trust::Mixed,
                     });
+                    finished!(false);
                     if terminal {
                         finish!(AgentOutcome::Structured {
                             tool: tool_name,

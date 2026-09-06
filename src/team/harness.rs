@@ -29,8 +29,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use broccoli_agent_harness as harness;
 use broccoli_agent_harness::{
-    AgentConfig, AgentOutcome, Item, ModelClient, ToolRegistry, ToolSpec, Trust, fence_untrusted,
-    run_agent, tool_fn,
+    AgentConfig, AgentOutcome, Item, ModelClient, ProgressObserver, RunProgress, RunStep,
+    ToolRegistry, ToolSpec, Trust, fence_untrusted, run_agent_observed, tool_fn,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
@@ -63,6 +63,71 @@ struct RunState {
     view_read: bool,
     inspections: u32,
     proposals: Vec<ActionProposal>,
+}
+
+/// Turns the agent loop's steps into the progress lines the Scheduler already streams.
+///
+/// This is the whole of "real-time progress" on the model side: a pass is a handful of slow
+/// remote calls, and without this an operator watching the console sees nothing between dispatch
+/// and the diagnosis several minutes later. Each line goes down the same channel as the model's
+/// own `report_progress`, so it becomes a Team callback, an event, and an SSE frame with no new
+/// path to keep correct.
+///
+/// Not every step is worth an event: a completed turn and a successful tool call are implied by
+/// what comes next, so only the steps that tell an operator something they could not infer are
+/// forwarded.
+struct ProgressLines {
+    sender: mpsc::UnboundedSender<String>,
+}
+
+impl ProgressObserver for ProgressLines {
+    fn observe(&self, progress: RunProgress) {
+        let tokens = progress.usage.total_tokens();
+        let line = match &progress.step {
+            RunStep::TurnStarted => tr!(
+                format!(
+                    "Thinking — model turn {}/{}, {} tool call(s) used, {tokens} tokens so far",
+                    progress.model_turns, progress.max_model_turns, progress.tool_calls
+                ),
+                format!(
+                    "模型思考中——第 {}/{} 轮，已用 {} 次工具调用，累计 {tokens} tokens",
+                    progress.model_turns, progress.max_model_turns, progress.tool_calls
+                )
+            ),
+            RunStep::ToolStarted { tool } => tr!(
+                format!(
+                    "Running `{tool}` — tool call {}/{}",
+                    progress.tool_calls + 1,
+                    progress.max_tool_calls
+                ),
+                format!(
+                    "正在执行 `{tool}`——第 {}/{} 次工具调用",
+                    progress.tool_calls + 1,
+                    progress.max_tool_calls
+                )
+            ),
+            RunStep::ToolFinished { tool, is_error } => {
+                if !is_error {
+                    return;
+                }
+                tr!(
+                    format!("`{tool}` returned an error the model must recover from"),
+                    format!("`{tool}` 返回错误，模型需要自行恢复")
+                )
+            }
+            RunStep::Retrying { attempt, reason } => tr!(
+                format!("Model backend unavailable; retry {attempt} after a backoff: {reason}"),
+                format!("模型后端不可用，退避后进行第 {attempt} 次重试：{reason}")
+            ),
+            RunStep::WrappingUp { reason } => tr!(
+                format!("{reason}; the model is being asked to conclude with what it has"),
+                format!("{reason}；正在要求模型基于已有证据得出结论")
+            ),
+            RunStep::TurnCompleted { .. } => return,
+        };
+        // A closed channel means the run is already over; progress is never worth an error.
+        let _ = self.sender.send(line);
+    }
 }
 
 /// Operate Team that delegates diagnosis to a model through the agent harness.
@@ -723,6 +788,9 @@ impl AgentTeamPort for HarnessOperateTeam {
         let fenced = Arc::new(fence_untrusted(&String::from_utf8_lossy(&bytes)));
 
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        // The loop's own steps and the model's `report_progress` share one ordered channel, so
+        // operators see them interleaved exactly as they happened.
+        let progress_tx_for_steps = progress_tx.clone();
         let state = Arc::new(Mutex::new(RunState::default()));
         // A probe request spends one automatic pass, so it is only offered while one is left.
         let offer_probe_requests = job.follow_up_budget > 0;
@@ -790,13 +858,17 @@ impl AgentTeamPort for HarnessOperateTeam {
 
         // Drive the loop while forwarding progress as it happens, so interim callbacks reach the
         // Scheduler in order and before the final result.
-        let mut agent_run = pin!(run_agent(
+        let observer = ProgressLines {
+            sender: progress_tx_for_steps,
+        };
+        let mut agent_run = pin!(run_agent_observed(
             self.client.as_ref(),
             &registry,
             &self.config,
             &instructions,
             initial,
             harness_token,
+            Some(&observer),
         ));
         let report = loop {
             tokio::select! {

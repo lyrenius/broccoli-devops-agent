@@ -28,10 +28,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use broccoli_agent_harness::{AgentConfig as HarnessBudget, ModelClient};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 
 use crate::collector::TopologyCollector;
 use crate::domain::{
@@ -45,8 +46,8 @@ pub use crate::evidence::summarize_execution_record;
 use crate::platform::{LocalCommandPlatform, PlatformConfig};
 use crate::policy::{AuthorityPolicy, OPERATE_CAPABILITIES};
 use crate::ports::{
-    AgentTeamPort, CaptureRequest, InspectionPort, InspectionRequest, InspectionResult, StateStore,
-    TeamCallbackSink, cancel_pair,
+    AgentTeamPort, CancelHandle, CaptureRequest, InspectionPort, InspectionRequest,
+    InspectionResult, StateStore, TeamCallbackSink, cancel_pair,
 };
 use crate::scheduler::{IssueClosure, RecoverySummary, SchedulerMode, TopScheduler};
 use crate::store::file::FileStateStore;
@@ -56,17 +57,42 @@ use crate::tr;
 use crate::usage::{Pricing, SpendBudget, UsageTotals};
 use crate::view::{FileArtifactStore, PROFILE_OPERATE_READONLY, RedactingViewBuilder};
 
-/// Sink that routes Team callbacks straight into the Scheduler.
+/// Sink that routes Team callbacks straight into the Scheduler, and republishes them.
+///
+/// The Scheduler's copy is the record; the broadcast is the live view. A CLI command that blocks
+/// on a pass for minutes subscribes to it and prints each step as it happens, which is the same
+/// information the web console reads from the event stream — one source, two renderings.
 struct SchedulerSink {
     scheduler: Arc<TopScheduler>,
+    watchers: broadcast::Sender<TeamCallback>,
 }
 
 #[async_trait]
 impl TeamCallbackSink for SchedulerSink {
     /// Every delivery is a `handle_callback` call, so ordering and rejection rules apply as-is.
     async fn deliver(&self, callback: TeamCallback) -> AgentResult<()> {
+        // Nobody watching is the normal case, and never a reason to fail a callback.
+        let _ = self.watchers.send(callback.clone());
         self.scheduler.handle_callback(callback).await.map(|_| ())
     }
+}
+
+/// A Team run in flight, and the handle that stops it.
+struct RunningJob {
+    issue_id: IssueId,
+    cancel: CancelHandle,
+    started_at: DateTime<Utc>,
+}
+
+/// A pass currently running, as the consoles list it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningPass {
+    /// The Job being run.
+    pub job_id: JobId,
+    /// The Issue it serves.
+    pub issue_id: IssueId,
+    /// When the Team run started.
+    pub started_at: DateTime<Utc>,
 }
 
 /// Inspection gateway that routes a running Team's read-only requests through the Scheduler.
@@ -231,6 +257,10 @@ pub struct SliceRunner {
     pricing: Option<Pricing>,
     /// The cumulative spend ceiling; reaching it freezes the Scheduler.
     budget: SpendBudget,
+    /// Team runs in flight, by Job, with the handle that stops each one.
+    running: Mutex<HashMap<JobId, RunningJob>>,
+    /// Live Team callbacks, for a caller that wants to watch a pass it is blocked on.
+    watchers: broadcast::Sender<TeamCallback>,
     /// Serializes review-plus-dispatch so two reviewers of one item cannot both dispatch a
     /// revision; the store's compare-and-set catches what slips past process boundaries.
     review_lock: Mutex<()>,
@@ -330,6 +360,8 @@ impl SliceRunner {
             pass_policy,
             pricing: None,
             budget: SpendBudget::default(),
+            running: Mutex::new(HashMap::new()),
+            watchers: broadcast::channel(256).0,
             review_lock: Mutex::new(()),
         })
     }
@@ -361,6 +393,69 @@ impl SliceRunner {
             self.pricing.as_ref(),
             &self.budget,
         ))
+    }
+
+    /// Subscribes to Team callbacks as they are delivered, for live progress in a CLI.
+    pub fn watch_progress(&self) -> broadcast::Receiver<TeamCallback> {
+        self.watchers.subscribe()
+    }
+
+    /// The passes currently running, oldest first.
+    pub async fn running_passes(&self) -> Vec<RunningPass> {
+        let mut passes: Vec<RunningPass> = self
+            .running
+            .lock()
+            .await
+            .iter()
+            .map(|(job_id, running)| RunningPass {
+                job_id: *job_id,
+                issue_id: running.issue_id,
+                started_at: running.started_at,
+            })
+            .collect();
+        passes.sort_by_key(|pass| pass.started_at);
+        passes
+    }
+
+    /// Asks a running pass to stop, and records who asked.
+    ///
+    /// Cancellation is cooperative: the Team stops at its next step boundary and still delivers a
+    /// final callback, so the Job ends as a failure in the inbox with its transcript intact rather
+    /// than vanishing mid-flight. Returns whether a run was actually in flight to stop.
+    pub async fn cancel_pass(&self, job_id: JobId, by: &str) -> AgentResult<bool> {
+        let Some(running) = self.running.lock().await.get(&job_id).map(|running| {
+            running.cancel.cancel();
+            running.issue_id
+        }) else {
+            return Ok(false);
+        };
+        self.store
+            .append_event(
+                crate::domain::NewEvent::new(
+                    "human",
+                    "human.pass_cancelled",
+                    tr!(
+                        format!("{by} interrupted the running pass"),
+                        format!("{by} 中断了正在运行的一轮任务")
+                    ),
+                )
+                .with_issue(running)
+                .with_job(job_id),
+            )
+            .await?;
+        Ok(true)
+    }
+
+    /// Asks every running pass to stop; returns how many were asked.
+    pub async fn cancel_all_passes(&self, by: &str) -> AgentResult<usize> {
+        let job_ids: Vec<JobId> = self.running.lock().await.keys().copied().collect();
+        let mut stopped = 0;
+        for job_id in job_ids {
+            if self.cancel_pass(job_id, by).await? {
+                stopped += 1;
+            }
+        }
+        Ok(stopped)
     }
 
     /// Freezes the Scheduler when the cumulative spend ceiling has been reached.
@@ -516,9 +611,23 @@ impl SliceRunner {
     async fn run_team(&self, job: Job, view: &Artifact) -> AgentResult<Job> {
         let sink = SchedulerSink {
             scheduler: self.scheduler.clone(),
+            watchers: self.watchers.clone(),
         };
-        let (_cancel_handle, cancel_signal) = cancel_pair();
-        if let Err(error) = self.team.run_job(&job, view, &sink, cancel_signal).await {
+        // The handle lives in the registry for as long as the run does, which is what makes an
+        // interruption reachable: a console asks for the Job by ID and the Team stops at its next
+        // step boundary. Held locally, as it was before, nothing could ever stop a run.
+        let (cancel_handle, cancel_signal) = cancel_pair();
+        self.running.lock().await.insert(
+            job.job_id,
+            RunningJob {
+                issue_id: job.issue_id,
+                cancel: cancel_handle,
+                started_at: Utc::now(),
+            },
+        );
+        let outcome = self.team.run_job(&job, view, &sink, cancel_signal).await;
+        self.running.lock().await.remove(&job.job_id);
+        if let Err(error) = outcome {
             let current = self.store.get_job(job.job_id).await?;
             if !current.status.is_terminal() {
                 sink.deliver(

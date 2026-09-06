@@ -5,6 +5,7 @@ import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import type { ActionRun, Issue, Job, PassOutcome } from "../types";
 import { Page } from "./Shell";
+import { LiveProgress } from "./Spend";
 import { StatusBadge } from "./status";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Field, Input, Select, Textarea } from "./ui";
 
@@ -68,6 +69,8 @@ export function Report({ onChanged }: { onChanged: () => void }) {
                   {busy ? t("btn.filing") : t("btn.file")}
                 </Button>
               </div>
+              {/* A model-backed report blocks for minutes; the steps stream in while it runs. */}
+              <LiveProgress active={busy} />
               {error && (
                 <Alert icon={AlertTriangle}>
                   <p>{error}</p>

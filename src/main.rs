@@ -345,6 +345,46 @@ fn wire_runner(
     ))
 }
 
+/// Prints Team progress to stderr as it is delivered, leaving stdout for the result.
+fn spawn_progress_printer(runner: &Arc<SliceRunner>) -> tokio::task::JoinHandle<()> {
+    let mut progress = runner.watch_progress();
+    tokio::spawn(async move {
+        while let Ok(callback) = progress.recv().await {
+            // Interim callbacks only: the final result is printed properly by the caller.
+            if callback.final_result.is_none() {
+                eprintln!("  · {}", callback.summary);
+            }
+        }
+    })
+}
+
+/// Turns Ctrl-C into a cooperative interruption of whatever pass is running.
+///
+/// The first press asks the Team to stop, which still produces a final callback, a transcript,
+/// and an inbox item a human can act on. A second press is taken as "stop arguing" and exits.
+fn spawn_interrupt_handler(runner: &Arc<SliceRunner>) -> tokio::task::JoinHandle<()> {
+    let runner = runner.clone();
+    tokio::spawn(async move {
+        let mut pressed = 0_u32;
+        while tokio::signal::ctrl_c().await.is_ok() {
+            pressed += 1;
+            let stopped = runner
+                .cancel_all_passes("operator (Ctrl-C)")
+                .await
+                .unwrap_or(0);
+            if stopped == 0 || pressed > 1 {
+                eprintln!("interrupted");
+                std::process::exit(130);
+            }
+            eprintln!(
+                "interrupting {stopped} running pass(es) — the transcript is kept and the Job \
+                 lands in the Failed inbox; press Ctrl-C again to exit now"
+            );
+        }
+    })
+}
+
+/// Runs one CLI command and reports failures as readable errors.
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = effective_config(&cli)?;
     match cli.command {
@@ -360,13 +400,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             priority,
             team,
         } => {
-            let runner = wire_runner(&config, select_backend(&config, team)?)?;
+            let runner = Arc::new(wire_runner(&config, select_backend(&config, team)?)?);
             println!("team backend: {}\n", runner.team_label());
+            // A model-backed report blocks for minutes. Progress goes to stderr as it happens and
+            // Ctrl-C interrupts the pass cooperatively, so the transcript and the partial record
+            // survive instead of being lost with the process.
+            let printer = spawn_progress_printer(&runner);
+            let interrupt = spawn_interrupt_handler(&runner);
             let mut report = HumanReport::new(reporter, title, description);
             report.priority = priority;
             let (issue, job) = runner.handle_report(report).await?;
             print!("{}", SliceRunner::render_report_outcome(&issue, &job));
             let passes = runner.drive_passes(job).await?;
+            printer.abort();
+            interrupt.abort();
             print!("{}", SliceRunner::render_passes(&passes, runner.dry_run()));
             let issue = runner.store().get_issue(issue.issue_id).await?;
             println!("\nIssue {} · status {:?}", issue.issue_id, issue.status);

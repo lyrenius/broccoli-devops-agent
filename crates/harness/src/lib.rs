@@ -8,7 +8,8 @@
 //! - a [`ToolRegistry`] of allowlisted tools with JSON-schema parameter specs,
 //! - the [`ModelClient`] boundary a concrete model backend implements, and
 //! - [`run_agent`], a bounded loop that lets a model call tools until it produces a terminal
-//!   result or hits a limit, reporting the tokens it spent.
+//!   result or hits a limit, reporting token usage and — through [`run_agent_observed`] — its
+//!   progress while the run is still going.
 //!
 //! With the `openai` feature, [`openai::OpenAiClient`] provides a [`ModelClient`] over any
 //! OpenAI-compatible endpoint (official API or a relay), in either the Responses or Chat wire
@@ -41,7 +42,8 @@ pub mod testing;
 pub mod tool;
 
 pub use agent::{
-    AgentConfig, AgentOutcome, AgentRunReport, CancelHandle, CancelToken, cancel_pair, run_agent,
+    AgentConfig, AgentOutcome, AgentRunReport, CancelHandle, CancelToken, ProgressObserver,
+    RunProgress, RunStep, cancel_pair, run_agent, run_agent_observed,
 };
 pub use client::{AssistantItem, ModelClient, ModelRequest, ModelTurn, Usage};
 pub use conversation::{Item, Transcript, Trust, fence_untrusted};

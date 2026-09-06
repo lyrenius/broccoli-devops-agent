@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useT } from "../i18n";
 import type { Issue, Snapshot, Status } from "../types";
 import { Page } from "./Shell";
-import { SpendTile, UsageCard } from "./Spend";
+import { RunningCard, SpendTile, UsageCard } from "./Spend";
 import { StatusBadge } from "./status";
 import { Alert, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, StatTile } from "./ui";
 
@@ -102,8 +102,9 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
         <SpendTile usage={status?.usage} />
       </div>
 
-      {/* What the relay has cost: a live fact the Snapshot cannot show. */}
+      {/* What is happening right now and what it has cost: the two live facts a Snapshot cannot show. */}
       <div className="grid gap-6 lg:grid-cols-2">
+        <RunningCard running={status?.running ?? []} onChanged={onChanged} />
         <UsageCard usage={status?.usage ?? null} />
       </div>
 

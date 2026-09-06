@@ -336,6 +336,7 @@ impl App {
                     Err(error) => format!("capture failed: {error}"),
                 });
             }
+            KeyCode::Char('c') => self.interrupt(client).await,
             KeyCode::Char('f') => self.transition(client, "freeze-dispatch").await,
             KeyCode::Char('F') => self.transition(client, "freeze-all").await,
             KeyCode::Char('u') => self.transition(client, "resume").await,
@@ -479,6 +480,33 @@ impl App {
             (Pending::ResolveIssue | Pending::CancelIssue, Ok(_)) => "issue closed".to_string(),
             (_, Err(error)) => format!("{:?} failed: {error}", prompt.pending),
         });
+    }
+
+    /// Interrupts the pass that has been running longest.
+    ///
+    /// Cooperative: the Team stops at its next step boundary and still delivers a final
+    /// callback, so the Job lands in the Failed inbox with its transcript rather than vanishing.
+    async fn interrupt(&mut self, client: &ApiClient) {
+        let Some(pass) = self.status.running.first().cloned() else {
+            self.message = Some("no pass is running".to_string());
+            return;
+        };
+        let short = pass.job_id.chars().take(8).collect::<String>();
+        self.message = Some(
+            match client.cancel_job(&pass.job_id, &self.operator).await {
+                Ok(_) => {
+                    let others = self.status.running.len().saturating_sub(1);
+                    let rest = if others > 0 {
+                        format!("; {others} other pass(es) still running")
+                    } else {
+                        String::new()
+                    };
+                    format!("interrupting Job {short}…{rest}")
+                }
+                Err(error) => format!("interrupt failed: {error}"),
+            },
+        );
+        self.refresh(client).await;
     }
 
     async fn transition(&mut self, client: &ApiClient, transition: &str) {

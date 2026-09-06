@@ -24,9 +24,26 @@ pub struct Status {
     /// Startup recovery summary, when the server recovered at startup.
     #[serde(default)]
     pub recovery: Option<Value>,
+    /// Passes running right now, with the Job that can be interrupted.
+    #[serde(default)]
+    pub running: Vec<RunningPass>,
     /// What the model relay has been asked to do, and what it cost.
     #[serde(default)]
     pub usage: UsageTotals,
+}
+
+/// One pass in flight, from `/api/status`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RunningPass {
+    /// Job being run; the ID the cancel route takes.
+    #[serde(default)]
+    pub job_id: String,
+    /// Issue it serves.
+    #[serde(default)]
+    pub issue_id: String,
+    /// When the run started (RFC 3339).
+    #[serde(default)]
+    pub started_at: String,
 }
 
 /// Token and cost totals from `/api/status` and `/api/usage`.
@@ -458,5 +475,11 @@ impl ApiClient {
     /// Captures a new Snapshot.
     pub async fn capture(&self) -> Result<Value, String> {
         self.post_json("/api/snapshots", None).await
+    }
+
+    /// Interrupts a running pass in the given operator's name.
+    pub async fn cancel_job(&self, id: &str, by: &str) -> Result<Value, String> {
+        self.post_json(&format!("/api/jobs/{id}/cancel"), Some(json!({ "by": by })))
+            .await
     }
 }
