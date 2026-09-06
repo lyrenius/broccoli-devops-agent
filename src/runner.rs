@@ -50,6 +50,7 @@ use crate::ports::{
     InspectionResult, StateStore, TeamCallbackSink, cancel_pair,
 };
 use crate::scheduler::{IssueClosure, RecoverySummary, SchedulerMode, TopScheduler};
+use crate::session::{self, ImportSummary, SessionBundle};
 use crate::store::file::FileStateStore;
 use crate::team::{HarnessOperateTeam, ReadOnlyOperateTeam};
 use crate::topology::DeploymentTopology;
@@ -387,7 +388,16 @@ impl SliceRunner {
     /// Summed from the EventLog rather than from the Jobs: the log is append-only, so a pass
     /// that was later superseded still has the tokens it really spent counted here.
     pub async fn usage_totals(&self) -> AgentResult<UsageTotals> {
-        let events = self.store.list_events().await?;
+        // What an imported archive spent was billed to whoever ran it; it neither counts here
+        // nor eats this controller's ceiling.
+        let archived = self.scheduler.archived_issue_ids().await?;
+        let events: Vec<_> = self
+            .store
+            .list_events()
+            .await?
+            .into_iter()
+            .filter(|event| event.issue_id.is_none_or(|id| !archived.contains(&id)))
+            .collect();
         Ok(UsageTotals::from_events(
             &events,
             self.pricing.as_ref(),
@@ -1237,6 +1247,32 @@ impl SliceRunner {
             .await
     }
 
+    /// Bundles an Issue with its passes, actions, Snapshots, Artifacts, and events into one
+    /// document; see [`crate::session`].
+    pub async fn export_session(
+        &self,
+        issue_id: IssueId,
+        exported_by: &str,
+    ) -> AgentResult<SessionBundle> {
+        session::export_session(
+            self.store.as_ref(),
+            &self.artifacts,
+            issue_id,
+            exported_by,
+            &self.topology.deployment.name,
+        )
+        .await
+    }
+
+    /// Loads a session file as a read-only archive; see [`crate::session`].
+    pub async fn import_session(
+        &self,
+        bundle: SessionBundle,
+        imported_by: &str,
+    ) -> AgentResult<ImportSummary> {
+        session::import_session(self.store.as_ref(), &self.artifacts, bundle, imported_by).await
+    }
+
     /// Recovers control state after a restart, verifying interrupted actions against a fresh
     /// Snapshot; see `TopScheduler::recover_with`.
     pub async fn recover(&self) -> AgentResult<RecoverySummary> {
@@ -1274,7 +1310,12 @@ impl SliceRunner {
     /// Computes the inbox from the store.
     pub async fn inbox(&self) -> AgentResult<Inbox> {
         let mut inbox = Inbox::default();
+        // An imported archive's open items are history: nobody here can decide them.
+        let archived = self.scheduler.archived_issue_ids().await?;
         for action in self.store.list_action_runs().await? {
+            if archived.contains(&action.issue_id) {
+                continue;
+            }
             if action.status == ActionStatus::WaitingForApproval {
                 inbox.permission_requests.push(action);
             } else if action.review.is_none() && action.denial.is_some() {
@@ -1288,6 +1329,7 @@ impl SliceRunner {
             .list_jobs()
             .await?
             .into_iter()
+            .filter(|job| !archived.contains(&job.issue_id))
             .filter(Job::needs_review)
             .collect();
         Ok(inbox)

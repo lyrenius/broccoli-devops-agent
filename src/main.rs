@@ -80,6 +80,11 @@ enum Command {
     },
     /// Rebuild control state after a restart: reconcile interrupted work, restore the freeze mode.
     Recover,
+    /// Save an Issue with its whole pass chain to a JSON file, or load one as a read-only archive.
+    Sessions {
+        #[command(subcommand)]
+        action: SessionsAction,
+    },
     /// Close an Issue by hand: resolved, cancelled, or failed.
     Issues {
         #[command(subcommand)]
@@ -210,6 +215,32 @@ impl ReviewArgs {
 enum ConfigAction {
     /// Print the effective configuration.
     Show,
+}
+
+/// Session subcommands.
+#[derive(Debug, Subcommand)]
+enum SessionsAction {
+    /// Write the session file for an Issue: the Issue, every pass with its transcript and the
+    /// View it read, every action, every Snapshot, and every event.
+    Export {
+        /// Issue ID.
+        id: Uuid,
+        /// Where to write; defaults to `session-<id>.json` in the current directory.
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+        /// Your name, recorded in the file as the exporter.
+        #[arg(long = "as", default_value = "operator")]
+        by: String,
+    },
+    /// Load a session file as a read-only archive: viewable in the consoles, ignored by every
+    /// control decision.
+    Import {
+        /// The session file.
+        path: PathBuf,
+        /// Your name, recorded with the import.
+        #[arg(long = "as", default_value = "operator")]
+        by: String,
+    },
 }
 
 /// Issue subcommands.
@@ -350,6 +381,11 @@ fn spawn_progress_printer(runner: &Arc<SliceRunner>) -> tokio::task::JoinHandle<
     let mut progress = runner.watch_progress();
     tokio::spawn(async move {
         while let Ok(callback) = progress.recv().await {
+            // Forwarded transcript entries feed the console's live trace; here the progress
+            // lines already say what the pass is doing.
+            if callback.step.is_some() {
+                continue;
+            }
             // Interim callbacks only: the final result is printed properly by the caller.
             if callback.final_result.is_none() {
                 eprintln!("  · {}", callback.summary);
@@ -493,6 +529,45 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
             let issue = runner.close_issue(id, closure, &by, comment).await?;
             println!("Issue {} · status {:?}", issue.issue_id, issue.status);
+        }
+        Command::Sessions {
+            action: SessionsAction::Export { id, output, by },
+        } => {
+            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
+            let bundle = runner.export_session(id, &by).await?;
+            let path = output.unwrap_or_else(|| PathBuf::from(format!("session-{id}.json")));
+            std::fs::write(&path, serde_json::to_vec_pretty(&bundle)?)?;
+            println!(
+                "wrote {} · Issue {} · {} pass(es), {} action(s), {} snapshot(s), {} artifact(s), {} event(s)",
+                path.display(),
+                bundle.issue.issue_id,
+                bundle.jobs.len(),
+                bundle.action_runs.len(),
+                bundle.snapshots.len(),
+                bundle.artifacts.len(),
+                bundle.events.len()
+            );
+        }
+        Command::Sessions {
+            action: SessionsAction::Import { path, by },
+        } => {
+            let bytes = std::fs::read(&path)?;
+            let bundle = serde_json::from_slice(&bytes)?;
+            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
+            let summary = runner.import_session(bundle, &by).await?;
+            println!(
+                "imported Issue {} “{}” from `{}` (exported by {} on {}) as a read-only archive · {} pass(es), {} action(s), {} snapshot(s), {} artifact(s), {} event(s)",
+                summary.issue_id,
+                summary.title,
+                summary.source_deployment,
+                summary.exported_by,
+                summary.exported_at.format("%Y-%m-%d %H:%M UTC"),
+                summary.jobs,
+                summary.action_runs,
+                summary.snapshots,
+                summary.artifacts,
+                summary.events
+            );
         }
         Command::Events { tail } => {
             let store = FileStateStore::open(&config.data.dir)?;

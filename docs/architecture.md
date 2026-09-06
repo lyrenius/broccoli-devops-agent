@@ -1,11 +1,12 @@
 # Broccoli DevOps Agent Architecture
 
-> Status: Draft v0.5  
+> Status: Draft v0.6  
 > Updated: 2026-09-05  
 > Scope: Product and system architecture. This document does not yet prescribe a concrete OpenAI model, deployment host, or production permission policy.  
 > v0.3 applied the first design-feedback round (`docs/fable-design-feedback.md`): the separate Work Order layer is gone, the inbox has three categories, denials carry reasons and comments, and a human review can send an item back upstream as a revising Job.  
 > v0.4 applies the second review (`docs/remaining-issues-d805bf1-zh-en.md`): joint scope authorization, idempotency claims and compare-and-set transitions, process-group kill on timeout, startup recovery with reconciliation, derived Issue status with explicit closure, class-specific verification evidence and business probes, and execution evidence in upstream feedback. See §12 for the design choices that review asked to align on.  
-> v0.5 gives the Operate Team a real investigation loop (§4.5): passes that request Probes and are superseded, follow-up passes over the after-Snapshot, read-only inspections through the Platform, a pass budget, and a Scheduler-checked "solved"; and hardens the harness (§11 OD-5) with budget warnings, wrap-up turns, and transient-failure retries.
+> v0.5 gives the Operate Team a real investigation loop (§4.5): passes that request Probes and are superseded, follow-up passes over the after-Snapshot, read-only inspections through the Platform, a pass budget, and a Scheduler-checked "solved"; and hardens the harness (§11 OD-5) with budget warnings, wrap-up turns, and transient-failure retries.  
+> v0.6 adds context history (§4.8): a live, entry-by-entry trace of every pass, per-turn records in the transcript, and session files that export an Issue with its whole pass chain and import it elsewhere as a read-only archive.
 
 ## 1. Goal
 
@@ -546,6 +547,44 @@ requests are decided with the Team's reason and expected effect in view;
 denials show who refused and why, take a comment, and can be sent back
 upstream or acknowledged; failures show the Job's or Platform's summary and
 take the same two decisions. Every decision records the human's name.
+
+#### Context history: traces and session files
+
+The consoles are not a window onto a black box. Three mechanisms make the
+actual workflow observable and portable:
+
+- **Live trace.** The harness's observer sees every transcript entry the moment
+  it is appended, inputs included. The Team adapter forwards each one to the
+  Scheduler as a progress callback carrying a `TraceStep` (the entry's index,
+  time, and item, with long text cut to a preview), and the Scheduler records it
+  as a `team.step` event bound to the Issue and Job — nothing else happens to it.
+  The console's Trace page shows the transcript growing from these events while
+  the pass runs and switches to the stored transcript when it ends; the two line
+  up entry for entry. Delivery runs alongside the agent loop, never inside it, so
+  writing an event cannot hold a model call back. The harness's `TraceStep`
+  never crosses a port: it travels as the JSON the stored transcript contains.
+- **Per-turn records.** The transcript now carries one `TurnRecord` per model
+  request — when it was issued and answered, its token usage, the retries it
+  took, whether it was a wrap-up turn, and the tools on offer — so a trace can
+  draw the run turn by turn (latency, cost, budget pressure) without re-deriving
+  it. Old transcripts without the field still load.
+- **Session files.** A "session" is an Issue with its whole pass chain: the
+  Jobs, the ActionRuns their proposals became, the Snapshots each pass reasoned
+  over, every Artifact (each Snapshot View the model read, each pass transcript,
+  each execution record) with its body, and every event bound to any of them.
+  `GET /api/issues/{id}/session` (and `sessions export`) writes it as one JSON
+  document — bodies as readable JSON, since every body the control plane writes
+  is JSON and serde preserves key order, so the recorded SHA-256 can be checked
+  after the round trip. `POST /api/sessions/import` (and `sessions import`)
+  loads such a file as a **read-only archive**: the Issue carries a
+  `SessionProvenance` (source deployment, exporter, importer, times), the records
+  keep their IDs and content, imported events keep their identity and time and
+  get new sequence numbers, and the import is itself an event. Every control
+  decision refuses or ignores an archived Issue — dispatch, approval, rejection,
+  review, closure, recovery, triage, the inbox, and spend totals — while the
+  consoles show and trace it like any other. A file whose bodies do not hash to
+  their records, or whose Issue is already present, is refused before anything
+  is written.
 
 ### 4.9 Registries
 

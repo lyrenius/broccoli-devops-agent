@@ -14,6 +14,7 @@ pub mod issue;
 pub mod job;
 pub mod review;
 pub mod snapshot;
+pub mod trace;
 
 pub use action::*;
 pub use artifact::*;
@@ -22,6 +23,7 @@ pub use issue::*;
 pub use job::*;
 pub use review::*;
 pub use snapshot::*;
+pub use trace::*;
 
 /// ID of a deployment instance.
 pub type DeploymentId = Uuid;

@@ -1,8 +1,9 @@
-import { AlertTriangle, Coins, Loader2, Radio, Square } from "lucide-react";
+import { AlertTriangle, Coins, Loader2, Radio, Square, Waypoints } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api, streamEvents } from "../api";
 import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
+import { traceHash } from "../lib/routes";
 import type { EventRecord, RunningPass, UsageTotals } from "../types";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Kv, StatTile } from "./ui";
 
@@ -148,7 +149,11 @@ export function RunningCard({ running, onChanged }: { running: RunningPass[]; on
           <div key={pass.job_id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
             <span className="font-mono text-xs font-medium">{t("running.job", { id: `${pass.job_id.slice(0, 8)}…` })}</span>
             <span className="font-mono text-xs text-muted-foreground">{t("running.since", { time: pass.started_at.slice(11, 19) })}</span>
-            <Button size="sm" variant="outline" className="ml-auto" disabled={busy === pass.job_id} onClick={() => interrupt(pass.job_id)}>
+            <a className="ml-auto inline-flex h-8 items-center gap-1 rounded-md border border-input bg-background px-3 text-xs font-medium shadow-xs hover:bg-accent hover:text-accent-foreground [&_svg]:size-4" href={traceHash(pass.issue_id, pass.job_id)} title={t("records.trace.title")}>
+              <Waypoints />
+              {t("running.trace")}
+            </a>
+            <Button size="sm" variant="outline" disabled={busy === pass.job_id} onClick={() => interrupt(pass.job_id)}>
               <Square />
               {busy === pass.job_id ? t("running.interrupting") : t("running.interrupt")}
             </Button>

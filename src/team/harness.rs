@@ -38,7 +38,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::collector::PROBE_REGISTRY;
 use crate::domain::{
     ActionProposal, Artifact, ArtifactKind, Job, JobId, JobOutcome, JobResult, ModelUsage,
-    NamedValue, ProbeRequest, TeamCallback, TeamKind,
+    NamedValue, ProbeRequest, TeamCallback, TeamKind, TraceStep,
 };
 use crate::error::{AgentError, AgentResult};
 use crate::evidence::{EvidenceLimits, summarize_execution_record_with};
@@ -65,6 +65,41 @@ struct RunState {
     proposals: Vec<ActionProposal>,
 }
 
+/// What the run sends the Scheduler while it is still going.
+enum Interim {
+    /// A human-readable progress line, from the loop's steps or the model's `report_progress`.
+    Line(String),
+    /// One transcript entry, for the live trace.
+    Step(TraceStep),
+}
+
+/// The longest text a forwarded transcript entry carries; the stored transcript has it all.
+const STEP_TEXT_PREVIEW: usize = 4_000;
+
+/// Shortens every string inside a transcript item to a preview, reporting whether it did.
+fn preview(value: &mut Value, truncated: &mut bool) {
+    match value {
+        Value::String(text) => {
+            if text.chars().count() > STEP_TEXT_PREVIEW {
+                let cut: String = text.chars().take(STEP_TEXT_PREVIEW).collect();
+                *text = format!("{cut}…");
+                *truncated = true;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                preview(item, truncated);
+            }
+        }
+        Value::Object(fields) => {
+            for field in fields.values_mut() {
+                preview(field, truncated);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Turns the agent loop's steps into the progress lines the Scheduler already streams.
 ///
 /// This is the whole of "real-time progress" on the model side: a pass is a handful of slow
@@ -77,10 +112,26 @@ struct RunState {
 /// what comes next, so only the steps that tell an operator something they could not infer are
 /// forwarded.
 struct ProgressLines {
-    sender: mpsc::UnboundedSender<String>,
+    sender: mpsc::UnboundedSender<Interim>,
 }
 
 impl ProgressObserver for ProgressLines {
+    /// Forwards the entry as a [`TraceStep`], text cut to a preview. The stored transcript is
+    /// the record; this is the window onto it while it is being written.
+    fn observe_item(&self, index: usize, entry: &harness::TranscriptEntry) {
+        let Ok(mut item) = serde_json::to_value(&entry.item) else {
+            return;
+        };
+        let mut truncated = false;
+        preview(&mut item, &mut truncated);
+        let _ = self.sender.send(Interim::Step(TraceStep {
+            index,
+            at: entry.at,
+            item,
+            truncated,
+        }));
+    }
+
     fn observe(&self, progress: RunProgress) {
         let tokens = progress.usage.total_tokens();
         let line = match &progress.step {
@@ -126,7 +177,22 @@ impl ProgressObserver for ProgressLines {
             RunStep::TurnCompleted { .. } => return,
         };
         // A closed channel means the run is already over; progress is never worth an error.
-        let _ = self.sender.send(line);
+        let _ = self.sender.send(Interim::Line(line));
+    }
+}
+
+/// The callback one interim message becomes.
+fn interim_callback(job: &Job, interim: Interim) -> TeamCallback {
+    match interim {
+        Interim::Line(summary) => TeamCallback::new(job.issue_id, job.job_id, summary),
+        Interim::Step(step) => {
+            let kind = step.item["type"].as_str().unwrap_or("item");
+            let summary = match step.item.get("tool").and_then(Value::as_str) {
+                Some(tool) => format!("{kind} `{tool}` (#{})", step.index),
+                None => format!("{kind} (#{})", step.index),
+            };
+            TeamCallback::new(job.issue_id, job.job_id, summary).with_step(step)
+        }
     }
 }
 
@@ -323,7 +389,7 @@ impl HarnessOperateTeam {
         &self,
         job: &Job,
         fenced_view: Arc<String>,
-        progress: mpsc::UnboundedSender<String>,
+        progress: mpsc::UnboundedSender<Interim>,
         state: Arc<Mutex<RunState>>,
         offer_probe_requests: bool,
     ) -> AgentResult<ToolRegistry> {
@@ -566,7 +632,7 @@ impl HarnessOperateTeam {
                     async move {
                         let summary = non_empty(&arguments, "summary")?;
                         progress
-                            .send(summary)
+                            .send(Interim::Line(summary))
                             .map_err(|_| "the Scheduler no longer accepts progress".to_string())?;
                         Ok(json!({ "delivered": true }))
                     }
@@ -857,11 +923,13 @@ impl AgentTeamPort for HarnessOperateTeam {
         }
 
         // Drive the loop while forwarding progress as it happens, so interim callbacks reach the
-        // Scheduler in order and before the final result.
+        // Scheduler in order and before the final result. Delivery runs alongside the loop, not
+        // inside it: writing an event must never hold the model call back, and a step is a
+        // window onto the run, not a gate on it.
         let observer = ProgressLines {
             sender: progress_tx_for_steps,
         };
-        let mut agent_run = pin!(run_agent_observed(
+        let mut agent_run = Box::pin(run_agent_observed(
             self.client.as_ref(),
             &registry,
             &self.config,
@@ -870,22 +938,30 @@ impl AgentTeamPort for HarnessOperateTeam {
             harness_token,
             Some(&observer),
         ));
-        let report = loop {
-            tokio::select! {
-                finished = &mut agent_run => break finished.map_err(harness_error)?,
-                delivered = progress_rx.recv() => {
-                    if let Some(summary) = delivered {
-                        sink.deliver(TeamCallback::new(job.issue_id, job.job_id, summary))
-                            .await?;
-                    }
-                }
+        let drain = async {
+            while let Some(interim) = progress_rx.recv().await {
+                sink.deliver(interim_callback(job, interim)).await?;
+            }
+            Ok::<(), AgentError>(())
+        };
+        let mut drain = pin!(drain);
+        let finished = tokio::select! {
+            finished = &mut agent_run => finished,
+            drained = &mut drain => {
+                // Only a failed delivery ends the drain while the run is going (the registry
+                // holds a sender until the run is over).
+                drained?;
+                (&mut agent_run).await
             }
         };
         bridge.abort();
-        while let Ok(summary) = progress_rx.try_recv() {
-            sink.deliver(TeamCallback::new(job.issue_id, job.job_id, summary))
-                .await?;
-        }
+        // Let go of every sender, so the drain sees the end of the stream and delivers whatever
+        // is still queued — in order, and before the final result below.
+        drop(agent_run);
+        drop(registry);
+        drop(observer);
+        drain.await?;
+        let report = finished.map_err(harness_error)?;
 
         let transcript_artifact = self.store_transcript(job, &report.transcript).await?;
 

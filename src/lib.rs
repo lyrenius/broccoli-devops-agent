@@ -19,6 +19,7 @@ pub mod policy;
 pub mod ports;
 pub mod runner;
 pub mod scheduler;
+pub mod session;
 pub mod store;
 pub mod team;
 pub mod topology;

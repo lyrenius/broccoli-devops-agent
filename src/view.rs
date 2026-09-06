@@ -58,6 +58,37 @@ impl FileArtifactStore {
         })
     }
 
+    /// Writes a body for an Artifact record that already exists elsewhere — a session import —
+    /// under this store's root, keeping the record's ID and hash and re-pointing its `uri`.
+    ///
+    /// The bytes must hash to what the record says; a body that does not match is refused
+    /// before anything is written.
+    pub fn restore(&self, artifact: &Artifact, bytes: &[u8]) -> AgentResult<Artifact> {
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        if hash != artifact.content_sha256 || bytes.len() as u64 != artifact.size_bytes {
+            return Err(AgentError::InvalidInput(format!(
+                "artifact `{}` body does not match its record: recorded {} ({} bytes), got {hash} ({} bytes)",
+                artifact.artifact_id,
+                artifact.content_sha256,
+                artifact.size_bytes,
+                bytes.len()
+            )));
+        }
+        std::fs::create_dir_all(&self.root).map_err(|source| AgentError::Io {
+            context: format!("creating `{}`", self.root.display()),
+            source,
+        })?;
+        let path = self.root.join(format!("{}.json", artifact.artifact_id));
+        std::fs::write(&path, bytes).map_err(|source| AgentError::Io {
+            context: format!("writing `{}`", path.display()),
+            source,
+        })?;
+        Ok(Artifact {
+            uri: path.display().to_string(),
+            ..artifact.clone()
+        })
+    }
+
     /// Reads an artifact body back and verifies it against the recorded hash.
     pub fn read_verified(&self, artifact: &Artifact) -> AgentResult<Vec<u8>> {
         let bytes = std::fs::read(&artifact.uri).map_err(|source| AgentError::Io {

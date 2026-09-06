@@ -1,4 +1,4 @@
-import type { ActionRun, EventRecord, Inbox, Issue, Job, PassOutcome, ReviewOutcome, Snapshot, Status, UsageTotals } from "./types";
+import type { ActionRun, EventRecord, ImportSummary, Inbox, Issue, Job, PassOutcome, ReviewOutcome, SessionBundle, Snapshot, Status, UsageTotals } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -44,7 +44,19 @@ export const api = {
   usage: () => request<UsageTotals>("/api/usage"),
   /** Asks a running pass to stop; the Team still delivers a final result and keeps its transcript. */
   cancelJob: (id: string, by: string) => post<{ job_id: string }>(`/api/jobs/${id}/cancel`, { by }),
-  events: (limit: number) => request<EventRecord[]>(`/api/events?limit=${limit}`),
+  events: (limit: number, filter?: { issue_id?: string; job_id?: string; after?: number }) => {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (filter?.issue_id) query.set("issue_id", filter.issue_id);
+    if (filter?.job_id) query.set("job_id", filter.job_id);
+    if (filter?.after !== undefined) query.set("after", String(filter.after));
+    return request<EventRecord[]>(`/api/events?${query}`);
+  },
+  /** The Issue with its whole pass chain — passes, actions, Snapshots, transcripts, events. */
+  session: (issueId: string) => request<SessionBundle>(`/api/issues/${issueId}/session`),
+  /** The same document as a file download, with the operator recorded as the exporter. */
+  sessionDownloadUrl: (issueId: string, by: string) => `/api/issues/${issueId}/session?download=true&by=${encodeURIComponent(by)}`,
+  /** Loads a session file as a read-only archive. */
+  importSession: (bundle: SessionBundle, by: string) => post<ImportSummary>(`/api/sessions/import?by=${encodeURIComponent(by)}`, bundle),
   transition: (name: "freeze-dispatch" | "freeze-all" | "resume") => post<{ mode: string }>(`/api/scheduler/${name}`),
   report: (body: { title: string; description: string; reporter: string; priority?: string }) =>
     post<{ issue: Issue; job: Job; actions: ActionRun[]; passes: PassOutcome[] }>("/api/reports", body),

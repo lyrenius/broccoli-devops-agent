@@ -13,6 +13,7 @@
 //! Jobs and actions wait for a review, and a review can send the item back upstream as a revising
 //! Job that carries the human's feedback.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,14 @@ use crate::ports::{
     SnapshotViewBuildRequest, SnapshotViewBuilderPort, StateStore, TriageDecision, TriageRequest,
 };
 use crate::tr;
+
+/// The refusal every control decision gives an imported archive.
+fn archived(issue_id: IssueId) -> AgentError {
+    AgentError::InvalidInput(tr!(
+        format!("Issue `{issue_id}` is an imported archive and is read-only"),
+        format!("问题 `{issue_id}` 是导入的归档记录，只读")
+    ))
+}
 
 /// Whether the Top Scheduler currently permits dispatch or execution work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,7 +340,7 @@ impl TopScheduler {
 
         let request = TriageRequest {
             candidate: candidate.clone(),
-            open_issues: self.store.list_unfinished_issues().await?,
+            open_issues: self.live_unfinished().await?.0,
         };
         let decision = policy.triage_candidate(&request).await?;
         self.record_policy_consultation("triage_candidate", &request, &decision, None, None)
@@ -406,6 +415,9 @@ impl TopScheduler {
         self.ensure_dispatch_allowed("dispatch_job").await?;
         let view_builder = self.require_view_builder("dispatch_job")?;
         let issue = self.store.get_issue(issue_id).await?;
+        if issue.is_archived() {
+            return Err(archived(issue_id));
+        }
         let snapshot = self.store.get_snapshot(snapshot_id).await?;
         if let Some(revised) = brief.revises_job_id {
             let previous = self.store.get_job(revised).await?;
@@ -584,6 +596,21 @@ impl TopScheduler {
                 "Job `{}` is already `{:?}` and accepts no further callbacks",
                 job.job_id, job.status
             )));
+        }
+
+        // A forwarded transcript entry is a fact about the running pass, not a message to the
+        // Scheduler: it is logged for the live trace and changes nothing.
+        if let (Some(step), None) = (&callback.step, &callback.final_result) {
+            self.store
+                .append_event(
+                    NewEvent::new("agent-team", "team.step", callback.summary.clone())
+                        .with_issue(callback.issue_id)
+                        .with_job(callback.job_id)
+                        .with_payload(json!({ "step": step }))
+                        .with_trust(ContentTrust::Mixed),
+                )
+                .await?;
+            return Ok(job);
         }
 
         let payload = serde_json::to_value(&callback)?;
@@ -1136,6 +1163,7 @@ impl TopScheduler {
     ) -> AgentResult<ActionRun> {
         let approved_by = approved_by.into();
         let action = self.store.get_action_run(action_run_id).await?;
+        self.ensure_not_archived(action.issue_id).await?;
         let mut next = action.clone();
         next.approve(approved_by.clone())?;
         self.store
@@ -1174,6 +1202,7 @@ impl TopScheduler {
     ) -> AgentResult<ActionRun> {
         let rejected_by = rejected_by.into();
         let action = self.store.get_action_run(action_run_id).await?;
+        self.ensure_not_archived(action.issue_id).await?;
         let denial = Denial::by_human(rejected_by.clone(), comment);
         let mut next = action.clone();
         next.deny(denial.clone())?;
@@ -1218,6 +1247,7 @@ impl TopScheduler {
         review: HumanReview,
     ) -> AgentResult<ActionRun> {
         let action = self.store.get_action_run(action_run_id).await?;
+        self.ensure_not_archived(action.issue_id).await?;
         let mut next = action.clone();
         next.record_review(review.clone())?;
         self.store
@@ -1237,6 +1267,7 @@ impl TopScheduler {
     /// Records a human's review of a failed Job, taking it out of the Failed Job inbox.
     pub async fn review_job(&self, job_id: JobId, review: HumanReview) -> AgentResult<Job> {
         let job = self.store.get_job(job_id).await?;
+        self.ensure_not_archived(job.issue_id).await?;
         let mut next = job.clone();
         next.record_review(review.clone())?;
         self.store.update_job_if(&job, next.clone()).await?;
@@ -1626,6 +1657,9 @@ impl TopScheduler {
     ) -> AgentResult<Issue> {
         let closed_by = closed_by.into();
         let issue = self.store.get_issue(issue_id).await?;
+        if issue.is_archived() {
+            return Err(archived(issue_id));
+        }
         let mut next = issue.clone();
         next.transition_to(closure.status())?;
         self.store.update_issue_if(&issue, next.clone()).await?;
@@ -1744,9 +1778,7 @@ impl TopScheduler {
         let (previous_mode, pending_recovery_review) = self.persisted_mode().await?;
         self.set_mode(SchedulerMode::Recovering).await?;
 
-        let issues = self.store.list_unfinished_issues().await?;
-        let jobs = self.store.list_unfinished_jobs().await?;
-        let actions = self.store.list_unfinished_action_runs().await?;
+        let (issues, jobs, actions) = self.live_unfinished().await?;
         let mut summary = RecoverySummary {
             previous_mode,
             pending_recovery_review,
@@ -2065,6 +2097,56 @@ impl TopScheduler {
     ///
     /// Model output is data, not authority, so the event carries mixed trust; post-contest review
     /// replays these records to audit every model-influenced decision.
+    /// IDs of the Issues that are imported archives; see [`Issue::is_archived`].
+    pub async fn archived_issue_ids(&self) -> AgentResult<HashSet<IssueId>> {
+        Ok(self
+            .store
+            .list_issues()
+            .await?
+            .into_iter()
+            .filter(Issue::is_archived)
+            .map(|issue| issue.issue_id)
+            .collect())
+    }
+
+    /// Refuses a control decision on an imported archive.
+    async fn ensure_not_archived(&self, issue_id: IssueId) -> AgentResult<()> {
+        if self.store.get_issue(issue_id).await?.is_archived() {
+            return Err(archived(issue_id));
+        }
+        Ok(())
+    }
+
+    /// The unfinished Issues, Jobs, and ActionRuns that belong to this controller.
+    ///
+    /// An imported archive may well hold a Job that was still running when it was exported;
+    /// that is history, not work, so recovery and triage never see it.
+    async fn live_unfinished(&self) -> AgentResult<(Vec<Issue>, Vec<Job>, Vec<ActionRun>)> {
+        let archived = self.archived_issue_ids().await?;
+        let issues = self
+            .store
+            .list_unfinished_issues()
+            .await?
+            .into_iter()
+            .filter(|issue| !archived.contains(&issue.issue_id))
+            .collect();
+        let jobs = self
+            .store
+            .list_unfinished_jobs()
+            .await?
+            .into_iter()
+            .filter(|job| !archived.contains(&job.issue_id))
+            .collect();
+        let actions = self
+            .store
+            .list_unfinished_action_runs()
+            .await?
+            .into_iter()
+            .filter(|action| !archived.contains(&action.issue_id))
+            .collect();
+        Ok((issues, jobs, actions))
+    }
+
     async fn record_policy_consultation<Req, Dec>(
         &self,
         decision_point: &'static str,

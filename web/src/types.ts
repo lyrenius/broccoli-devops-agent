@@ -116,13 +116,27 @@ export interface Snapshot {
   coverage_gaps: CoverageGap[];
 }
 
+/** Where an imported Issue came from; present only on read-only archives. */
+export interface SessionProvenance {
+  source_deployment: string;
+  source_agent_version: string;
+  exported_at: string;
+  exported_by: string;
+  imported_at: string;
+  imported_by: string;
+}
+
 export interface Issue {
   issue_id: string;
+  source: string;
   title: string;
   description: string;
   priority: string;
   status: string;
   created_at: string;
+  updated_at: string;
+  affected_resource_ids: string[];
+  provenance?: SessionProvenance | null;
 }
 
 export interface ActionProposal {
@@ -185,6 +199,8 @@ export interface Job {
   team_kind: string;
   status: string;
   created_at: string;
+  snapshot_view: { snapshot_id: string; artifact_id: string; content_sha256: string };
+  usage?: ModelUsage | null;
   feedback: HumanFeedback[];
   revises_job_id: string | null;
   supersedes_job_id?: string | null;
@@ -241,6 +257,7 @@ export interface ReviewOutcome<T> {
 
 export interface EventRecord {
   sequence: number;
+  event_id: string;
   occurred_at: string;
   actor: string;
   kind: string;
@@ -248,5 +265,114 @@ export interface EventRecord {
   issue_id: string | null;
   job_id: string | null;
   action_run_id: string | null;
+  artifact_ids: string[];
   trust: string;
+  /** Event-specific body; `team.step` carries `{ step: TraceStep }`, `model.usage` a ModelUsage. */
+  payload?: unknown;
+}
+
+/* ---- Transcripts and traces (the harness's replay record, and the live window onto it) ---- */
+
+export type Trust = "trusted" | "untrusted" | "mixed";
+
+/** One item of a pass's conversation, as the harness transcript serializes it. */
+export type TranscriptItem =
+  | { type: "user_input"; text: string; trust: Trust }
+  | { type: "assistant_text"; text: string }
+  | { type: "notice"; text: string }
+  | { type: "tool_call"; call_id: string; tool: string; arguments: unknown }
+  | { type: "tool_output"; call_id: string; tool: string; output: unknown; is_error: boolean; trust: Trust };
+
+export interface TranscriptEntry {
+  at: string;
+  item: TranscriptItem;
+}
+
+export interface Usage {
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  requests: number;
+  requests_without_usage: number;
+}
+
+/** One model request of a pass: timing, cost, retries, and what was on offer. */
+export interface TurnRecord {
+  turn: number;
+  started_at: string;
+  finished_at: string;
+  first_entry: number;
+  usage: Usage;
+  retries: number;
+  wrap_up: boolean;
+  offered_tools: string[];
+}
+
+/** The stored transcript of one pass (a DiagnosticBundle artifact). */
+export interface Transcript {
+  instructions: string;
+  entries: TranscriptEntry[];
+  turns?: TurnRecord[];
+}
+
+/** One transcript entry forwarded while the pass runs (`team.step` event payload). */
+export interface TraceStep {
+  index: number;
+  at: string;
+  item: TranscriptItem;
+  truncated: boolean;
+}
+
+export interface ModelUsage extends Usage {
+  model: string;
+}
+
+/* ---- Session files ---- */
+
+export interface Artifact {
+  artifact_id: string;
+  kind: string;
+  produced_by_job_id: string | null;
+  produced_by_action_run_id: string | null;
+  uri: string;
+  content_sha256: string;
+  size_bytes: number;
+  created_at: string;
+}
+
+export type ArtifactBody = { encoding: "json"; content: unknown } | { encoding: "base64"; content: string };
+
+export interface SessionArtifact {
+  artifact: Artifact;
+  body: ArtifactBody;
+}
+
+/** An Issue with its whole pass chain, as `/api/issues/{id}/session` serves it and the Export button saves it. */
+export interface SessionBundle {
+  format: string;
+  version: number;
+  exported_at: string;
+  exported_by: string;
+  deployment: string;
+  agent_version: string;
+  language: string;
+  issue: Issue;
+  jobs: Job[];
+  action_runs: ActionRun[];
+  snapshots: Snapshot[];
+  artifacts: SessionArtifact[];
+  events: EventRecord[];
+}
+
+export interface ImportSummary {
+  issue_id: string;
+  title: string;
+  source_deployment: string;
+  exported_at: string;
+  exported_by: string;
+  jobs: number;
+  action_runs: number;
+  snapshots: number;
+  artifacts: number;
+  events: number;
 }

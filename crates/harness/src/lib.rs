@@ -46,6 +46,6 @@ pub use agent::{
     RunProgress, RunStep, cancel_pair, run_agent, run_agent_observed,
 };
 pub use client::{AssistantItem, ModelClient, ModelRequest, ModelTurn, Usage};
-pub use conversation::{Item, Transcript, Trust, fence_untrusted};
+pub use conversation::{Item, Transcript, TranscriptEntry, Trust, TurnRecord, fence_untrusted};
 pub use error::{HarnessError, HarnessResult};
 pub use tool::{Tool, ToolHandler, ToolRegistry, ToolResult, ToolSpec, tool_fn};

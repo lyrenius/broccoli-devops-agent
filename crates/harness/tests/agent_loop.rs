@@ -2,12 +2,13 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use broccoli_agent_harness::testing::{ScriptedModelClient, call, text};
 use broccoli_agent_harness::{
     AgentConfig, AgentOutcome, HarnessError, Item, ProgressObserver, RunProgress, RunStep,
-    ToolRegistry, ToolSpec, Transcript, Trust, Usage, cancel_pair, run_agent, run_agent_observed,
-    tool_fn,
+    ToolRegistry, ToolSpec, Transcript, TranscriptEntry, Trust, Usage, cancel_pair, run_agent,
+    run_agent_observed, tool_fn,
 };
 use serde_json::json;
 
@@ -660,4 +661,90 @@ async fn progress_is_observed_step_by_step() {
     let last = steps.last().unwrap();
     assert_eq!(last.usage.total_tokens(), 330);
     assert_eq!(last.usage, report.usage);
+}
+
+/// The observer sees every transcript entry as it is appended — inputs included — and the
+/// stored transcript records each model request's timing, cost, retries, and offered tools.
+#[tokio::test]
+async fn every_entry_is_observed_and_every_turn_is_recorded() {
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<(usize, TranscriptEntry)>>);
+    impl ProgressObserver for Recorder {
+        fn observe(&self, _progress: RunProgress) {}
+        fn observe_item(&self, index: usize, entry: &TranscriptEntry) {
+            self.0.lock().unwrap().push((index, entry.clone()));
+        }
+    }
+
+    let counter = Arc::new(AtomicU32::new(0));
+    let client = ScriptedModelClient::new(vec![
+        vec![call("c1", "add", json!({"a": 2, "b": 3}))],
+        vec![
+            text("adding up"),
+            call("c2", "finish", json!({"answer": "5"})),
+        ],
+    ])
+    .with_usage_per_turn(Usage::reported(100, 10, 20))
+    .with_transient_failures(1);
+    let (_handle, token) = cancel_pair();
+    let recorder = Recorder::default();
+
+    let report = run_agent_observed(
+        &client,
+        &registry(counter),
+        &AgentConfig {
+            retry_backoff: Duration::from_millis(1),
+            ..AgentConfig::default()
+        },
+        "Add the numbers, then finish.",
+        vec![Item::UserInput {
+            text: "2 + 3".into(),
+            trust: Trust::Trusted,
+        }],
+        token,
+        Some(&recorder),
+    )
+    .await
+    .unwrap();
+
+    // Observed entries are the transcript, entry for entry and index for index.
+    let observed = recorder.0.lock().unwrap().clone();
+    assert_eq!(observed.len(), report.transcript.entries.len());
+    for (position, (index, entry)) in observed.iter().enumerate() {
+        assert_eq!(*index, position);
+        assert_eq!(entry, &report.transcript.entries[position]);
+    }
+    assert!(
+        matches!(&observed[0].1.item, Item::UserInput { text, .. } if text == "2 + 3"),
+        "the inputs are observed first"
+    );
+
+    // Two model requests, each with its own usage, the first answered after one retry.
+    let turns = &report.transcript.turns;
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].turn, 1);
+    assert_eq!(turns[0].retries, 1, "the transient failure was retried");
+    assert_eq!(turns[1].retries, 0);
+    assert_eq!(turns[0].usage, Usage::reported(100, 10, 20));
+    assert!(turns[0].finished_at >= turns[0].started_at);
+    assert_eq!(
+        turns[0].first_entry, 1,
+        "the first turn's items follow the input"
+    );
+    assert!(turns[1].first_entry > turns[0].first_entry);
+    assert!(
+        matches!(&report.transcript.entries[turns[1].first_entry].item, Item::AssistantText { text } if text == "adding up"),
+        "first_entry points at the turn's first item"
+    );
+    assert!(turns.iter().all(|turn| !turn.wrap_up));
+    assert!(turns[0].offered_tools.contains(&"add".to_string()));
+    assert!(turns[0].offered_tools.contains(&"finish".to_string()));
+
+    // The turn records survive the round trip through JSON, and an old transcript without
+    // them still loads.
+    let json = serde_json::to_string(&report.transcript).unwrap();
+    let back: Transcript = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, report.transcript);
+    let old: Transcript = serde_json::from_str(r#"{"instructions":"x","entries":[]}"#).unwrap();
+    assert!(old.turns.is_empty());
 }

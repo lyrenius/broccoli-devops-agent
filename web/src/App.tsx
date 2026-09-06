@@ -8,27 +8,34 @@ import { Inbox } from "./components/Inbox";
 import { Records } from "./components/Records";
 import { Events } from "./components/Events";
 import { Report } from "./components/Report";
+import { Trace } from "./components/Trace";
 
 const TABS: Tab[] = ["overview", "inbox", "records", "events", "report"];
 
-function tabFromHash(): Tab {
+/** Where the console is: a tab, or the trace of one Issue (optionally opened on one pass). */
+type Route = { tab: Tab } | { tab: "records"; trace: { issueId: string; jobId?: string } };
+
+function routeFromHash(): Route {
   const hash = window.location.hash.replace("#", "");
-  return (TABS as string[]).includes(hash) ? (hash as Tab) : "overview";
+  const trace = /^trace\/([0-9a-f-]{36})(?:\/([0-9a-f-]{36}))?$/i.exec(hash);
+  if (trace) return { tab: "records", trace: { issueId: trace[1], jobId: trace[2] } };
+  return { tab: (TABS as string[]).includes(hash) ? (hash as Tab) : "overview" };
 }
 
 export default function App() {
-  const [tab, setTabState] = useState<Tab>(tabFromHash);
+  const [route, setRoute] = useState<Route>(routeFromHash);
+  const tab = route.tab;
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
   const setTab = (next: Tab) => {
     window.location.hash = next;
-    setTabState(next);
+    setRoute({ tab: next });
   };
 
   useEffect(() => {
-    const onHash = () => setTabState(tabFromHash());
+    const onHash = () => setRoute(routeFromHash());
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
@@ -54,7 +61,8 @@ export default function App() {
       <Shell tab={tab} onTab={setTab} status={status} error={error} onChanged={refresh}>
         {tab === "overview" && <Overview tick={tick} status={status} onChanged={refresh} />}
         {tab === "inbox" && <Inbox tick={tick} status={status} onChanged={refresh} />}
-        {tab === "records" && <Records tick={tick} onChanged={refresh} />}
+        {tab === "records" && !("trace" in route) && <Records tick={tick} onChanged={refresh} />}
+        {"trace" in route && <Trace key={route.trace.issueId} issueId={route.trace.issueId} jobId={route.trace.jobId} tick={tick} />}
         {tab === "events" && <Events />}
         {tab === "report" && <Report onChanged={refresh} />}
       </Shell>

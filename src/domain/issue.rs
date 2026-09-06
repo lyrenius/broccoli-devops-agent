@@ -200,6 +200,28 @@ impl IssueCandidate {
     }
 }
 
+/// Where an imported Issue came from.
+///
+/// An Issue carrying this record is an archive: it was exported from another controller (or an
+/// earlier run of this one) and loaded here to be read. Every control decision — dispatch,
+/// approval, review, closure, recovery, spend — ignores archived Issues; they exist to be looked
+/// at, exactly as they were.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionProvenance {
+    /// Deployment the session was exported from, by name.
+    pub source_deployment: String,
+    /// Version of the agent that exported it.
+    pub source_agent_version: String,
+    /// When it was exported.
+    pub exported_at: DateTime<Utc>,
+    /// Who exported it.
+    pub exported_by: String,
+    /// When it was imported here.
+    pub imported_at: DateTime<Utc>,
+    /// Who imported it.
+    pub imported_by: String,
+}
+
 /// A problem formally tracked by the Top Scheduler.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
@@ -231,9 +253,17 @@ pub struct Issue {
     pub created_at: DateTime<Utc>,
     /// Time at which the Issue was last updated.
     pub updated_at: DateTime<Utc>,
+    /// Present when the Issue was imported from a session file; see [`SessionProvenance`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SessionProvenance>,
 }
 
 impl Issue {
+    /// Whether the Issue is an imported archive that no control decision may touch.
+    pub fn is_archived(&self) -> bool {
+        self.provenance.is_some()
+    }
+
     /// Converts a Human Report into a formal Issue that defaults to the highest priority.
     ///
     /// `source_event_id` must reference a human-report event already written to the EventLog. The
@@ -261,6 +291,7 @@ impl Issue {
             development_workspace: None,
             created_at: now,
             updated_at: now,
+            provenance: None,
         }
     }
 
@@ -285,6 +316,7 @@ impl Issue {
             development_workspace: None,
             created_at: now,
             updated_at: now,
+            provenance: None,
         }
     }
 

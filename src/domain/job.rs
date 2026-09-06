@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     ActionRunId, ActionStatus, ApprovalState, ArtifactId, EventId, HumanFeedback, HumanReview,
-    IssueId, JobId, NamedValue, ResourceId, SnapshotViewRef, VerificationEvidence,
+    IssueId, JobId, NamedValue, ResourceId, SnapshotViewRef, TraceStep, VerificationEvidence,
 };
 use crate::error::{AgentError, AgentResult};
 
@@ -368,6 +368,11 @@ pub struct TeamCallback {
     /// What the pass spent, present on the callback that ends a model-backed pass.
     #[serde(default)]
     pub usage: Option<ModelUsage>,
+    /// One transcript entry of the running pass, on a progress callback that forwards it for a
+    /// live trace. Such a callback changes nothing; the Scheduler records it as a `team.step`
+    /// event rather than as a progress line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<TraceStep>,
     /// Time at which the callback was created.
     pub created_at: DateTime<Utc>,
 }
@@ -387,8 +392,15 @@ impl TeamCallback {
             artifact_ids: Vec::new(),
             final_result: None,
             usage: None,
+            step: None,
             created_at: Utc::now(),
         }
+    }
+
+    /// Forwards one transcript entry of the running pass for a live trace.
+    pub fn with_step(mut self, step: TraceStep) -> Self {
+        self.step = Some(step);
+        self
     }
 
     /// Sets the final result that ends the current Job stage.

@@ -12,7 +12,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -31,6 +31,7 @@ use crate::error::AgentError;
 use crate::ports::StateStore;
 use crate::runner::{InboxDecision, SliceRunner};
 use crate::scheduler::{IssueClosure, RecoverySummary};
+use crate::session::SessionBundle;
 
 /// Shared state behind every route.
 pub struct ApiState {
@@ -112,6 +113,8 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/snapshots/latest", get(latest_snapshot))
         .route("/api/issues", get(issues))
         .route("/api/issues/{id}/close", post(close_issue))
+        .route("/api/issues/{id}/session", get(export_session))
+        .route("/api/sessions/import", post(import_session))
         .route("/api/jobs", get(jobs))
         .route("/api/jobs/{id}/review", post(review_job))
         .route("/api/jobs/{id}/cancel", post(cancel_job))
@@ -127,6 +130,9 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/artifacts/{id}", get(artifact))
         .route("/api/artifacts/{id}/body", get(artifact_body))
         .route("/api/scheduler/{transition}", post(scheduler_transition))
+        // A session file carries every transcript of an Issue; the default 2 MB would refuse a
+        // long investigation.
+        .layer(DefaultBodyLimit::max(256 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .layer(cors)
         .with_state(state)
@@ -444,6 +450,10 @@ struct EventsQuery {
     after: u64,
     /// Return at most this many of the newest matching events.
     limit: Option<usize>,
+    /// Return only events bound to this Issue.
+    issue_id: Option<Uuid>,
+    /// Return only events bound to this Job.
+    job_id: Option<Uuid>,
 }
 
 async fn events(
@@ -454,6 +464,8 @@ async fn events(
     let mut selected: Vec<_> = events
         .into_iter()
         .filter(|event| event.sequence > query.after)
+        .filter(|event| query.issue_id.is_none_or(|id| event.issue_id == Some(id)))
+        .filter(|event| query.job_id.is_none_or(|id| event.job_id == Some(id)))
         .collect();
     if let Some(limit) = query.limit {
         let skip = selected.len().saturating_sub(limit);
@@ -505,6 +517,50 @@ async fn events_stream(
         }))
     });
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+}
+
+/// Who is asking, and whether the answer is a download.
+#[derive(Debug, Deserialize)]
+struct SessionQuery {
+    /// Operator name recorded as the exporter or importer; defaults to `console`.
+    by: Option<String>,
+    /// Serve the session as a file attachment rather than as an API response.
+    #[serde(default)]
+    download: bool,
+}
+
+/// The Issue with its whole pass chain as one document — what the trace page reads, and what
+/// the Export button saves.
+async fn export_session(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Response, ApiError> {
+    let by = query.by.as_deref().unwrap_or("console");
+    let bundle = state.runner.export_session(id, by).await?;
+    let body = serde_json::to_vec_pretty(&bundle)?;
+    let mut response = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
+    if query.download {
+        let disposition = format!("attachment; filename=\"session-{id}.json\"");
+        if let Ok(value) = disposition.parse() {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_DISPOSITION, value);
+        }
+    }
+    Ok(response)
+}
+
+/// Loads a session file as a read-only archive.
+async fn import_session(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<SessionQuery>,
+    Json(bundle): Json<SessionBundle>,
+) -> ApiResult<Value> {
+    let by = query.by.as_deref().unwrap_or("console");
+    Ok(Json(serde_json::to_value(
+        state.runner.import_session(bundle, by).await?,
+    )?))
 }
 
 async fn artifact(State(state): State<Arc<ApiState>>, Path(id): Path<Uuid>) -> ApiResult<Value> {

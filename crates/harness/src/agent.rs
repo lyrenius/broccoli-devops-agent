@@ -2,10 +2,11 @@
 
 use std::time::Duration;
 
+use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::client::{AssistantItem, ModelClient, ModelRequest, Usage};
-use crate::conversation::{Item, Transcript, Trust};
+use crate::conversation::{Item, Transcript, TranscriptEntry, Trust, TurnRecord};
 use crate::error::{HarnessError, HarnessResult};
 use crate::tool::{ToolRegistry, ToolSpec};
 
@@ -174,6 +175,15 @@ pub struct RunProgress {
 pub trait ProgressObserver: Send + Sync {
     /// Handles one progress step.
     fn observe(&self, progress: RunProgress);
+
+    /// Sees every transcript entry the moment it is appended, with its index in the transcript.
+    ///
+    /// The initial items are observed too, so a live trace can show the run from its inputs on
+    /// and end up equal to the stored transcript entry for entry. The default does nothing;
+    /// observers that only count steps need not care.
+    fn observe_item(&self, index: usize, entry: &TranscriptEntry) {
+        let _ = (index, entry);
+    }
 }
 
 /// How one agent run ended.
@@ -266,8 +276,19 @@ pub async fn run_agent_observed(
     progress: Option<&dyn ProgressObserver>,
 ) -> HarnessResult<AgentRunReport> {
     let mut transcript = Transcript::new(instructions);
+    // Every item goes through here, so the observer sees the transcript grow exactly as it is
+    // written — including the inputs, so a live view starts where the stored one does.
+    macro_rules! append {
+        ($item:expr) => {{
+            transcript.push($item);
+            if let Some(observer) = progress {
+                let index = transcript.entries.len() - 1;
+                observer.observe_item(index, &transcript.entries[index]);
+            }
+        }};
+    }
     for item in initial_items {
-        transcript.push(item);
+        append!(item);
     }
     let all_specs = registry.specs();
     let terminal_specs: Vec<ToolSpec> = all_specs
@@ -358,7 +379,7 @@ pub async fn run_agent_observed(
             report!(RunStep::WrappingUp {
                 reason: reason.clone(),
             });
-            transcript.push(Item::Notice {
+            append!(Item::Notice {
                 text: format!(
                     "{reason}. This is a wrap-up turn: only the terminal tool(s) {terminal_names} \
                      are available now. Call one immediately with your best conclusion from the \
@@ -370,15 +391,19 @@ pub async fn run_agent_observed(
         report!(RunStep::TurnStarted);
 
         let items = transcript.items();
+        let offered = if wrapping_up {
+            &terminal_specs
+        } else {
+            &all_specs
+        };
         let request = ModelRequest {
             instructions,
             items: &items,
-            tools: if wrapping_up {
-                &terminal_specs
-            } else {
-                &all_specs
-            },
+            tools: offered,
         };
+        let turn_started_at = Utc::now();
+        let retries_before = model_retries;
+        let first_entry = transcript.entries.len();
         // Cancellation may arrive while the backend is thinking or while a retry waits; racing
         // keeps the loop honest about "cooperative" instead of waiting out a slow model call.
         let turn = loop {
@@ -413,6 +438,16 @@ pub async fn run_agent_observed(
         };
         // The turn is billed whether or not it was usable, so the counters take it first.
         usage += turn.usage;
+        transcript.record_turn(TurnRecord {
+            turn: model_turns,
+            started_at: turn_started_at,
+            finished_at: Utc::now(),
+            first_entry,
+            usage: turn.usage,
+            retries: model_retries - retries_before,
+            wrap_up: wrapping_up,
+            offered_tools: offered.iter().map(|spec| spec.name.clone()).collect(),
+        });
         if turn.items.is_empty() {
             return Err(HarnessError::Model(
                 "the backend returned an empty turn".into(),
@@ -424,7 +459,7 @@ pub async fn run_agent_observed(
         for item in turn.items {
             match item {
                 AssistantItem::Text { text } => {
-                    transcript.push(Item::AssistantText { text: text.clone() });
+                    append!(Item::AssistantText { text: text.clone() });
                     texts.push(text);
                 }
                 AssistantItem::ToolCall {
@@ -432,7 +467,7 @@ pub async fn run_agent_observed(
                     tool,
                     arguments,
                 } => {
-                    transcript.push(Item::ToolCall {
+                    append!(Item::ToolCall {
                         call_id: call_id.clone(),
                         tool: tool.clone(),
                         arguments: arguments.clone(),
@@ -455,15 +490,17 @@ pub async fn run_agent_observed(
             if cancel.is_cancelled() {
                 finish!(AgentOutcome::Cancelled);
             }
-            let refuse = |transcript: &mut Transcript, message: String| {
-                transcript.push(Item::ToolOutput {
-                    call_id: call_id.clone(),
-                    tool: tool_name.clone(),
-                    output: json!({ "error": message }),
-                    is_error: true,
-                    trust: Trust::Trusted,
-                });
-            };
+            macro_rules! refuse {
+                ($message:expr) => {
+                    append!(Item::ToolOutput {
+                        call_id: call_id.clone(),
+                        tool: tool_name.clone(),
+                        output: json!({ "error": $message }),
+                        is_error: true,
+                        trust: Trust::Trusted,
+                    })
+                };
+            }
             report!(RunStep::ToolStarted {
                 tool: tool_name.clone(),
             });
@@ -477,13 +514,10 @@ pub async fn run_agent_observed(
             }
             let tool = registry.get(&tool_name);
             if wrapping_up && !tool.is_some_and(|tool| tool.spec.terminal) {
-                refuse(
-                    &mut transcript,
-                    format!(
-                        "refused: the run is wrapping up and only the terminal tool(s) \
-                         {terminal_names} may be called"
-                    ),
-                );
+                refuse!(format!(
+                    "refused: the run is wrapping up and only the terminal tool(s) \
+                     {terminal_names} may be called"
+                ));
                 finished!(true);
                 continue;
             }
@@ -494,24 +528,20 @@ pub async fn run_agent_observed(
                     "tool-call budget ({}) exhausted",
                     config.max_tool_calls
                 ));
-                refuse(
-                    &mut transcript,
-                    format!(
-                        "refused: the tool-call budget ({}) is exhausted; call one of the terminal \
-                         tool(s) {terminal_names} to conclude",
-                        config.max_tool_calls
-                    ),
-                );
+                refuse!(format!(
+                    "refused: the tool-call budget ({}) is exhausted; call one of the terminal \
+                     tool(s) {terminal_names} to conclude",
+                    config.max_tool_calls
+                ));
                 finished!(true);
                 continue;
             }
             tool_calls += 1;
 
             let Some(tool) = tool else {
-                refuse(
-                    &mut transcript,
-                    format!("tool `{tool_name}` is not in the allowlist for this run"),
-                );
+                refuse!(format!(
+                    "tool `{tool_name}` is not in the allowlist for this run"
+                ));
                 finished!(true);
                 continue;
             };
@@ -520,22 +550,19 @@ pub async fn run_agent_observed(
                 tokio::time::timeout(config.tool_timeout, tool.handler.call(arguments)).await;
             match executed {
                 Err(_) => {
-                    refuse(
-                        &mut transcript,
-                        format!(
-                            "tool `{tool_name}` timed out after {:?}",
-                            config.tool_timeout
-                        ),
-                    );
+                    refuse!(format!(
+                        "tool `{tool_name}` timed out after {:?}",
+                        config.tool_timeout
+                    ));
                     finished!(true);
                 }
                 Ok(Err(message)) => {
-                    refuse(&mut transcript, message);
+                    refuse!(message);
                     finished!(true);
                 }
                 Ok(Ok(value)) => {
                     let terminal = tool.spec.terminal;
-                    transcript.push(Item::ToolOutput {
+                    append!(Item::ToolOutput {
                         call_id,
                         tool: tool_name.clone(),
                         output: value.clone(),
@@ -561,7 +588,7 @@ pub async fn run_agent_observed(
                 && !terminal_specs.is_empty()
             {
                 warned = true;
-                transcript.push(Item::Notice {
+                append!(Item::Notice {
                     text: format!(
                         "{remaining} tool call(s) remain in this run's budget. Plan to conclude: \
                          finish with one of the terminal tool(s) {terminal_names} before the budget \
