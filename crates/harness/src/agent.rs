@@ -1,26 +1,46 @@
-//! The bounded agent loop: model turns, tool execution, limits, and cancellation.
+//! The bounded agent loop: model turns, tool execution, limits, retries, and cancellation.
 
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::client::{AssistantItem, ModelClient, ModelRequest};
+use crate::client::{AssistantItem, ModelClient, ModelRequest, Usage};
 use crate::conversation::{Item, Transcript, Trust};
 use crate::error::{HarnessError, HarnessResult};
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolRegistry, ToolSpec};
 
 /// Budgets for one agent run.
 ///
 /// Limits are the harness's answer to runaway loops: a model that keeps calling tools, keeps
 /// hitting errors, or never terminates is stopped deterministically and the outcome says so.
+/// Two refinements keep a stopped run useful: the model is warned before the tool budget runs
+/// out, and once a budget is exhausted it gets a bounded number of wrap-up turns in which only
+/// the terminal tools are offered — so "out of budget" usually still ends in a structured result,
+/// and a hard `LimitReached` is reserved for a model that will not conclude even when asked to.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    /// Maximum model turns before the run is stopped.
+    /// Maximum model turns before the run enters its wrap-up turns.
     pub max_model_turns: u32,
-    /// Maximum tool executions (including refused and failed calls) before the run is stopped.
+    /// Maximum tool executions (including refused and failed calls) before the run enters its
+    /// wrap-up turns.
     pub max_tool_calls: u32,
     /// Wall-clock timeout applied to each individual tool execution.
     pub tool_timeout: Duration,
+    /// When this many tool calls remain, the loop tells the model so it can plan to conclude.
+    /// Zero disables the warning.
+    pub warn_at_remaining_tool_calls: u32,
+    /// Extra model turns granted after a budget is exhausted, with only terminal tools offered.
+    /// Zero stops the run the moment a budget runs out.
+    pub wrap_up_turns: u32,
+    /// Maximum tokens (input plus output, as the backend reports them) before the run enters
+    /// its wrap-up turns. Zero disables the limit, which is the default: a backend that reports
+    /// no usage would otherwise never reach a limit expressed in tokens.
+    pub max_total_tokens: u64,
+    /// Retries of one model request after a transient backend failure
+    /// ([`HarnessError::ModelUnavailable`]) before the run fails.
+    pub max_model_retries: u32,
+    /// Base delay before a retry; the n-th retry waits n times this.
+    pub retry_backoff: Duration,
 }
 
 impl Default for AgentConfig {
@@ -30,6 +50,11 @@ impl Default for AgentConfig {
             max_model_turns: 8,
             max_tool_calls: 16,
             tool_timeout: Duration::from_secs(30),
+            warn_at_remaining_tool_calls: 3,
+            wrap_up_turns: 1,
+            max_total_tokens: 0,
+            max_model_retries: 2,
+            retry_backoff: Duration::from_secs(2),
         }
     }
 }
@@ -95,7 +120,8 @@ pub enum AgentOutcome {
     Text(String),
     /// Cancellation was requested and honored.
     Cancelled,
-    /// A budget in [`AgentConfig`] was exhausted.
+    /// A budget in [`AgentConfig`] was exhausted and the wrap-up turns did not produce a
+    /// terminal result either.
     LimitReached {
         /// Which limit stopped the run.
         reason: String,
@@ -109,10 +135,20 @@ pub struct AgentRunReport {
     pub outcome: AgentOutcome,
     /// The complete replayable transcript.
     pub transcript: Transcript,
-    /// Model turns consumed.
+    /// Model turns consumed, wrap-up turns included.
     pub model_turns: u32,
-    /// Tool calls consumed (including refused and failed calls).
+    /// Tool calls consumed (including refused and failed calls; budget refusals excluded).
     pub tool_calls: u32,
+    /// Model requests that were retried after a transient backend failure.
+    pub model_retries: u32,
+    /// Token counts summed over every model request the run made, as the backend reported them.
+    /// A run against a relay that reports no usage still counts its requests, so the gap is
+    /// visible rather than silently priced at zero.
+    pub usage: Usage,
+    /// Whether a budget ran out and the model was asked to conclude in a wrap-up turn. A
+    /// `Structured` outcome with this flag set was reached under pressure, not at the model's
+    /// own pace; adapters may want to say so.
+    pub wrapped_up: bool,
 }
 
 /// Runs the agent loop until a terminal result, a limit, or cancellation.
@@ -120,8 +156,12 @@ pub struct AgentRunReport {
 /// The contract with the model: unknown tools, malformed arguments, handler errors, and timeouts
 /// come back as error tool-outputs it can read and recover from; a successful call of a tool whose
 /// spec is `terminal` ends the run with that call's value; a turn with no tool calls ends the run
-/// with the turn's text. Every item is appended to the transcript before the loop continues, so an
-/// aborted run is still fully auditable.
+/// with the turn's text. When the tool budget gets low the model is told; when a budget is
+/// exhausted the model gets its wrap-up turns with only the terminal tools on offer, and every
+/// non-terminal call in those turns is refused. A transient backend failure is retried with
+/// backoff inside the retry budget; a permanent one ends the run with an error. Every item is
+/// appended to the transcript before the loop continues, so an aborted run is still fully
+/// auditable.
 pub async fn run_agent(
     client: &dyn ModelClient,
     registry: &ToolRegistry,
@@ -134,32 +174,84 @@ pub async fn run_agent(
     for item in initial_items {
         transcript.push(item);
     }
-    let specs = registry.specs();
+    let all_specs = registry.specs();
+    let terminal_specs: Vec<ToolSpec> = all_specs
+        .iter()
+        .filter(|spec| spec.terminal)
+        .cloned()
+        .collect();
+    let terminal_names = terminal_specs
+        .iter()
+        .map(|spec| format!("`{}`", spec.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+
     let mut model_turns: u32 = 0;
     let mut tool_calls: u32 = 0;
+    let mut model_retries: u32 = 0;
+    let mut usage = Usage::default();
+    let mut wrap_up_used: u32 = 0;
+    let mut warned = false;
+    let mut wrapped_up = false;
+    // Set once a budget runs out; from then on every turn is a wrap-up turn.
+    let mut exhausted: Option<String> = None;
 
-    let finish = |outcome, transcript, model_turns, tool_calls| {
-        Ok(AgentRunReport {
-            outcome,
-            transcript,
-            model_turns,
-            tool_calls,
-        })
-    };
-
-    loop {
-        if cancel.is_cancelled() {
-            return finish(AgentOutcome::Cancelled, transcript, model_turns, tool_calls);
-        }
-        if model_turns >= config.max_model_turns {
-            return finish(
-                AgentOutcome::LimitReached {
-                    reason: format!("model-turn budget ({}) exhausted", config.max_model_turns),
-                },
+    macro_rules! finish {
+        ($outcome:expr) => {
+            return Ok(AgentRunReport {
+                outcome: $outcome,
                 transcript,
                 model_turns,
                 tool_calls,
-            );
+                model_retries,
+                usage,
+                wrapped_up,
+            })
+        };
+    }
+
+    loop {
+        if cancel.is_cancelled() {
+            finish!(AgentOutcome::Cancelled);
+        }
+        if exhausted.is_none() {
+            if model_turns >= config.max_model_turns {
+                exhausted = Some(format!(
+                    "model-turn budget ({}) exhausted",
+                    config.max_model_turns
+                ));
+            } else if tool_calls >= config.max_tool_calls {
+                exhausted = Some(format!(
+                    "tool-call budget ({}) exhausted",
+                    config.max_tool_calls
+                ));
+            } else if config.max_total_tokens > 0 && usage.total_tokens() >= config.max_total_tokens
+            {
+                // Spending is bounded like every other resource, and by the same mechanism: the
+                // model gets its wrap-up turn, so a run stopped on cost still concludes.
+                exhausted = Some(format!(
+                    "token budget ({} tokens) exhausted at {}",
+                    config.max_total_tokens,
+                    usage.total_tokens()
+                ));
+            }
+        }
+        let wrapping_up = exhausted.is_some();
+        if let Some(reason) = &exhausted {
+            if wrap_up_used >= config.wrap_up_turns || terminal_specs.is_empty() {
+                finish!(AgentOutcome::LimitReached {
+                    reason: reason.clone(),
+                });
+            }
+            wrap_up_used += 1;
+            wrapped_up = true;
+            transcript.push(Item::Notice {
+                text: format!(
+                    "{reason}. This is a wrap-up turn: only the terminal tool(s) {terminal_names} \
+                     are available now. Call one immediately with your best conclusion from the \
+                     evidence you already have; any other tool call will be refused."
+                ),
+            });
         }
         model_turns += 1;
 
@@ -167,17 +259,43 @@ pub async fn run_agent(
         let request = ModelRequest {
             instructions,
             items: &items,
-            tools: &specs,
+            tools: if wrapping_up {
+                &terminal_specs
+            } else {
+                &all_specs
+            },
         };
-        // Cancellation may arrive while the backend is thinking; racing keeps the loop honest
-        // about "cooperative" instead of waiting out a slow model call.
-        let turn = tokio::select! {
-            turn = client.complete(request) => turn?,
-            () = cancel.cancelled() => {
-                return finish(AgentOutcome::Cancelled, transcript, model_turns, tool_calls);
+        // Cancellation may arrive while the backend is thinking or while a retry waits; racing
+        // keeps the loop honest about "cooperative" instead of waiting out a slow model call.
+        let turn = loop {
+            let attempt = tokio::select! {
+                attempt = client.complete(request) => attempt,
+                () = cancel.cancelled() => {
+                    // The request was issued and then abandoned. Whether the backend billed it
+                    // is unknowable from here, so it is counted as a request whose usage was
+                    // never reported rather than as one that never happened.
+                    usage += Usage::unreported();
+                    finish!(AgentOutcome::Cancelled)
+                }
+            };
+            match attempt {
+                Ok(turn) => break turn,
+                Err(HarnessError::ModelUnavailable(_))
+                    if model_retries < config.max_model_retries =>
+                {
+                    model_retries += 1;
+                    let backoff = config.retry_backoff * model_retries;
+                    tokio::select! {
+                        () = tokio::time::sleep(backoff) => {}
+                        () = cancel.cancelled() => finish!(AgentOutcome::Cancelled),
+                    }
+                }
+                Err(error) => return Err(error),
             }
         };
-        if turn.is_empty() {
+        // The turn is billed whether or not it was usable, so the counters take it first.
+        usage += turn.usage;
+        if turn.items.is_empty() {
             return Err(HarnessError::Model(
                 "the backend returned an empty turn".into(),
             ));
@@ -185,7 +303,7 @@ pub async fn run_agent(
 
         let mut texts = Vec::new();
         let mut calls = Vec::new();
-        for item in turn {
+        for item in turn.items {
             match item {
                 AssistantItem::Text { text } => {
                     transcript.push(Item::AssistantText { text: text.clone() });
@@ -207,40 +325,57 @@ pub async fn run_agent(
         }
 
         if calls.is_empty() {
-            return finish(
-                AgentOutcome::Text(texts.join("\n")),
-                transcript,
-                model_turns,
-                tool_calls,
-            );
+            finish!(AgentOutcome::Text(texts.join("\n")));
         }
 
         for (call_id, tool_name, arguments) in calls {
             if cancel.is_cancelled() {
-                return finish(AgentOutcome::Cancelled, transcript, model_turns, tool_calls);
+                finish!(AgentOutcome::Cancelled);
             }
-            if tool_calls >= config.max_tool_calls {
-                return finish(
-                    AgentOutcome::LimitReached {
-                        reason: format!("tool-call budget ({}) exhausted", config.max_tool_calls),
-                    },
-                    transcript,
-                    model_turns,
-                    tool_calls,
-                );
-            }
-            tool_calls += 1;
-
-            let Some(tool) = registry.get(&tool_name) else {
+            let refuse = |transcript: &mut Transcript, message: String| {
                 transcript.push(Item::ToolOutput {
-                    call_id,
+                    call_id: call_id.clone(),
                     tool: tool_name.clone(),
-                    output: json!({
-                        "error": format!("tool `{tool_name}` is not in the allowlist for this run")
-                    }),
+                    output: json!({ "error": message }),
                     is_error: true,
                     trust: Trust::Trusted,
                 });
+            };
+            let tool = registry.get(&tool_name);
+            if wrapping_up && !tool.is_some_and(|tool| tool.spec.terminal) {
+                refuse(
+                    &mut transcript,
+                    format!(
+                        "refused: the run is wrapping up and only the terminal tool(s) \
+                         {terminal_names} may be called"
+                    ),
+                );
+                continue;
+            }
+            if !wrapping_up && tool_calls >= config.max_tool_calls {
+                // The budget ran out inside this turn; the remaining calls are refused and the
+                // next turn is a wrap-up turn.
+                exhausted = Some(format!(
+                    "tool-call budget ({}) exhausted",
+                    config.max_tool_calls
+                ));
+                refuse(
+                    &mut transcript,
+                    format!(
+                        "refused: the tool-call budget ({}) is exhausted; call one of the terminal \
+                         tool(s) {terminal_names} to conclude",
+                        config.max_tool_calls
+                    ),
+                );
+                continue;
+            }
+            tool_calls += 1;
+
+            let Some(tool) = tool else {
+                refuse(
+                    &mut transcript,
+                    format!("tool `{tool_name}` is not in the allowlist for this run"),
+                );
                 continue;
             };
 
@@ -248,27 +383,16 @@ pub async fn run_agent(
                 tokio::time::timeout(config.tool_timeout, tool.handler.call(arguments)).await;
             match executed {
                 Err(_) => {
-                    transcript.push(Item::ToolOutput {
-                        call_id,
-                        tool: tool_name.clone(),
-                        output: json!({
-                            "error": format!(
-                                "tool `{tool_name}` timed out after {:?}",
-                                config.tool_timeout
-                            )
-                        }),
-                        is_error: true,
-                        trust: Trust::Trusted,
-                    });
+                    refuse(
+                        &mut transcript,
+                        format!(
+                            "tool `{tool_name}` timed out after {:?}",
+                            config.tool_timeout
+                        ),
+                    );
                 }
                 Ok(Err(message)) => {
-                    transcript.push(Item::ToolOutput {
-                        call_id,
-                        tool: tool_name.clone(),
-                        output: json!({ "error": message }),
-                        is_error: true,
-                        trust: Trust::Trusted,
-                    });
+                    refuse(&mut transcript, message);
                 }
                 Ok(Ok(value)) => {
                     let terminal = tool.spec.terminal;
@@ -280,17 +404,30 @@ pub async fn run_agent(
                         trust: Trust::Mixed,
                     });
                     if terminal {
-                        return finish(
-                            AgentOutcome::Structured {
-                                tool: tool_name,
-                                value,
-                            },
-                            transcript,
-                            model_turns,
-                            tool_calls,
-                        );
+                        finish!(AgentOutcome::Structured {
+                            tool: tool_name,
+                            value,
+                        });
                     }
                 }
+            }
+
+            // The warning goes out once, when the budget first reaches the threshold, so the
+            // model can plan its remaining calls instead of being cut off mid-investigation.
+            let remaining = config.max_tool_calls.saturating_sub(tool_calls);
+            if !warned
+                && config.warn_at_remaining_tool_calls > 0
+                && remaining <= config.warn_at_remaining_tool_calls
+                && !terminal_specs.is_empty()
+            {
+                warned = true;
+                transcript.push(Item::Notice {
+                    text: format!(
+                        "{remaining} tool call(s) remain in this run's budget. Plan to conclude: \
+                         finish with one of the terminal tool(s) {terminal_names} before the budget \
+                         runs out."
+                    ),
+                });
             }
         }
     }

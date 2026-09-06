@@ -137,6 +137,7 @@ async fn agent_output_follows_the_configured_language() {
         TeamBackend::Harness {
             client: Arc::new(client),
             budget: Default::default(),
+            model: "scripted-model".into(),
             label: "scripted".into(),
         },
         PlatformConfig {

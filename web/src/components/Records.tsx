@@ -84,7 +84,10 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                         <span className="text-xs">{label(job.team_kind)}</span>
                         <StatusBadge value={job.status} />
                         {job.result && <Badge variant="outline">{label(job.result.outcome)}</Badge>}
+                        {(job.earlier_passes?.length ?? 0) > 0 && <Badge variant="outline">{t("records.pass", { n: (job.earlier_passes?.length ?? 0) + 1 })}</Badge>}
                         {job.revises_job_id && <Badge variant="outline">{t("records.revises", { id: `${job.revises_job_id.slice(0, 8)}…` })}</Badge>}
+                        {job.supersedes_job_id && <Badge variant="outline">{t("records.supersedes", { id: `${job.supersedes_job_id.slice(0, 8)}…` })}</Badge>}
+                        {job.continues_job_id && <Badge variant="outline">{t("records.follows", { id: `${job.continues_job_id.slice(0, 8)}…` })}</Badge>}
                         {job.review && (
                           <Badge variant="outline">
                             {t("records.reviewedBy", { who: job.review.reviewer, decision: job.review.decision.decision === "sent_upstream" ? t("review.sentUpstream", { id: `${job.review.decision.job_id.slice(0, 8)}…` }) : t("review.acknowledged") })}
@@ -111,6 +114,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                                   </>
                                 )}
                                 {f.origin.kind === "failed_job" && <>{t("records.feedback.job", { summary: f.origin.summary })}</>}
+                                {f.origin.kind === "stalled_job" && <>{t("records.feedback.stalled", { probes: f.origin.requested_probe_ids.join(", "), summary: f.origin.summary })}</>}
                                 {f.comment && <span className="text-muted-foreground"> · “{f.comment}”</span>}
                               </div>
                             </li>

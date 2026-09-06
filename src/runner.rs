@@ -10,6 +10,15 @@
 //! harness Team over the configured relay — and nothing else changes between them. No Scheduler
 //! Policy model is wired yet, so every Scheduler decision point still exercises its conservative
 //! deterministic fallback — by design.
+//!
+//! The runner also drives the **investigation loop**: a chain of passes on one Issue, each pass
+//! one Team run over one immutable Snapshot. A pass that needs more evidence ends with a probe
+//! request and is superseded by a pass over a fresh Snapshot; a pass whose proposals ran can ask
+//! for a follow-up pass over the after-Snapshot to check their effect and decide what comes
+//! next. Every later pass carries the whole history (`earlier_passes`) in its View. The chain is
+//! bounded by the automatic-pass budget, stops whenever something waits for a human (an
+//! approval, a denial, a failure), and resumes — with a fresh budget — when a human approves an
+//! action or sends an item back upstream.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -28,22 +37,24 @@ use crate::collector::TopologyCollector;
 use crate::domain::{
     ActionProposal, ActionRun, ActionRunId, ActionStatus, Artifact, FeedbackOrigin, HumanFeedback,
     HumanReport, HumanReview, Issue, IssueId, Job, JobBrief, JobId, JobOutcome, JobResult,
-    JobStatus, ResourceId, ResourceKind, ReviewDecision, Snapshot, SnapshotCause, SnapshotId,
-    TeamCallback, TeamKind,
+    JobStatus, PassActionRecord, PassRecord, ResourceId, ResourceKind, ReviewDecision, Snapshot,
+    SnapshotCause, SnapshotId, TeamCallback, TeamKind,
 };
 use crate::error::{AgentError, AgentResult};
+pub use crate::evidence::summarize_execution_record;
 use crate::platform::{LocalCommandPlatform, PlatformConfig};
 use crate::policy::{AuthorityPolicy, OPERATE_CAPABILITIES};
-use crate::ports::{AgentTeamPort, CaptureRequest, StateStore, TeamCallbackSink, cancel_pair};
-use crate::scheduler::{IssueClosure, RecoverySummary, TopScheduler};
+use crate::ports::{
+    AgentTeamPort, CaptureRequest, InspectionPort, InspectionRequest, InspectionResult, StateStore,
+    TeamCallbackSink, cancel_pair,
+};
+use crate::scheduler::{IssueClosure, RecoverySummary, SchedulerMode, TopScheduler};
 use crate::store::file::FileStateStore;
 use crate::team::{HarnessOperateTeam, ReadOnlyOperateTeam};
 use crate::topology::DeploymentTopology;
 use crate::tr;
+use crate::usage::{Pricing, SpendBudget, UsageTotals};
 use crate::view::{FileArtifactStore, PROFILE_OPERATE_READONLY, RedactingViewBuilder};
-
-/// Characters of execution evidence handed to the next pass, at most.
-const EVIDENCE_LIMIT: usize = 2000;
 
 /// Sink that routes Team callbacks straight into the Scheduler.
 struct SchedulerSink {
@@ -58,6 +69,80 @@ impl TeamCallbackSink for SchedulerSink {
     }
 }
 
+/// Inspection gateway that routes a running Team's read-only requests through the Scheduler.
+struct SchedulerInspector {
+    scheduler: Arc<TopScheduler>,
+}
+
+#[async_trait]
+impl InspectionPort for SchedulerInspector {
+    /// Every inspection is a `TopScheduler::inspect` call: freeze mode, scope, Platform, event.
+    async fn inspect(
+        &self,
+        job_id: JobId,
+        request: InspectionRequest,
+    ) -> AgentResult<InspectionResult> {
+        self.scheduler.inspect(job_id, request).await
+    }
+}
+
+/// Budgets for the investigation loop, from the operator's config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassPolicy {
+    /// Passes the control plane runs on its own for one human report or one send-upstream
+    /// review, the first pass included. One means "one pass, then a human"; each probe request
+    /// or follow-up spends one.
+    pub max_auto_passes: u32,
+    /// Read-only inspections a model-backed Team may run in one pass.
+    pub max_inspections: u32,
+}
+
+impl Default for PassPolicy {
+    /// Three passes per chain (observe, act, check), six inspections per pass.
+    fn default() -> Self {
+        Self {
+            max_auto_passes: 3,
+            max_inspections: 6,
+        }
+    }
+}
+
+/// Why a chain of passes ended with a given pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PassStop {
+    /// The pass asked for more evidence and was superseded by the next pass.
+    Superseded,
+    /// The pass's proposals ran and a follow-up pass was dispatched.
+    Continued,
+    /// The pass concluded without asking for anything further.
+    Done,
+    /// The pass wanted to go on, but the automatic-pass budget is spent; a human continues.
+    BudgetExhausted,
+    /// At least one proposal waits for a human's approval; the approval resumes the chain.
+    WaitingForApproval,
+    /// Every proposal was denied; the denials wait in the inbox.
+    NothingRan,
+    /// The Scheduler no longer accepts dispatches.
+    Frozen,
+    /// The pass failed and waits in the inbox.
+    Failed,
+    /// The pass ended in a state only a human can move on.
+    WaitingForHuman,
+}
+
+/// One pass of an investigation chain: the Job, the ActionRuns its proposals became, and why
+/// the chain did or did not continue after it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassOutcome {
+    /// The Job, as the Scheduler left it.
+    pub job: Job,
+    /// The ActionRuns created from its proposals, already decided by the matrix.
+    pub actions: Vec<ActionRun>,
+    /// What happened after this pass.
+    pub stop: PassStop,
+}
+
 /// Which Operate Team implementation the runner dispatches to.
 pub enum TeamBackend {
     /// Deterministic read-only diagnosis; needs no model.
@@ -68,7 +153,9 @@ pub enum TeamBackend {
         client: Arc<dyn ModelClient>,
         /// Run budgets for each Job.
         budget: HarnessBudget,
-        /// Human-readable backend name for operator output (e.g. the model name).
+        /// Model name, recorded on every usage record so a bill can be attributed.
+        model: String,
+        /// Human-readable backend name for operator output (e.g. the model name and relay).
         label: String,
     },
 }
@@ -125,6 +212,9 @@ pub struct Revision {
     pub job: Job,
     /// The ActionRuns its proposals became, already evaluated by the matrix.
     pub actions: Vec<ActionRun>,
+    /// Further passes the revising Job's chain ran (probe requests, follow-ups), in order.
+    #[serde(default)]
+    pub follow_ups: Vec<PassOutcome>,
 }
 
 /// Fully wired control plane over one data directory and one topology.
@@ -136,18 +226,35 @@ pub struct SliceRunner {
     team_label: String,
     artifacts: FileArtifactStore,
     dry_run: bool,
+    pass_policy: PassPolicy,
+    /// What the relay charges, when the operator configured a price list.
+    pricing: Option<Pricing>,
+    /// The cumulative spend ceiling; reaching it freezes the Scheduler.
+    budget: SpendBudget,
     /// Serializes review-plus-dispatch so two reviewers of one item cannot both dispatch a
     /// revision; the store's compare-and-set catches what slips past process boundaries.
     review_lock: Mutex<()>,
 }
 
 impl SliceRunner {
-    /// Wires every component over the given topology, data directory, Team backend, and Platform.
+    /// Wires every component with the default pass policy; see [`SliceRunner::wire_with`].
     pub fn wire(
         topology: DeploymentTopology,
         data_dir: &Path,
         backend: TeamBackend,
         platform: PlatformConfig,
+    ) -> AgentResult<Self> {
+        Self::wire_with(topology, data_dir, backend, platform, PassPolicy::default())
+    }
+
+    /// Wires every component over the given topology, data directory, Team backend, Platform,
+    /// and investigation-loop budgets.
+    pub fn wire_with(
+        topology: DeploymentTopology,
+        data_dir: &Path,
+        backend: TeamBackend,
+        platform: PlatformConfig,
+        pass_policy: PassPolicy,
     ) -> AgentResult<Self> {
         let store = Arc::new(FileStateStore::open(data_dir)?);
         let artifacts = FileArtifactStore::new(data_dir.join("artifact-bodies"));
@@ -167,6 +274,7 @@ impl SliceRunner {
             Duration::from_secs(platform.auto_repeat_window_secs),
         )
         .with_resources(resources);
+        let inspection_runbook_ids = LocalCommandPlatform::inspection_runbook_ids(&platform);
         let platform = Arc::new(LocalCommandPlatform::new(
             platform,
             artifacts.clone(),
@@ -189,6 +297,7 @@ impl SliceRunner {
             TeamBackend::Harness {
                 client,
                 budget,
+                model,
                 label,
             } => (
                 Box::new(
@@ -197,7 +306,15 @@ impl SliceRunner {
                         artifacts,
                         store.clone() as Arc<dyn StateStore>,
                     )
-                    .with_config(budget),
+                    .with_config(budget)
+                    .with_model_name(model)
+                    .with_inspection(
+                        Arc::new(SchedulerInspector {
+                            scheduler: scheduler.clone(),
+                        }),
+                        inspection_runbook_ids,
+                        pass_policy.max_inspections,
+                    ),
                 ),
                 format!("harness ({label})"),
             ),
@@ -210,8 +327,85 @@ impl SliceRunner {
             team_label,
             artifacts: artifacts_for_api,
             dry_run,
+            pass_policy,
+            pricing: None,
+            budget: SpendBudget::default(),
             review_lock: Mutex::new(()),
         })
+    }
+
+    /// Attaches the relay's price list and the cumulative spend ceiling.
+    ///
+    /// Both are optional and independent: a deployment with prices but no ceiling gets cost
+    /// reporting and no halt; one with a token ceiling and no prices gets a halt it can enforce
+    /// without knowing what anything costs.
+    pub fn with_spend(mut self, pricing: Option<Pricing>, budget: SpendBudget) -> Self {
+        self.pricing = pricing;
+        self.budget = budget;
+        self
+    }
+
+    /// The investigation-loop budgets in force.
+    pub fn pass_policy(&self) -> PassPolicy {
+        self.pass_policy
+    }
+
+    /// Everything spent at the relay so far, priced when a price list is configured.
+    ///
+    /// Summed from the EventLog rather than from the Jobs: the log is append-only, so a pass
+    /// that was later superseded still has the tokens it really spent counted here.
+    pub async fn usage_totals(&self) -> AgentResult<UsageTotals> {
+        let events = self.store.list_events().await?;
+        Ok(UsageTotals::from_events(
+            &events,
+            self.pricing.as_ref(),
+            &self.budget,
+        ))
+    }
+
+    /// Freezes the Scheduler when the cumulative spend ceiling has been reached.
+    ///
+    /// Reaching a budget is not an error in itself — the work that spent it was legitimate — so
+    /// this only stops what comes next. It reuses the existing full freeze rather than inventing
+    /// a second halted state: recovery already restores a freeze across restarts, and an operator
+    /// already knows how to resume one (after raising the ceiling).
+    async fn freeze_if_budget_spent(&self) -> AgentResult<Option<String>> {
+        if !self.budget.is_set() {
+            return Ok(None);
+        }
+        let totals = self.usage_totals().await?;
+        let Some(reason) = totals.budget.and_then(|status| status.reason) else {
+            return Ok(None);
+        };
+        if self.scheduler.mode().await != SchedulerMode::FullyFrozen {
+            self.store
+                .append_event(crate::domain::NewEvent::new(
+                    "top-scheduler",
+                    "scheduler.budget_exhausted",
+                    tr!(
+                        format!(
+                            "Dispatch is frozen because {reason}. Raise `[budget]` in the agent                              config, then resume from a console."
+                        ),
+                        format!(
+                            "调度已冻结，因为{reason}。请调高配置中的 `[budget]`，然后在控制台恢复。"
+                        )
+                    ),
+                ))
+                .await?;
+            self.scheduler.freeze_all().await?;
+        }
+        Ok(Some(reason))
+    }
+
+    /// Refuses to start new model-backed work once the spend ceiling is reached.
+    async fn refuse_if_budget_spent(&self, operation: &'static str) -> AgentResult<()> {
+        match self.freeze_if_budget_spent().await? {
+            None => Ok(()),
+            Some(reason) => Err(AgentError::SchedulerFrozen {
+                mode: format!("BudgetExhausted ({reason})"),
+                operation,
+            }),
+        }
     }
 
     /// Returns the human-readable name of the wired Team backend.
@@ -257,8 +451,9 @@ impl SliceRunner {
     }
 
     /// The Operate scope over every resource in the topology: every capability the matrix can
-    /// decide (the matrix, not the scope, decides what needs a human), all resources in scope.
-    fn operate_brief(&self) -> JobBrief {
+    /// decide (the matrix, not the scope, decides what needs a human), all resources in scope,
+    /// with the Issue's pass history and the remaining automatic-pass budget.
+    fn operate_brief(&self, earlier_passes: Vec<PassRecord>, follow_up_budget: u32) -> JobBrief {
         JobBrief::new(
             TeamKind::Operate,
             OPERATE_CAPABILITIES
@@ -271,6 +466,12 @@ impl SliceRunner {
                 .map(|resource| resource.id.clone())
                 .collect(),
         )
+        .with_history(earlier_passes, follow_up_budget)
+    }
+
+    /// The follow-up budget a chain starts with: the policy's passes minus the one being run.
+    fn fresh_follow_up_budget(&self) -> u32 {
+        self.pass_policy.max_auto_passes.saturating_sub(1)
     }
 
     /// Captures, persists, and returns a Snapshot.
@@ -280,10 +481,12 @@ impl SliceRunner {
             .await
     }
 
-    /// Accepts a human report, dispatches an Operate Job over the report-time Snapshot, runs the
-    /// Team, and returns the finished Job with its Issue. Proposed actions are not run here; see
-    /// `run_proposals`.
+    /// Accepts a human report, dispatches the first Operate pass over the report-time Snapshot,
+    /// runs the Team, and returns the finished Job with its Issue. Proposed actions are not run
+    /// here, and the chain is not continued; see `drive_passes` (or `run_proposals` for the
+    /// single-pass flow).
     pub async fn handle_report(&self, report: HumanReport) -> AgentResult<(Issue, Job)> {
+        self.refuse_if_budget_spent("accept a human report").await?;
         let issue = self
             .scheduler
             .accept_human_report_with_capture(
@@ -296,7 +499,7 @@ impl SliceRunner {
             .dispatch_job(
                 issue.issue_id,
                 issue.opened_snapshot_id,
-                self.operate_brief(),
+                self.operate_brief(Vec::new(), self.fresh_follow_up_budget()),
                 PROFILE_OPERATE_READONLY,
             )
             .await?;
@@ -335,7 +538,326 @@ impl SliceRunner {
                 .await?;
             }
         }
+        // The pass has been billed by now, so this is the first honest moment to check the
+        // ceiling. Freezing (rather than erroring) lets the chain stop itself with `Frozen` and
+        // keeps the finished pass's result.
+        self.freeze_if_budget_spent().await?;
         self.store.get_job(job.job_id).await
+    }
+
+    /// Drives the investigation chain from a finished pass until it stops.
+    ///
+    /// The loop, per pass: a `NeedsMoreData` result captures a fresh Snapshot with the requested
+    /// Probes and supersedes the Job with the next pass; a diagnosis runs the proposals through
+    /// the matrix and, when the Team asked for a follow-up and every proposal has been executed
+    /// or denied, dispatches the next pass over the after-Snapshot; anything else stops. Each
+    /// continuation spends one unit of the pass's follow-up budget; at zero the chain stops with
+    /// `BudgetExhausted` — a stalled probe request then waits in the Failed inbox, where a human
+    /// can send it back upstream with a fresh budget. Anything waiting for a human (an approval,
+    /// a denial, a failure) stops the chain too; an approval resumes it.
+    pub async fn drive_passes(&self, job: Job) -> AgentResult<Vec<PassOutcome>> {
+        let mut passes = Vec::new();
+        let mut job = job;
+        loop {
+            let Some(result) = job.result.clone() else {
+                passes.push(PassOutcome {
+                    job,
+                    actions: Vec::new(),
+                    stop: PassStop::WaitingForHuman,
+                });
+                break;
+            };
+            match result.outcome {
+                JobOutcome::NeedsMoreData => {
+                    if job.follow_up_budget == 0 {
+                        self.record_budget_exhausted(&job).await?;
+                        passes.push(PassOutcome {
+                            job,
+                            actions: Vec::new(),
+                            stop: PassStop::BudgetExhausted,
+                        });
+                        break;
+                    }
+                    if !self.dispatch_allowed().await {
+                        passes.push(PassOutcome {
+                            job,
+                            actions: Vec::new(),
+                            stop: PassStop::Frozen,
+                        });
+                        break;
+                    }
+                    let mut probe_ids: Vec<String> = result
+                        .requested_probes
+                        .iter()
+                        .map(|probe| probe.probe_id.clone())
+                        .collect();
+                    probe_ids.sort();
+                    probe_ids.dedup();
+                    let mut capture = self.capture_request(SnapshotCause::AgentProbeRequest);
+                    capture.requested_probe_ids = probe_ids;
+                    capture.parent_snapshot_id = Some(job.base_snapshot_id());
+                    let brief = self.operate_brief(
+                        self.pass_history(job.issue_id).await?,
+                        job.follow_up_budget - 1,
+                    );
+                    let next = self
+                        .scheduler
+                        .resnapshot_and_supersede(
+                            job.job_id,
+                            capture,
+                            PROFILE_OPERATE_READONLY,
+                            brief,
+                        )
+                        .await?;
+                    let view = self
+                        .store
+                        .get_artifact(next.snapshot_view.artifact_id)
+                        .await?;
+                    passes.push(PassOutcome {
+                        job: self.store.get_job(job.job_id).await?,
+                        actions: Vec::new(),
+                        stop: PassStop::Superseded,
+                    });
+                    job = self.run_team(next, &view).await?;
+                }
+                JobOutcome::Solved | JobOutcome::DiagnosisOnly => {
+                    let actions = self.run_proposals(&job).await?;
+                    if let Some(stop) = self.follow_up_stop(&job, &actions).await? {
+                        passes.push(PassOutcome { job, actions, stop });
+                        break;
+                    }
+                    let (next, view) = self.dispatch_follow_up(&job, &actions).await?;
+                    passes.push(PassOutcome {
+                        job: job.clone(),
+                        actions,
+                        stop: PassStop::Continued,
+                    });
+                    job = self.run_team(next, &view).await?;
+                }
+                JobOutcome::Failed => {
+                    passes.push(PassOutcome {
+                        job,
+                        actions: Vec::new(),
+                        stop: PassStop::Failed,
+                    });
+                    break;
+                }
+                JobOutcome::NeedsHuman | JobOutcome::OptionsReady | JobOutcome::Blocked => {
+                    passes.push(PassOutcome {
+                        job,
+                        actions: Vec::new(),
+                        stop: PassStop::WaitingForHuman,
+                    });
+                    break;
+                }
+            }
+        }
+        Ok(passes)
+    }
+
+    /// Why the chain must stop after this pass's proposals were decided — or `None` when a
+    /// follow-up pass should be dispatched now.
+    async fn follow_up_stop(
+        &self,
+        job: &Job,
+        actions: &[ActionRun],
+    ) -> AgentResult<Option<PassStop>> {
+        let requested = job
+            .result
+            .as_ref()
+            .is_some_and(|result| result.follow_up_requested);
+        if actions.is_empty() || !requested {
+            return Ok(Some(PassStop::Done));
+        }
+        if actions
+            .iter()
+            .any(|action| action.status == ActionStatus::WaitingForApproval)
+        {
+            return Ok(Some(PassStop::WaitingForApproval));
+        }
+        if !actions.iter().any(action_was_executed) {
+            return Ok(Some(PassStop::NothingRan));
+        }
+        if job.follow_up_budget == 0 {
+            self.record_budget_exhausted(job).await?;
+            return Ok(Some(PassStop::BudgetExhausted));
+        }
+        if !self.dispatch_allowed().await {
+            return Ok(Some(PassStop::Frozen));
+        }
+        Ok(None)
+    }
+
+    /// Dispatches the follow-up pass over the newest after-Snapshot of the executed actions
+    /// (or a fresh capture when no after-Snapshot exists), carrying the whole history.
+    async fn dispatch_follow_up(
+        &self,
+        job: &Job,
+        actions: &[ActionRun],
+    ) -> AgentResult<(Job, Artifact)> {
+        let snapshot_id = match actions
+            .iter()
+            .filter(|action| action_was_executed(action))
+            .filter_map(|action| action.after_snapshot_id.map(|id| (action.completed_at, id)))
+            .max()
+        {
+            Some((_, id)) => id,
+            None => {
+                let mut capture = self.capture_request(SnapshotCause::AgentProbeRequest);
+                capture.parent_snapshot_id = Some(job.base_snapshot_id());
+                self.scheduler.request_snapshot(capture).await?.snapshot_id
+            }
+        };
+        let brief = self
+            .operate_brief(
+                self.pass_history(job.issue_id).await?,
+                job.follow_up_budget.saturating_sub(1),
+            )
+            .continuing(job.job_id);
+        self.scheduler
+            .dispatch_job(job.issue_id, snapshot_id, brief, PROFILE_OPERATE_READONLY)
+            .await
+    }
+
+    /// Resumes a chain after a human approved one of a pass's held actions.
+    ///
+    /// The follow-up runs only when the pass asked for one, has budget left, every action of the
+    /// pass has settled (another may still wait for approval), at least one executed, and no
+    /// follow-up for the pass exists yet — so two approvals of two actions of one pass yield one
+    /// follow-up, after the second.
+    async fn follow_up_after_approval(
+        &self,
+        action: &ActionRun,
+    ) -> AgentResult<Option<Vec<PassOutcome>>> {
+        let job = self.store.get_job(action.originating_job_id).await?;
+        let requested = job
+            .result
+            .as_ref()
+            .is_some_and(|result| result.follow_up_requested);
+        if !requested || job.follow_up_budget == 0 {
+            return Ok(None);
+        }
+        let siblings: Vec<ActionRun> = self
+            .store
+            .list_action_runs()
+            .await?
+            .into_iter()
+            .filter(|candidate| candidate.originating_job_id == job.job_id)
+            .collect();
+        if siblings.iter().any(|sibling| !sibling.status.is_terminal())
+            || !siblings.iter().any(action_was_executed)
+        {
+            return Ok(None);
+        }
+        let already = self
+            .store
+            .list_jobs()
+            .await?
+            .iter()
+            .any(|candidate| candidate.continues_job_id == Some(job.job_id));
+        if already || !self.dispatch_allowed().await {
+            return Ok(None);
+        }
+        let (next, view) = self.dispatch_follow_up(&job, &siblings).await?;
+        let next = self.run_team(next, &view).await?;
+        Ok(Some(self.drive_passes(next).await?))
+    }
+
+    /// Whether the Scheduler currently accepts new Jobs.
+    async fn dispatch_allowed(&self) -> bool {
+        self.scheduler.mode().await == SchedulerMode::Running
+    }
+
+    /// Records that a pass wanted to continue when no automatic pass was left.
+    async fn record_budget_exhausted(&self, job: &Job) -> AgentResult<()> {
+        self.store
+            .append_event(
+                crate::domain::NewEvent::new(
+                    "top-scheduler",
+                    "scheduler.pass_budget_exhausted",
+                    tr!(
+                        format!(
+                            "Pass {} wanted to continue, but the automatic-pass budget ({}) is \
+                             spent; a human continues from the inbox",
+                            job.pass_number(),
+                            self.pass_policy.max_auto_passes
+                        ),
+                        format!(
+                            "第 {} 轮希望继续，但自动轮次预算（{}）已用尽；请由人工从收件箱继续",
+                            job.pass_number(),
+                            self.pass_policy.max_auto_passes
+                        )
+                    ),
+                )
+                .with_issue(job.issue_id)
+                .with_job(job.job_id),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Renders every earlier pass on the Issue, with its actions and their sanitized evidence,
+    /// as the history the next pass carries.
+    pub async fn pass_history(&self, issue_id: IssueId) -> AgentResult<Vec<PassRecord>> {
+        let actions: Vec<ActionRun> = self
+            .store
+            .list_action_runs()
+            .await?
+            .into_iter()
+            .filter(|action| action.issue_id == issue_id)
+            .collect();
+        let mut history = Vec::new();
+        for job in self
+            .store
+            .list_jobs()
+            .await?
+            .into_iter()
+            .filter(|job| job.issue_id == issue_id)
+        {
+            let mut records = Vec::new();
+            for action in actions
+                .iter()
+                .filter(|action| action.originating_job_id == job.job_id)
+            {
+                records.push(PassActionRecord {
+                    action_run_id: action.action_run_id,
+                    runbook_id: action.runbook_id.clone(),
+                    target_ids: action.target_ids.clone(),
+                    arguments: action.arguments.clone(),
+                    status: action.status,
+                    approval: action.approval,
+                    dry_run: action.dry_run,
+                    denial_reason: action.denial.as_ref().map(|denial| match &denial.comment {
+                        Some(comment) => format!("{} — {comment}", denial.reason),
+                        None => denial.reason.clone(),
+                    }),
+                    execution_summary: action.execution_summary.clone(),
+                    verification_summary: action.verification_summary.clone(),
+                    verification_evidence: action.verification_evidence,
+                    evidence: self.execution_evidence(action).await,
+                });
+            }
+            let result = job.result.as_ref();
+            history.push(PassRecord {
+                job_id: job.job_id,
+                supersedes_job_id: job.supersedes_job_id,
+                revises_job_id: job.revises_job_id,
+                continues_job_id: job.continues_job_id,
+                outcome: result.map(|result| result.outcome),
+                summary: result
+                    .map(|result| result.summary.clone())
+                    .unwrap_or_default(),
+                unresolved_questions: result
+                    .map(|result| result.unresolved_questions.clone())
+                    .unwrap_or_default(),
+                requested_probes: result
+                    .map(|result| result.requested_probes.clone())
+                    .unwrap_or_default(),
+                actions: records,
+                created_at: job.created_at,
+            });
+        }
+        Ok(history)
     }
 
     /// Runs every action the Job proposed through the authority matrix.
@@ -387,6 +909,10 @@ impl SliceRunner {
     }
 
     /// Records a human approval by name and runs the action to completion.
+    ///
+    /// When the proposing pass asked for a follow-up and this approval settled its last held
+    /// action, the chain resumes: the follow-up pass runs before this returns (its Job is in
+    /// the store and the event stream; the approved action is what is returned).
     pub async fn approve_action(
         &self,
         action_run_id: ActionRunId,
@@ -395,7 +921,9 @@ impl SliceRunner {
         self.scheduler
             .approve_action(action_run_id, approved_by)
             .await?;
-        self.execute_and_verify(action_run_id).await
+        let action = self.execute_and_verify(action_run_id).await?;
+        self.follow_up_after_approval(&action).await?;
+        Ok(action)
     }
 
     /// Records a human rejection with its comment; the action is cancelled and never executes.
@@ -482,13 +1010,29 @@ impl SliceRunner {
                 "Job `{job_id}` is not in the Failed Job inbox"
             )));
         }
-        let origin = FeedbackOrigin::FailedJob {
-            job_id,
-            summary: job
-                .result
-                .as_ref()
-                .map(|result| result.summary.clone())
-                .unwrap_or_else(|| tr!("no result was recorded", "未记录任何结果").to_string()),
+        let summary = job
+            .result
+            .as_ref()
+            .map(|result| result.summary.clone())
+            .unwrap_or_else(|| tr!("no result was recorded", "未记录任何结果").to_string());
+        let origin = if job.status == JobStatus::NeedsResnapshot {
+            FeedbackOrigin::StalledJob {
+                job_id,
+                summary,
+                requested_probe_ids: job
+                    .result
+                    .as_ref()
+                    .map(|result| {
+                        result
+                            .requested_probes
+                            .iter()
+                            .map(|probe| probe.probe_id.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }
+        } else {
+            FeedbackOrigin::FailedJob { job_id, summary }
         };
         self.review(
             job.issue_id,
@@ -544,10 +1088,17 @@ impl SliceRunner {
                 );
                 let reviewed = record(review).await?;
                 let job = self.run_team(job, &view).await?;
-                let actions = self.run_proposals(&job).await?;
+                let mut passes = self.drive_passes(job).await?.into_iter();
+                let first = passes
+                    .next()
+                    .expect("drive_passes returns at least the pass it was given");
                 Ok(ReviewOutcome {
                     reviewed,
-                    revision: Some(Revision { job, actions }),
+                    revision: Some(Revision {
+                        job: first.job,
+                        actions: first.actions,
+                        follow_ups: passes.collect(),
+                    }),
                 })
             }
         }
@@ -585,7 +1136,8 @@ impl SliceRunner {
             .await
     }
 
-    /// Dispatches the revising Job for upstream feedback over a fresh Snapshot.
+    /// Dispatches the revising Job for upstream feedback over a fresh Snapshot, with the whole
+    /// history and a fresh automatic-pass budget: a human's decision starts a new chain.
     async fn dispatch_revision(
         &self,
         issue_id: IssueId,
@@ -593,11 +1145,13 @@ impl SliceRunner {
         revises_job_id: JobId,
         feedback: Vec<HumanFeedback>,
     ) -> AgentResult<(Job, Artifact)> {
+        let history = self.pass_history(issue_id).await?;
         self.scheduler
             .dispatch_job(
                 issue_id,
                 snapshot_id,
-                self.operate_brief().revising(revises_job_id, feedback),
+                self.operate_brief(history, self.fresh_follow_up_budget())
+                    .revising(revises_job_id, feedback),
                 PROFILE_OPERATE_READONLY,
             )
             .await
@@ -778,6 +1332,49 @@ impl SliceRunner {
         out
     }
 
+    /// Renders the passes of an investigation chain as operator-facing text.
+    pub fn render_passes(passes: &[PassOutcome], dry_run: bool) -> String {
+        let mut out = String::new();
+        for (index, pass) in passes.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "\npass {} · job {} · status {:?}{}{}",
+                index + 1,
+                pass.job.job_id,
+                pass.job.status,
+                pass.job
+                    .supersedes_job_id
+                    .map(|id| format!(" · supersedes {id}"))
+                    .unwrap_or_default(),
+                pass.job
+                    .continues_job_id
+                    .map(|id| format!(" · follows {id}"))
+                    .unwrap_or_default(),
+            );
+            if let Some(result) = &pass.job.result {
+                let _ = writeln!(out, "outcome: {:?} — {}", result.outcome, result.summary);
+                for probe in &result.requested_probes {
+                    let _ = writeln!(
+                        out,
+                        "probe:   {} on {} — {}",
+                        probe.probe_id,
+                        probe.target_ids.join(", "),
+                        probe.reason
+                    );
+                }
+                for question in &result.unresolved_questions {
+                    let _ = writeln!(out, "open:    {question}");
+                }
+            }
+            if !pass.actions.is_empty() {
+                let _ = writeln!(out, "actions:");
+                out.push_str(&Self::render_actions(&pass.actions, dry_run));
+            }
+            let _ = writeln!(out, "then:    {:?}", pass.stop);
+        }
+        out
+    }
+
     /// Renders the inbox as operator-facing text.
     pub fn render_inbox(inbox: &Inbox) -> String {
         let mut out = String::new();
@@ -858,88 +1455,11 @@ fn idempotency_key(job: &Job, proposal: &ActionProposal) -> AgentResult<String> 
     Ok(format!("{:x}", hasher.finalize())[..24].to_string())
 }
 
-/// Fact-name or line fragments that mark secret-shaped output; such lines are dropped.
-const EVIDENCE_SECRET_MARKERS: [&str; 6] = [
-    "password",
-    "secret",
-    "token",
-    "credential",
-    "api_key",
-    "authorization",
-];
-
-/// Condenses an ActionOutput record into a short, sanitized evidence string for the next pass.
-///
-/// Machine output is untrusted: it is trimmed to a tail, lines that look like they carry a secret
-/// are replaced, and the whole thing is capped, so it can be fenced into a View without carrying
-/// a credential or a prompt injection of unbounded size along.
-pub fn summarize_execution_record(record: &Value) -> String {
-    fn tail(text: &str, lines: usize, chars: usize) -> String {
-        let kept: Vec<&str> = text
-            .lines()
-            .rev()
-            .take(lines)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|line| {
-                let lower = line.to_ascii_lowercase();
-                if EVIDENCE_SECRET_MARKERS
-                    .iter()
-                    .any(|marker| lower.contains(marker))
-                {
-                    "[line redacted: secret-shaped]"
-                } else {
-                    line
-                }
-            })
-            .collect();
-        let joined = kept.join("\n");
-        if joined.len() > chars {
-            format!("…{}", &joined[joined.len() - chars..])
-        } else {
-            joined
-        }
-    }
-
-    let mut parts = Vec::new();
-    if let Some(refused) = record["refused"].as_str() {
-        parts.push(format!("refused: {refused}"));
-    }
-    if record["dry_run"].as_bool() == Some(true) {
-        parts.push("dry run: commands were rendered, not executed".to_string());
-    }
-    for run in record["runs"].as_array().into_iter().flatten() {
-        let target = run["target"].as_str().unwrap_or("?");
-        let status = if run["spawn_error"].is_string() {
-            format!(
-                "could not start: {}",
-                run["spawn_error"].as_str().unwrap_or("")
-            )
-        } else if run["timed_out"].as_bool() == Some(true) {
-            "timed out and was killed".to_string()
-        } else {
-            format!(
-                "exit code {}",
-                run["exit_code"]
-                    .as_i64()
-                    .map_or("none".to_string(), |code| code.to_string())
-            )
-        };
-        let mut line = format!("target {target}: {status}");
-        for (name, key) in [("stderr", "stderr"), ("stdout", "stdout")] {
-            if let Some(text) = run[key].as_str()
-                && !text.trim().is_empty()
-            {
-                line.push_str(&format!("; {name} tail: {}", tail(text, 12, 600)));
-            }
-        }
-        parts.push(line);
-    }
-    let mut evidence = parts.join("\n");
-    if evidence.len() > EVIDENCE_LIMIT {
-        evidence.truncate(EVIDENCE_LIMIT);
-        evidence.push('…');
-    }
-    evidence
+/// Whether an ActionRun reached the Platform: it ran (well or badly) rather than being denied
+/// or still waiting.
+fn action_was_executed(action: &ActionRun) -> bool {
+    matches!(
+        action.status,
+        ActionStatus::Succeeded | ActionStatus::Failed | ActionStatus::VerificationFailed
+    )
 }

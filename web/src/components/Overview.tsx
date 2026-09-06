@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useT } from "../i18n";
 import type { Issue, Snapshot, Status } from "../types";
 import { Page } from "./Shell";
+import { SpendTile, UsageCard } from "./Spend";
 import { StatusBadge } from "./status";
 import { Alert, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, StatTile } from "./ui";
 
@@ -87,7 +88,7 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
         </Alert>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         <StatTile label={t("stat.healthy")} value={snapshot ? `${healthy} / ${total}` : "—"} icon={Server} tone={snapshot && healthy < total ? "warn" : "default"} />
         <StatTile
           label={t("stat.inbox")}
@@ -98,6 +99,12 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
         />
         <StatTile label={t("stat.openIssues")} value={liveIssues} icon={ListChecks} hint={t("stat.total", { count: issues.length })} />
         <StatTile label={t("stat.events")} value={status?.counts.events ?? "—"} icon={Activity} hint={status ? t("stat.eventsHint", { jobs: status.counts.jobs, actions: status.counts.actions }) : undefined} />
+        <SpendTile usage={status?.usage} />
+      </div>
+
+      {/* What the relay has cost: a live fact the Snapshot cannot show. */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <UsageCard usage={status?.usage ?? null} />
       </div>
 
       <div className="grid gap-6 lg:grid-cols-3">

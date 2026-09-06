@@ -29,9 +29,9 @@ use crate::domain::{
 use crate::error::{AgentError, AgentResult};
 use crate::policy::{AuthorityPolicy, OperationClass, ProposalContext};
 use crate::ports::{
-    AgentsPlatformPort, CallbackAdviceRequest, CaptureRequest, CollectorPort, NextStep,
-    NextStepDecision, SchedulerPolicyPort, SnapshotViewBuildRequest, SnapshotViewBuilderPort,
-    StateStore, TriageDecision, TriageRequest,
+    AgentsPlatformPort, CallbackAdviceRequest, CaptureRequest, CollectorPort, InspectionPort,
+    InspectionRequest, InspectionResult, NextStep, NextStepDecision, SchedulerPolicyPort,
+    SnapshotViewBuildRequest, SnapshotViewBuilderPort, StateStore, TriageDecision, TriageRequest,
 };
 use crate::tr;
 
@@ -468,6 +468,20 @@ impl TopScheduler {
                 ),
             )
             .await?;
+        } else if job.continues_job_id.is_some() {
+            let summary = tr!(
+                format!(
+                    "The Scheduler dispatched follow-up pass {} to check the effect of the \
+                     previous pass's actions",
+                    job.pass_number()
+                ),
+                format!(
+                    "调度器派发了第 {} 轮后续任务，以检查上一轮操作的效果",
+                    job.pass_number()
+                )
+            );
+            self.record_job_event(&job, "scheduler.job_continued", summary)
+                .await?;
         } else {
             self.record_job_event(
                 &job,
@@ -584,14 +598,78 @@ impl TopScheduler {
             )
             .await?;
 
-        let Some(result) = callback.final_result else {
+        // Usage is recorded before anything else the callback asks for, and as its own event:
+        // the tokens were spent whatever the Scheduler decides about the result, and the
+        // append-only log is the ledger every cost figure is later summed from.
+        if let Some(usage) = &callback.usage {
+            self.store
+                .append_event(
+                    NewEvent::new(
+                        "agent-team",
+                        crate::usage::USAGE_EVENT_KIND,
+                        tr!(
+                            format!(
+                                "Pass {} spent {} tokens over {} model request(s)",
+                                job.pass_number(),
+                                usage.total_tokens(),
+                                usage.requests
+                            ),
+                            format!(
+                                "第 {} 轮消耗 {} tokens，共 {} 次模型请求",
+                                job.pass_number(),
+                                usage.total_tokens(),
+                                usage.requests
+                            )
+                        ),
+                    )
+                    .with_issue(callback.issue_id)
+                    .with_job(callback.job_id)
+                    .with_payload(serde_json::to_value(usage)?),
+                )
+                .await?;
+        }
+
+        let Some(mut result) = callback.final_result else {
             return Ok(job);
         };
+        // A Team's "solved" is a claim, not a fact. It stands only when a real remediation ran
+        // on this Issue and every resource the Issue touches is Healthy in the Snapshot the
+        // Team reasoned over; otherwise it is recorded as a diagnosis and a human decides.
+        if result.outcome == JobOutcome::Solved
+            && let Err(reason) = self.solved_is_supported(&job).await?
+        {
+            result.outcome = JobOutcome::DiagnosisOnly;
+            result.unresolved_questions.push(tr!(
+                format!(
+                    "The Team reported the problem solved, but the Scheduler could not confirm \
+                     it and recorded a diagnosis instead: {reason}"
+                ),
+                format!("团队报告问题已解决，但调度器无法确认，已改记为诊断结论：{reason}")
+            ));
+            self.store
+                .append_event(
+                    NewEvent::new(
+                        "top-scheduler",
+                        "scheduler.result_clamped",
+                        tr!(
+                            format!("A `solved` result was downgraded to a diagnosis: {reason}"),
+                            format!("`solved` 结果已降级为诊断结论：{reason}")
+                        ),
+                    )
+                    .with_issue(job.issue_id)
+                    .with_job(job.job_id)
+                    .with_payload(json!({ "claimed": "solved", "recorded": "diagnosis_only" })),
+                )
+                .await?;
+        }
         let failed = result.outcome == JobOutcome::Failed;
         let failure_summary = result.summary.clone();
 
         let mut next = job.clone();
         next.complete(result)?;
+        if let Some(usage) = callback.usage {
+            next.usage = Some(usage);
+        }
         self.store.update_job_if(&job, next.clone()).await?;
 
         if failed {
@@ -613,6 +691,190 @@ impl TopScheduler {
         }
         self.reconcile_issue(next.issue_id).await?;
         Ok(next)
+    }
+
+    /// Whether a Team's `Solved` claim on this Job is backed by the record.
+    ///
+    /// Two conditions, both checked by the harness and never by the model: an ActionRun on the
+    /// Issue succeeded with real (not dry-run) evidence, and every resource the Issue touches —
+    /// its affected resources plus every action target — is present and Healthy in the Job's
+    /// base Snapshot. A report whose symptoms the probes cannot see, or a rehearsal in dry-run
+    /// mode, therefore never resolves an Issue on a model's word.
+    async fn solved_is_supported(&self, job: &Job) -> AgentResult<Result<(), String>> {
+        let issue = self.store.get_issue(job.issue_id).await?;
+        let snapshot = self.store.get_snapshot(job.base_snapshot_id()).await?;
+        let actions: Vec<ActionRun> = self
+            .store
+            .list_action_runs()
+            .await?
+            .into_iter()
+            .filter(|action| action.issue_id == job.issue_id)
+            .collect();
+        let remediated = actions.iter().any(|action| {
+            action.status == ActionStatus::Succeeded
+                && matches!(
+                    action.verification_evidence,
+                    Some(VerificationEvidence::Weak | VerificationEvidence::Strong)
+                )
+        });
+        if !remediated {
+            return Ok(Err(tr!(
+                "no action on this Issue has succeeded with real evidence, so nothing was \
+                 remediated; if the problem is gone on its own, a human closes the Issue",
+                "该 Issue 上没有任何操作以真实证据成功完成，因此没有实际修复；若问题已自行消失，请由人工关闭"
+            )
+            .to_string()));
+        }
+        let mut touched: Vec<String> = issue.affected_resource_ids.clone();
+        touched.extend(actions.iter().flat_map(|action| action.target_ids.clone()));
+        touched.sort();
+        touched.dedup();
+        for target in &touched {
+            let Some(resource) = snapshot
+                .resources
+                .iter()
+                .find(|resource| &resource.resource_id == target)
+            else {
+                return Ok(Err(tr!(
+                    format!("`{target}` is absent from the Job's Snapshot"),
+                    format!("`{target}` 未出现在任务所依据的快照中")
+                )));
+            };
+            if resource.health != HealthState::Healthy {
+                return Ok(Err(tr!(
+                    format!(
+                        "`{target}` is {:?} in the Job's Snapshot, not Healthy",
+                        resource.health
+                    ),
+                    format!(
+                        "`{target}` 在任务所依据的快照中的状态为 {:?}，并非 Healthy",
+                        resource.health
+                    )
+                )));
+            }
+        }
+        Ok(Ok(()))
+    }
+
+    /// Runs a read-only inspection for a running Job, within its scope.
+    ///
+    /// This is the gateway for the architecture's "read-only scoped request": no authority
+    /// decision and no approval — an inspection changes nothing — but the freeze mode is
+    /// checked (`FullyFrozen` and `Recovering` refuse: a human who froze everything does not
+    /// want the agent reading machines either), the Job must be running, the request must pass
+    /// the same joint scope validation as a proposal and classify as non-mutating, and the
+    /// Platform re-checks its half before running. Refusals are results, not errors, so the
+    /// Team reads the reason and adapts; every inspection, refused or run, is an event with its
+    /// output Artifact.
+    pub async fn inspect(
+        &self,
+        job_id: JobId,
+        request: InspectionRequest,
+    ) -> AgentResult<InspectionResult> {
+        let mode = self.mode().await;
+        if matches!(mode, SchedulerMode::FullyFrozen | SchedulerMode::Recovering) {
+            return Err(AgentError::SchedulerFrozen {
+                mode: format!("{mode:?}"),
+                operation: "inspect",
+            });
+        }
+        let platform = self.require_platform("inspect")?;
+        let job = self.store.get_job(job_id).await?;
+        if job.status != JobStatus::Running {
+            return Err(AgentError::InvalidInput(format!(
+                "Job `{job_id}` is `{:?}`; only a running Job may inspect",
+                job.status
+            )));
+        }
+        let refusal = match self.authority.validate_scope(
+            &request.runbook_id,
+            &request.target_ids,
+            &request.arguments,
+            &job.allowed_capabilities,
+            &job.allowed_target_ids,
+        ) {
+            Ok(class) if class.is_mutating() => Some(tr!(
+                format!(
+                    "`{}` (row {}, {class:?}) changes machine state; propose it as an action \
+                     instead of inspecting with it",
+                    request.runbook_id,
+                    class.row()
+                ),
+                format!(
+                    "`{}`（第 {} 行，{class:?}）会改变机器状态；请改为提议操作，而不是用它进行检查",
+                    request.runbook_id,
+                    class.row()
+                )
+            )),
+            Ok(_) => None,
+            Err((_, reason)) => Some(tr!(
+                format!("scope: {reason}"),
+                format!("范围校验：{reason}")
+            )),
+        };
+        let result = match refusal {
+            Some(reason) => InspectionResult {
+                succeeded: false,
+                dry_run: false,
+                refused: Some(reason.clone()),
+                summary: tr!(format!("refused: {reason}"), format!("已拒绝：{reason}")),
+                output_artifact_id: None,
+            },
+            None => {
+                let outcome = match platform.inspect(&job, &request).await {
+                    Ok(outcome) => outcome,
+                    Err(error) => PlatformOperationResult::new(
+                        false,
+                        None,
+                        tr!(
+                            format!(
+                                "the Agents Platform failed before reporting a result: {error}"
+                            ),
+                            format!("Agents 平台在返回结果前出错：{error}")
+                        ),
+                    ),
+                };
+                InspectionResult {
+                    succeeded: outcome.succeeded,
+                    dry_run: outcome.dry_run,
+                    refused: None,
+                    summary: outcome.summary,
+                    output_artifact_id: outcome.output_artifact_id,
+                }
+            }
+        };
+        self.store
+            .append_event(
+                NewEvent::new(
+                    if result.refused.is_some() {
+                        "top-scheduler"
+                    } else {
+                        "agents-platform"
+                    },
+                    "platform.inspection",
+                    tr!(
+                        format!(
+                            "Inspection `{}` on {}: {}",
+                            request.runbook_id,
+                            request.target_ids.join(", "),
+                            result.summary
+                        ),
+                        format!(
+                            "检查 `{}`（目标 {}）：{}",
+                            request.runbook_id,
+                            request.target_ids.join(", "),
+                            result.summary
+                        )
+                    ),
+                )
+                .with_issue(job.issue_id)
+                .with_job(job_id)
+                .with_payload(json!({ "request": request, "result": result }))
+                .with_artifacts(result.output_artifact_id.into_iter().collect())
+                .with_trust(ContentTrust::Mixed),
+            )
+            .await?;
+        Ok(result)
     }
 
     /// Proposes the validated next step after a Job returned its final result.
@@ -1637,7 +1899,8 @@ impl TopScheduler {
                         false
                     }
                 }
-                FeedbackOrigin::FailedJob { job_id, .. } => {
+                FeedbackOrigin::FailedJob { job_id, .. }
+                | FeedbackOrigin::StalledJob { job_id, .. } => {
                     let reviewed = self.store.get_job(*job_id).await?;
                     if reviewed.needs_review() {
                         self.review_job(*job_id, review).await?;
@@ -1888,7 +2151,7 @@ impl TopScheduler {
         &self,
         job: &Job,
         kind: &'static str,
-        summary: &'static str,
+        summary: impl Into<String>,
     ) -> AgentResult<EventRecord> {
         self.store
             .append_event(
@@ -1952,6 +2215,18 @@ impl TopScheduler {
 
 /// The Issue status implied by its Jobs and ActionRuns, with the reason, or `None` when no work
 /// exists yet (an Issue stays `Open` until something is dispatched).
+#[async_trait::async_trait]
+impl InspectionPort for TopScheduler {
+    /// See [`TopScheduler::inspect`].
+    async fn inspect(
+        &self,
+        job_id: JobId,
+        request: InspectionRequest,
+    ) -> AgentResult<InspectionResult> {
+        TopScheduler::inspect(self, job_id, request).await
+    }
+}
+
 fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStatus, String)> {
     if jobs.is_empty() && actions.is_empty() {
         return None;

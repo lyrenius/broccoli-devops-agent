@@ -1,10 +1,11 @@
 # Broccoli DevOps Agent Architecture
 
-> Status: Draft v0.4  
+> Status: Draft v0.5  
 > Updated: 2026-09-05  
 > Scope: Product and system architecture. This document does not yet prescribe a concrete OpenAI model, deployment host, or production permission policy.  
 > v0.3 applied the first design-feedback round (`docs/fable-design-feedback.md`): the separate Work Order layer is gone, the inbox has three categories, denials carry reasons and comments, and a human review can send an item back upstream as a revising Job.  
-> v0.4 applies the second review (`docs/remaining-issues-d805bf1-zh-en.md`): joint scope authorization, idempotency claims and compare-and-set transitions, process-group kill on timeout, startup recovery with reconciliation, derived Issue status with explicit closure, class-specific verification evidence and business probes, and execution evidence in upstream feedback. See §12 for the design choices that review asked to align on.
+> v0.4 applies the second review (`docs/remaining-issues-d805bf1-zh-en.md`): joint scope authorization, idempotency claims and compare-and-set transitions, process-group kill on timeout, startup recovery with reconciliation, derived Issue status with explicit closure, class-specific verification evidence and business probes, and execution evidence in upstream feedback. See §12 for the design choices that review asked to align on.  
+> v0.5 gives the Operate Team a real investigation loop (§4.5): passes that request Probes and are superseded, follow-up passes over the after-Snapshot, read-only inspections through the Platform, a pass budget, and a Scheduler-checked "solved"; and hardens the harness (§11 OD-5) with budget warnings, wrap-up turns, and transient-failure retries.
 
 ## 1. Goal
 
@@ -109,8 +110,11 @@ Human Report ────> TOP PRIORITY ──> Top Scheduler
 There is no separate work-order layer. An Issue says what is wrong; a Job is
 one bounded pass by one Team over one Snapshot View. The View itself carries
 the problem statement (the report's title and description, fenced as untrusted
-text), the Job's scope, and the human feedback that reached the Issue so far,
-so the Team's whole input is one replayable Artifact.
+text), the Job's scope, the human feedback that reached the Issue so far, and
+every earlier pass of the same investigation — what it concluded, what it
+proposed, how that was decided, what running it produced — so the Team's whole
+input is one replayable Artifact. An Issue is normally worked in a short chain
+of such passes (§4.5, "The investigation loop").
 
 The component labelled `Judger Agent` in the diagram is an anomaly-analysis
 component, not a Broccoli judge worker. This document calls it the **Snapshot
@@ -147,9 +151,16 @@ scopes. All side effects are represented by an ActionRun and are written to the
 event log.
 
 Read-only scoped requests (inspection within the Job's capability and target
-scope) may flow from a Team to the Platform directly. Mutations may not: a
-Team returns an ActionProposal, and only the Scheduler converts it into an
-ActionRun and hands it to the Platform, checking the freeze mode at both steps.
+scope) may flow from a Team to the Platform directly — implemented as the
+**inspection gateway**: a running Team asks for a non-mutating Runbook (a
+status query, a log tail, an allowlisted read-only database query) on targets
+in its scope; the Scheduler checks the freeze mode and the joint scope, the
+Platform re-checks and refuses any runbook whose class mutates, the output is
+an Artifact and an event, and the Team reads a sanitized tail of it fenced as
+untrusted data. No matrix decision, no approval, no ActionRun: nothing
+changed. Mutations may not flow this way: a Team returns an ActionProposal,
+and only the Scheduler converts it into an ActionRun and hands it to the
+Platform, checking the freeze mode at both steps.
 
 Inside the Agents Platform sits the execution block the diagram labels
 **DevOps Agents & Scheduler**: the per-target executors that run one Runbook
@@ -377,12 +388,70 @@ a `Failed` result, so the Job lands in the Failed inbox.
 
 Two backends implement the Operate contract today: the **read-only backend**
 (rule-based diagnosis from the View, never proposes) and the **harness
-backend** (a model-and-tool loop that produces a diagnosis and action
-proposals). Both receive human feedback the same way — it is in the View — and
-both must visibly take it into account on a revision pass: the read-only
-backend prefixes its diagnosis with the feedback it saw, the harness backend
-presents it to the model as trusted operator direction alongside the fenced
-View.
+backend** (a model-and-tool loop that produces a diagnosis, action proposals,
+or a probe request). Both receive human feedback the same way — it is in the
+View — and both must visibly take it into account on a revision pass: the
+read-only backend prefixes its diagnosis with the feedback it saw, the harness
+backend presents it to the model as trusted operator direction alongside the
+fenced View.
+
+#### The investigation loop
+
+A pass reasons over one immutable Snapshot; the harder situations — evidence
+that is not in the Snapshot, a remediation whose effect must be checked before
+the next step — are handled by chaining passes, never by letting a running Job
+read live state. The runner drives the chain; the Scheduler dispatches and
+records every step; the Team sees the whole chain in its View under
+`earlier_passes`.
+
+```text
+pass k over Snapshot k
+   ├─ NeedsMoreData (probe request)  → capture Snapshot k+1 with the requested Probes
+   │                                   → superseding pass k+1 (supersedes_job_id)
+   ├─ diagnosis + proposals          → ActionRuns through the matrix
+   │     ├─ something waits for a human (approval, denial, failure) → chain stops; inbox
+   │     ├─ follow_up requested, every proposal executed or denied,
+   │     │  budget left                → follow-up pass k+1 over the newest after-Snapshot
+   │     │                                (continues_job_id)
+   │     └─ otherwise                 → chain stops
+   └─ Solved / diagnosis, no proposals → chain stops
+```
+
+Rules the runtime enforces, not the model:
+
+- **Pass budget.** `[agent] max_auto_passes` bounds the passes run without a
+  human per human report or per send-upstream review (default three: observe,
+  act, check). Each pass carries `follow_up_budget`, the passes still grantable
+  after it; at zero the Team is told it is the last automatic pass and the
+  probe-request tool is not offered at all. A non-harness Team that still
+  returns `NeedsMoreData` at zero budget stalls in the Failed inbox, where a
+  human can send it back upstream — which starts a new chain with a fresh
+  budget, exactly like any other send-back.
+- **One pass, one Snapshot.** A probe request cannot follow a proposal in the
+  same pass, and `solved` cannot be claimed while proposals are pending: the
+  adapter refuses both, so the model either acts now or gathers more evidence.
+- **Follow-up only after settlement.** A follow-up pass runs only when every
+  proposal of the pass has been executed or denied; a held action stops the
+  chain and the human's approval resumes it (the approval executes, verifies,
+  and — if the pass asked for one — dispatches the follow-up before returning).
+  When every proposal was denied nothing ran, so nothing is re-observed.
+- **"Solved" is a claim.** The Scheduler accepts a `Solved` result only when an
+  ActionRun on the Issue succeeded with real (Weak or Strong, never dry-run)
+  evidence and every resource the Issue touches — its affected resources plus
+  every action target — is present and Healthy in the pass's own Snapshot.
+  Otherwise the result is recorded as `DiagnosisOnly` with the reason among
+  its unresolved questions and a `scheduler.result_clamped` event, and a human
+  decides. A rehearsal in dry-run mode therefore never resolves an Issue on a
+  model's word, and neither does a first pass that saw nothing wrong.
+
+The harness backend's tools are exactly these: `read_snapshot_view`,
+`inspect` (the gateway above, at most `[model] max_inspections` per pass, only
+runbooks that both have a configured command and classify as non-mutating),
+`request_probes` (terminal; Probe IDs from the Probe Registry on in-scope
+targets), `report_progress`, `propose_action` (runbooks from the Runbook
+Registry, optional verification Probes), and `submit_diagnosis` (terminal;
+`diagnosis_only` or `solved`, plus `follow_up`). Every tool is allowlisted per
+run; the transcript of every pass is a DiagnosticBundle Artifact.
 
 #### Internal parallelism
 
@@ -416,6 +485,13 @@ store so its ID resolves through the Artifact API. A refusal — unknown target,
 wrong target kind for the Runbook, unconfigured Runbook, an argument with shell
 metacharacters — is a failed result, never an exception, so it reaches the
 Failed inbox with its reason.
+
+The same executor serves inspections (§3.3): the Platform validates the
+request exactly as it validates an ActionRun and additionally refuses any
+runbook whose operation class is mutating, so a Team cannot restart a service
+by calling it an inspection; the output is an ActionOutput Artifact produced
+by the Job, and the inspection takes the target's execution lane so a log read
+never interleaves with a restart of the same machine.
 
 Each command runs in its own process group with a wall-clock limit. On timeout
 the whole group receives `SIGKILL` and the child is reaped before the result
@@ -517,7 +593,7 @@ record says, and it leaves only through a recorded human decision.
 | --- | --- | --- |
 | **Permission Request** | ActionRuns the matrix holds for approval (`approve` rows, and `auto` rows escalated by the repeat rule). | Approve, or reject with a comment. |
 | **Permission Denied** | ActionRuns refused by rule (`deny` and `human-only` rows, unknown Runbooks) or rejected by a human, not yet reviewed. The denial's source, reason, and comment stay on the ActionRun. | Review the reason, add feedback, then either send it back upstream or acknowledge it. |
-| **Failed** | Jobs that failed (a Team that returned `Failed`, answered without its terminal tool, ran out of budget, or crashed) and ActionRuns whose execution or verification failed, not yet reviewed. | Review the failure, add feedback, then either send it back upstream or acknowledge it. |
+| **Failed** | Jobs that failed (a Team that returned `Failed`, answered without its terminal tool, ran out of budget, or crashed), Jobs that asked for more observations when no automatic pass was left, and ActionRuns whose execution or verification failed, not yet reviewed. | Review the failure, add feedback, then either send it back upstream or acknowledge it. |
 
 Permission decisions have three paths. Automatically allowed actions proceed
 to execution. Actions that need approval enter the Permission Request inbox;
@@ -794,15 +870,19 @@ Snapshot N
 ### 6.2 Additional evidence
 
 If a Team needs information not present in its Snapshot View, it returns a
-probe request instead of reading live state directly.
+probe request instead of reading live state directly (implemented: the
+harness backend's `request_probes` tool ends the pass with `NeedsMoreData`).
 
 ```text
 Job N requests probe
-   -> Collector runs probe
-   -> Snapshot N+1
-   -> Scheduler evaluates whether old work is still applicable
-   -> Job N+1 supersedes Job N when necessary
+   -> Collector captures Snapshot N+1 with the requested Probes
+   -> Job N+1 supersedes Job N, carrying N in its earlier_passes
+   -> bounded by the pass budget; at zero the request waits for a human
 ```
+
+For a look that does not need a new Snapshot — a service's status, the tail
+of a log — a Team inspects through the Platform instead (§3.3): the Job stays
+bound to its Snapshot, and the inspection output is an Artifact and an event.
 
 ### 6.3 Side effect and verification
 
@@ -831,6 +911,12 @@ class:
   the prior state. A `DryRun` passes as an ActionRun (the rehearsal worked) but
   is labelled as no evidence of remediation and never resolves an Issue.
   `Strong` evidence means the postcondition was observed to change.
+
+When the proposing pass asked for a follow-up, the after-Snapshot of the last
+executed action becomes the base of the next pass (§4.5): the Team sees the
+verification conclusion and the sanitized execution output in
+`earlier_passes` and decides whether the problem is solved, needs another
+step, or needs a human.
 
 ### 6.4 Denial and failure feedback
 
@@ -1012,6 +1098,11 @@ The first vertical slice is implemented and exercised by the CLI and the
 10. Restart the controller: recovery reconciles interrupted Jobs and actions,
     restores the persisted freeze mode, and `serve` resumes only after a clean
     restart (`cargo run -- recover`, `cargo run -- serve`).
+11. Run the investigation loop (§4.5): probe requests and superseding passes,
+    follow-up passes over the after-Snapshot, read-only inspections through
+    the Platform, the pass budget, stalled passes in the inbox, and the
+    Scheduler's check on a Team's `solved` (`src/runner.rs::drive_passes`,
+    `src/team/harness.rs`, `tests/passes.rs`).
 
 The slice proves the Snapshot, Scheduler, Team, and recovery boundaries without
 permitting production mutation. No Scheduler Policy model is wired yet, so every
@@ -1021,7 +1112,9 @@ the fallback path is the first one exercised in practice.
 The next slices are:
 
 - Hybrid Snapshot Judge and automatic Issue candidates.
-- Read-only troubleshooting with additional-probe/superseding-Job flow.
+- A Scheduler Policy model behind `advise_next_step`, so the deterministic
+  chain rules above become the harness around a model's judgment.
+- Human questions from a Team (`NeedsHuman`) as an inbox interaction.
 - Develop worktrees, tests, options, artifacts, and conflict detection.
 - Bundle/WASM promotion and rollback.
 - Optional Team-internal parallel agents.
@@ -1080,9 +1173,14 @@ meet the Scheduler at those ports:
 
 1. **Our own harness** — the `broccoli-agent-harness` workspace crate
    (`crates/harness`): a model-agnostic agentic loop with typed allowlisted
-   tools, terminal tools for structured output, turn and tool-call budgets,
-   cooperative cancellation, and a serializable transcript stored as an
-   Artifact for replay. The harness is generic over its own `ModelClient`
+   tools, terminal tools for structured output, turn and tool-call budgets
+   (with a warning to the model when the tool budget runs low and a bounded
+   number of wrap-up turns, offering only the terminal tools, once a budget is
+   exhausted — so a stopped run still ends structured whenever the model will
+   conclude), retries with backoff on transient backend failures (connection
+   errors, timeouts, HTTP 429 and 5xx; never on a rejected request),
+   cooperative cancellation, and a serializable transcript — the harness's own
+   notices included — stored as an Artifact for replay. The harness is generic over its own `ModelClient`
    boundary, which is where the OpenAI Responses client (or any other model
    backend) plugs in. The crate knows nothing about Broccoli; adapters in the
    control plane translate ports onto it. `HarnessOperateTeam` is the first

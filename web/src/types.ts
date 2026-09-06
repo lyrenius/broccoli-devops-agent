@@ -24,6 +24,45 @@ export interface RecoverySummary {
   reconstructed_review_job_ids: string[];
 }
 
+/** How the totals stand against the configured spend ceiling. */
+export interface BudgetStatus {
+  max_total_tokens: number;
+  max_total_cost: number;
+  exceeded: boolean;
+  reason: string | null;
+  used_fraction: number;
+}
+
+export interface ModelTotals {
+  model: string;
+  passes: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  cost: number | null;
+}
+
+/**
+ * What the model relay has been asked to do, and what it cost.
+ *
+ * `cost` is null when no price list is configured — tokens are still counted. A non-zero
+ * `requests_without_usage` means the relay did not report some of its usage, so the real
+ * figures are higher than these.
+ */
+export interface UsageTotals {
+  passes: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  requests: number;
+  requests_without_usage: number;
+  cost: number | null;
+  currency: string | null;
+  by_model: ModelTotals[];
+  budget: BudgetStatus | null;
+}
+
 export interface Status {
   mode: string;
   team_backend: string;
@@ -35,6 +74,7 @@ export interface Status {
   recovery: RecoverySummary | null;
   counts: Counts;
   inbox: InboxCounts;
+  usage: UsageTotals;
 }
 
 export interface Metric {
@@ -84,11 +124,19 @@ export interface ActionProposal {
   expected_effect: string;
 }
 
+export interface ProbeRequest {
+  probe_id: string;
+  target_ids: string[];
+  reason: string;
+}
+
 export interface JobResult {
   outcome: string;
   summary: string;
   unresolved_questions: string[];
   proposed_actions: ActionProposal[];
+  requested_probes?: ProbeRequest[];
+  follow_up_requested?: boolean;
   artifact_ids: string[];
 }
 
@@ -112,7 +160,8 @@ export interface HumanReview {
 export type FeedbackOrigin =
   | { kind: "denied_action"; action_run_id: string; runbook_id: string; target_ids: string[]; denial: Denial }
   | { kind: "failed_action"; action_run_id: string; runbook_id: string; target_ids: string[]; summary: string; evidence: string | null }
-  | { kind: "failed_job"; job_id: string; summary: string };
+  | { kind: "failed_job"; job_id: string; summary: string }
+  | { kind: "stalled_job"; job_id: string; summary: string; requested_probe_ids: string[] };
 
 export interface HumanFeedback {
   feedback_id: string;
@@ -130,8 +179,19 @@ export interface Job {
   created_at: string;
   feedback: HumanFeedback[];
   revises_job_id: string | null;
+  supersedes_job_id?: string | null;
+  continues_job_id?: string | null;
+  earlier_passes?: unknown[];
+  follow_up_budget?: number;
   review: HumanReview | null;
   result: JobResult | null;
+}
+
+/** One pass of an investigation chain, as the report endpoint returns it. */
+export interface PassOutcome {
+  job: Job;
+  actions: ActionRun[];
+  stop: string;
 }
 
 export interface ActionRun {

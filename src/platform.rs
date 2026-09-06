@@ -13,6 +13,12 @@
 //! `dry_run` (the default) renders and records the commands without executing them, so the whole
 //! pipeline can be rehearsed before a deployment exists.
 //!
+//! The same executor serves two callers. An ActionRun — approved or automatically allowed by the
+//! Scheduler — may run any registered runbook. An inspection — a running Team asking to look at
+//! a status or a log tail before it proposes anything — may run only runbooks whose operation
+//! class is non-mutating; the Platform refuses everything else no matter who asks, so a Team
+//! cannot restart a service by calling it an inspection.
+//!
 //! Inside the Platform sits the execution block the architecture diagram calls "DevOps Agents &
 //! Scheduler": the per-target executors that run one runbook on one host, and the lane scheduler
 //! that serializes them so two approved actions never operate on the same resource at once. An
@@ -31,10 +37,13 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::domain::{ActionRun, ArtifactKind, PlatformOperationResult, ResourceId, ResourceKind};
+use crate::domain::{
+    ActionRun, ActionRunId, ArtifactKind, Job, JobId, NamedValue, PlatformOperationResult,
+    ResourceId, ResourceKind,
+};
 use crate::error::AgentResult;
 use crate::policy::{ClassificationLists, RunbookRegistry, SHELL_METACHARACTERS};
-use crate::ports::{AgentsPlatformPort, StateStore};
+use crate::ports::{AgentsPlatformPort, InspectionRequest, StateStore};
 use crate::topology::DeploymentTopology;
 use crate::tr;
 use crate::view::FileArtifactStore;
@@ -227,6 +236,15 @@ async fn run_command(command: &str, timeout: Duration) -> CommandOutcome {
     }
 }
 
+/// Who an execution record is attributed to.
+#[derive(Debug, Clone, Copy)]
+enum Producer {
+    /// An ActionRun the Scheduler handed over.
+    Action(ActionRunId),
+    /// A running Job inspecting within its scope.
+    Job(JobId),
+}
+
 /// Command-executing Platform over the operator's runbook templates.
 pub struct LocalCommandPlatform {
     config: PlatformConfig,
@@ -261,12 +279,37 @@ impl LocalCommandPlatform {
         }
     }
 
-    /// Re-validates the proposal's scope against the catalog: known targets of an allowed kind
+    /// Runbook IDs that are configured with a command and classify as non-mutating — the set a
+    /// Team may call as inspections. Used to build the Team's tool allowlist.
+    pub fn inspection_runbook_ids(config: &PlatformConfig) -> Vec<String> {
+        let registry = RunbookRegistry::new(config.classification.clone());
+        let mut ids: Vec<String> = config
+            .runbooks
+            .iter()
+            .filter(|runbook| {
+                registry
+                    .classify(&runbook.id, &[])
+                    .is_some_and(|class| !class.is_mutating())
+            })
+            .map(|runbook| runbook.id.clone())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Re-validates a request's scope against the catalog: known targets of an allowed kind
     /// and shell-safe arguments. The Job-level checks (capabilities, target scope) happened in
-    /// the Scheduler; this is the machine-side half.
-    fn validate(&self, action: &ActionRun) -> Result<(), (String, serde_json::Value)> {
-        let unknown: Vec<_> = action
-            .target_ids
+    /// the Scheduler; this is the machine-side half. An inspection must additionally classify
+    /// as non-mutating.
+    fn validate(
+        &self,
+        runbook_id: &str,
+        target_ids: &[ResourceId],
+        arguments: &[NamedValue],
+        inspection: bool,
+    ) -> Result<(), (String, serde_json::Value)> {
+        let unknown: Vec<_> = target_ids
             .iter()
             .filter(|target| !self.resources.contains_key(*target))
             .cloned()
@@ -280,39 +323,44 @@ impl LocalCommandPlatform {
                 json!({ "refused": "unknown targets", "targets": unknown }),
             ));
         }
-        let Some(class) = self
-            .registry
-            .classify(&action.runbook_id, &action.arguments)
-        else {
+        let Some(class) = self.registry.classify(runbook_id, arguments) else {
+            return Err((
+                tr!(
+                    format!("refused: runbook `{runbook_id}` is not in the Runbook Registry"),
+                    format!("已拒绝：runbook `{runbook_id}` 不在 Runbook 注册表中")
+                ),
+                json!({ "refused": "unknown runbook", "runbook_id": runbook_id }),
+            ));
+        };
+        if inspection && class.is_mutating() {
             return Err((
                 tr!(
                     format!(
-                        "refused: runbook `{}` is not in the Runbook Registry",
-                        action.runbook_id
+                        "refused: `{runbook_id}` (row {}, {class:?}) changes machine state and \
+                         cannot run as an inspection; propose it as an action instead",
+                        class.row()
                     ),
                     format!(
-                        "已拒绝：runbook `{}` 不在 Runbook 注册表中",
-                        action.runbook_id
+                        "已拒绝：`{runbook_id}`（第 {} 行，{class:?}）会改变机器状态，不能作为检查运行；请改为提议操作",
+                        class.row()
                     )
                 ),
-                json!({ "refused": "unknown runbook", "runbook_id": action.runbook_id }),
+                json!({ "refused": "mutating runbook as inspection", "runbook_id": runbook_id }),
             ));
-        };
+        }
         if let Some(kinds) = class.target_kinds() {
-            for target in &action.target_ids {
+            for target in target_ids {
                 let kind = self.resources[target];
                 if !kinds.contains(&kind) {
                     return Err((
                         tr!(
                             format!(
-                                "refused: `{}` (row {}) does not apply to `{target}`, a {kind:?} \
-                                 resource",
-                                action.runbook_id,
+                                "refused: `{runbook_id}` (row {}) does not apply to `{target}`, a \
+                                 {kind:?} resource",
                                 class.row()
                             ),
                             format!(
-                                "已拒绝：`{}`（第 {} 行）不适用于 `{target}`（其类型为 {kind:?}）",
-                                action.runbook_id,
+                                "已拒绝：`{runbook_id}`（第 {} 行）不适用于 `{target}`（其类型为 {kind:?}）",
                                 class.row()
                             )
                         ),
@@ -321,9 +369,7 @@ impl LocalCommandPlatform {
                 }
             }
         }
-        if let Err(reason) =
-            RunbookRegistry::validate_arguments(&action.runbook_id, &action.arguments)
-        {
+        if let Err(reason) = RunbookRegistry::validate_arguments(runbook_id, arguments) {
             return Err((
                 tr!(format!("refused: {reason}"), format!("已拒绝：{reason}")),
                 json!({ "refused": reason }),
@@ -338,7 +384,12 @@ impl LocalCommandPlatform {
     }
 
     /// Renders one command template for one target, or explains what is missing.
-    fn render(&self, template: &str, target: &str, action: &ActionRun) -> Result<String, String> {
+    fn render(
+        &self,
+        template: &str,
+        target: &str,
+        arguments: &[NamedValue],
+    ) -> Result<String, String> {
         let mut rendered = template.replace("{target}", target);
         while let Some(start) = rendered.find("{arg:") {
             let end = rendered[start..]
@@ -346,8 +397,7 @@ impl LocalCommandPlatform {
                 .map(|offset| start + offset)
                 .ok_or_else(|| "unterminated `{arg:` placeholder".to_string())?;
             let name = &rendered[start + 5..end];
-            let value = action
-                .arguments
+            let value = arguments
                 .iter()
                 .find(|argument| argument.name == name)
                 .map(|argument| argument.value.clone())
@@ -371,16 +421,17 @@ impl LocalCommandPlatform {
     /// Stores and registers the execution record, and returns the result.
     async fn finish(
         &self,
-        action: &ActionRun,
+        producer: Producer,
         succeeded: bool,
         summary: String,
         record: serde_json::Value,
     ) -> AgentResult<PlatformOperationResult> {
         let bytes = serde_json::to_vec_pretty(&record)?;
-        let artifact = self
-            .artifacts
-            .write(ArtifactKind::ActionOutput, &bytes)?
-            .produced_by_action(action.action_run_id);
+        let artifact = self.artifacts.write(ArtifactKind::ActionOutput, &bytes)?;
+        let artifact = match producer {
+            Producer::Action(action_run_id) => artifact.produced_by_action(action_run_id),
+            Producer::Job(job_id) => artifact.produced_by_job(job_id),
+        };
         self.store.insert_artifact(artifact.clone()).await?;
         Ok(PlatformOperationResult::new(
             succeeded,
@@ -388,48 +439,51 @@ impl LocalCommandPlatform {
             summary,
         ))
     }
-}
 
-#[async_trait]
-impl AgentsPlatformPort for LocalCommandPlatform {
-    /// Validates, renders, and (unless dry-run) executes the runbook once per target.
+    /// Validates, renders, and (unless dry-run) executes one runbook once per target.
     ///
-    /// Refusals are reported as failed results, not errors: the ActionRun records exactly why the
-    /// Platform declined, and the Scheduler treats it like any other failed execution.
-    async fn execute_action(&self, action: &ActionRun) -> AgentResult<PlatformOperationResult> {
-        if let Err((summary, record)) = self.validate(action) {
-            return self.finish(action, false, summary, record).await;
+    /// Refusals are reported as failed results, not errors: the record says exactly why the
+    /// Platform declined. This is the execution block proper for both ActionRuns and
+    /// inspections; only the validation differs.
+    async fn run(
+        &self,
+        runbook_id: &str,
+        target_ids: &[ResourceId],
+        arguments: &[NamedValue],
+        producer: Producer,
+        inspection: bool,
+    ) -> AgentResult<PlatformOperationResult> {
+        if let Err((summary, record)) = self.validate(runbook_id, target_ids, arguments, inspection)
+        {
+            return self.finish(producer, false, summary, record).await;
         }
         let Some(runbook) = self
             .config
             .runbooks
             .iter()
-            .find(|runbook| runbook.id == action.runbook_id)
+            .find(|runbook| runbook.id == runbook_id)
         else {
             return self
                 .finish(
-                    action,
+                    producer,
                     false,
                     tr!(
-                        format!(
-                            "refused: no command is configured for runbook `{}`",
-                            action.runbook_id
-                        ),
-                        format!("已拒绝：runbook `{}` 未配置命令", action.runbook_id)
+                        format!("refused: no command is configured for runbook `{runbook_id}`"),
+                        format!("已拒绝：runbook `{runbook_id}` 未配置命令")
                     ),
-                    json!({ "refused": "no command configured", "runbook_id": action.runbook_id }),
+                    json!({ "refused": "no command configured", "runbook_id": runbook_id }),
                 )
                 .await;
         };
 
         let mut commands = Vec::new();
-        for target in &action.target_ids {
-            match self.render(&runbook.command, target, action) {
+        for target in target_ids {
+            match self.render(&runbook.command, target, arguments) {
                 Ok(command) => commands.push((target.clone(), command)),
                 Err(reason) => {
                     return self
                         .finish(
-                            action,
+                            producer,
                             false,
                             tr!(format!("refused: {reason}"), format!("已拒绝：{reason}")),
                             json!({ "refused": reason, "target": target }),
@@ -442,19 +496,14 @@ impl AgentsPlatformPort for LocalCommandPlatform {
         if self.config.dry_run {
             return self
                 .finish(
-                    action,
+                    producer,
                     true,
                     tr!(
                         format!(
-                            "dry run: would execute {} command(s) for `{}`",
-                            commands.len(),
-                            action.runbook_id
-                        ),
-                        format!(
-                            "演练：本应为 `{}` 执行 {} 条命令",
-                            action.runbook_id,
+                            "dry run: would execute {} command(s) for `{runbook_id}`",
                             commands.len()
-                        )
+                        ),
+                        format!("演练：本应为 `{runbook_id}` 执行 {} 条命令", commands.len())
                     ),
                     json!({ "dry_run": true, "commands": commands }),
                 )
@@ -464,8 +513,9 @@ impl AgentsPlatformPort for LocalCommandPlatform {
 
         // The execution block proper: hold the lanes for every target, then run the
         // per-target executors in order. Each executor reaps its process before the next
-        // starts, and the lanes are released only after the last one has.
-        let _lanes = self.lanes.acquire(&action.target_ids).await;
+        // starts, and the lanes are released only after the last one has. Inspections take
+        // the lanes too, so a log read never interleaves with a restart of the same target.
+        let _lanes = self.lanes.acquire(target_ids).await;
         let timeout = Duration::from_secs(self.config.command_timeout_secs);
         let mut runs = Vec::new();
         let mut all_ok = true;
@@ -501,7 +551,7 @@ impl AgentsPlatformPort for LocalCommandPlatform {
             runs.push(entry);
         }
         self.finish(
-            action,
+            producer,
             all_ok,
             {
                 let outcome_text = if all_ok {
@@ -511,20 +561,51 @@ impl AgentsPlatformPort for LocalCommandPlatform {
                 };
                 tr!(
                     format!(
-                        "executed {} command(s) for `{}`: {}",
-                        commands.len(),
-                        action.runbook_id,
-                        outcome_text
+                        "executed {} command(s) for `{runbook_id}`: {outcome_text}",
+                        commands.len()
                     ),
                     format!(
-                        "已为 `{}` 执行 {} 条命令：{}",
-                        action.runbook_id,
-                        commands.len(),
-                        outcome_text
+                        "已为 `{runbook_id}` 执行 {} 条命令：{outcome_text}",
+                        commands.len()
                     )
                 )
             },
             json!({ "dry_run": false, "runs": runs }),
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl AgentsPlatformPort for LocalCommandPlatform {
+    /// Validates, renders, and (unless dry-run) executes the runbook once per target.
+    ///
+    /// Refusals are reported as failed results, not errors: the ActionRun records exactly why the
+    /// Platform declined, and the Scheduler treats it like any other failed execution.
+    async fn execute_action(&self, action: &ActionRun) -> AgentResult<PlatformOperationResult> {
+        self.run(
+            &action.runbook_id,
+            &action.target_ids,
+            &action.arguments,
+            Producer::Action(action.action_run_id),
+            false,
+        )
+        .await
+    }
+
+    /// Runs a non-mutating runbook for a running Job and records the output as an Artifact
+    /// produced by that Job. A mutating runbook is refused here regardless of who asked.
+    async fn inspect(
+        &self,
+        job: &Job,
+        request: &InspectionRequest,
+    ) -> AgentResult<PlatformOperationResult> {
+        self.run(
+            &request.runbook_id,
+            &request.target_ids,
+            &request.arguments,
+            Producer::Job(job.job_id),
+            true,
         )
         .await
     }

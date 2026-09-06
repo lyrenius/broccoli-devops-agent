@@ -119,6 +119,7 @@ async fn matrix_drives_auto_approve_deny_and_rate_limit() {
         TeamBackend::Harness {
             client: std::sync::Arc::new(client),
             budget: Default::default(),
+            model: "scripted-model".into(),
             label: "scripted".into(),
         },
         platform_config(),
@@ -223,6 +224,7 @@ async fn contest_mode_denies_destructive_rows() {
         TeamBackend::Harness {
             client: std::sync::Arc::new(client),
             budget: Default::default(),
+            model: "scripted-model".into(),
             label: "scripted".into(),
         },
         platform_config(),
@@ -251,6 +253,7 @@ async fn platform_refuses_unconfigured_runbooks() {
         TeamBackend::Harness {
             client: std::sync::Arc::new(client),
             budget: Default::default(),
+            model: "scripted-model".into(),
             label: "scripted".into(),
         },
         platform_config(),

@@ -125,6 +125,7 @@ fn runner(
         TeamBackend::Harness {
             client: Arc::new(ScriptedModelClient::new(turns)),
             budget: Default::default(),
+            model: "scripted-model".into(),
             label: "scripted".into(),
         },
         platform,

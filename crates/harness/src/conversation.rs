@@ -35,6 +35,12 @@ pub enum Item {
         /// The model's text.
         text: String,
     },
+    /// A notice written by the harness itself between turns: a budget warning, or the
+    /// announcement of a wrap-up turn. Always trusted; never quotes external text.
+    Notice {
+        /// The notice text.
+        text: String,
+    },
     /// A tool invocation requested by the model.
     ToolCall {
         /// Backend-assigned call ID, echoed by the matching output.

@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 use crate::error::{AgentError, AgentResult};
 use crate::i18n::Language;
 use crate::platform::PlatformConfig;
+use crate::runner::PassPolicy;
+use crate::usage::{Pricing, SpendBudget};
 
 /// Default environment variable holding the model API key.
 pub const DEFAULT_API_KEY_ENV: &str = "BROCCOLI_MODEL_API_KEY";
@@ -53,7 +55,7 @@ impl Default for TopologyConfig {
 }
 
 /// Model relay settings for the harness-backed Teams and, later, the Scheduler Policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
     /// OpenAI-compatible base URL including the API prefix, e.g. `https://api.thuics.icu/v1`.
     pub base_url: String,
@@ -74,6 +76,17 @@ pub struct ModelConfig {
     /// Maximum tool calls per agent run.
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: u32,
+    /// Maximum read-only inspections (status queries, log tails) the model may run per pass.
+    #[serde(default = "default_max_inspections")]
+    pub max_inspections: u32,
+    /// Maximum tokens one pass may spend before the model is asked to conclude with what it has.
+    /// Zero, the default, leaves the turn and tool-call budgets as the only per-pass limits.
+    #[serde(default)]
+    pub max_tokens_per_run: u64,
+    /// What the relay charges, per million tokens. Without it tokens are still counted; only the
+    /// money cannot be, so every cost reads as absent instead of as zero.
+    #[serde(default)]
+    pub pricing: Option<Pricing>,
 }
 
 fn default_api_key_env() -> String {
@@ -94,6 +107,12 @@ fn default_max_model_turns() -> u32 {
 }
 fn default_max_tool_calls() -> u32 {
     16
+}
+fn default_max_inspections() -> u32 {
+    PassPolicy::default().max_inspections
+}
+fn default_max_auto_passes() -> u32 {
+    PassPolicy::default().max_auto_passes
 }
 
 impl ModelConfig {
@@ -130,18 +149,32 @@ impl ModelConfig {
         HarnessBudget {
             max_model_turns: self.max_model_turns,
             max_tool_calls: self.max_tool_calls,
+            max_total_tokens: self.max_tokens_per_run,
             ..HarnessBudget::default()
         }
     }
 }
 
-/// Agent-wide behaviour: the language everything the agent writes comes out in.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// Agent-wide behaviour: the output language and the investigation-loop budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSection {
     /// `en` or `zh-CN`. Fixed for the life of the process; the consoles switch their own
     /// language at runtime independently.
     pub language: Language,
+    /// Passes the control plane runs on its own per human report or per send-upstream review,
+    /// the first pass included: a probe request or a follow-up after actions spends one. One
+    /// means a single pass and then a human.
+    pub max_auto_passes: u32,
+}
+
+impl Default for AgentSection {
+    fn default() -> Self {
+        Self {
+            language: Language::default(),
+            max_auto_passes: default_max_auto_passes(),
+        }
+    }
 }
 
 /// HTTP API section of the agent config.
@@ -165,7 +198,7 @@ impl Default for ApiConfig {
 }
 
 /// The complete agent configuration file.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     /// Agent-wide behaviour (output language).
@@ -180,6 +213,8 @@ pub struct AppConfig {
     pub platform: PlatformConfig,
     /// HTTP API for the web console and TUI.
     pub api: ApiConfig,
+    /// Cumulative spend ceiling across the data directory; reaching it freezes the Scheduler.
+    pub budget: SpendBudget,
 }
 
 impl AppConfig {
@@ -230,6 +265,19 @@ impl AppConfig {
             Self::load(path)
         } else {
             Ok(Self::default())
+        }
+    }
+
+    /// The investigation-loop budgets: passes from `[agent]`, inspections from `[model]`.
+    pub fn pass_policy(&self) -> PassPolicy {
+        PassPolicy {
+            max_auto_passes: self.agent.max_auto_passes.max(1),
+            max_inspections: self
+                .model
+                .as_ref()
+                .map_or(PassPolicy::default().max_inspections, |model| {
+                    model.max_inspections
+                }),
         }
     }
 
@@ -290,11 +338,30 @@ mod tests {
             "#,
         )
         .unwrap();
+        assert_eq!(config.pass_policy(), PassPolicy::default());
         let model = config.model.unwrap();
         assert_eq!(model.api_key_env, DEFAULT_API_KEY_ENV);
         assert_eq!(model.wire_api, WireApi::Chat);
         assert_eq!(model.timeout_secs, 120);
         assert_eq!(model.harness_budget().max_model_turns, 8);
+
+        let tuned = AppConfig::from_toml(
+            r#"
+            [agent]
+            max_auto_passes = 0
+            [model]
+            base_url = "https://api.thuics.icu/v1"
+            model = "gpt-5.6-sol"
+            max_inspections = 2
+            "#,
+        )
+        .unwrap();
+        assert_eq!(tuned.pass_policy().max_inspections, 2);
+        assert_eq!(
+            tuned.pass_policy().max_auto_passes,
+            1,
+            "zero passes would mean no work at all; clamped to one"
+        );
     }
 
     #[test]

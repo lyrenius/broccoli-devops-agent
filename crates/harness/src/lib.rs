@@ -8,7 +8,7 @@
 //! - a [`ToolRegistry`] of allowlisted tools with JSON-schema parameter specs,
 //! - the [`ModelClient`] boundary a concrete model backend implements, and
 //! - [`run_agent`], a bounded loop that lets a model call tools until it produces a terminal
-//!   result or hits a limit.
+//!   result or hits a limit, reporting the tokens it spent.
 //!
 //! With the `openai` feature, [`openai::OpenAiClient`] provides a [`ModelClient`] over any
 //! OpenAI-compatible endpoint (official API or a relay), in either the Responses or Chat wire
@@ -21,8 +21,12 @@
 //!
 //! The runtime philosophy matches the architecture document: the model proposes, the harness
 //! enforces. Unknown tools, malformed arguments, and timeouts become error outputs the model can
-//! see and recover from; turn and tool-call budgets stop runaway loops; cancellation is
-//! cooperative; and every step lands in the transcript so any run can be replayed byte-for-byte.
+//! see and recover from; turn and tool-call budgets stop runaway loops — with a warning before
+//! the tool budget runs out and a wrap-up turn that offers only the terminal tools once it has,
+//! so a stopped run still ends in a structured result whenever the model is willing to conclude;
+//! transient backend failures are retried with backoff; cancellation is cooperative; and every
+//! step, the harness's own notices included, lands in the transcript so any run can be replayed
+//! byte-for-byte.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -39,7 +43,7 @@ pub mod tool;
 pub use agent::{
     AgentConfig, AgentOutcome, AgentRunReport, CancelHandle, CancelToken, cancel_pair, run_agent,
 };
-pub use client::{AssistantItem, ModelClient, ModelRequest};
+pub use client::{AssistantItem, ModelClient, ModelRequest, ModelTurn, Usage};
 pub use conversation::{Item, Transcript, Trust, fence_untrusted};
 pub use error::{HarnessError, HarnessResult};
 pub use tool::{Tool, ToolHandler, ToolRegistry, ToolResult, ToolSpec, tool_fn};

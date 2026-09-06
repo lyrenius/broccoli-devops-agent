@@ -141,6 +141,15 @@ pub enum FeedbackOrigin {
         /// The Team's failure summary.
         summary: String,
     },
+    /// A Job asked for more observations when no automatic pass was left to collect them.
+    StalledJob {
+        /// The stalled Job.
+        job_id: JobId,
+        /// The Team's summary of what it still needed.
+        summary: String,
+        /// Probe IDs it asked for.
+        requested_probe_ids: Vec<String>,
+    },
 }
 
 /// Human-confirmed feedback that participates in the next processing pass.
@@ -228,6 +237,21 @@ impl HumanFeedback {
             FeedbackOrigin::FailedJob { summary, .. } => tr!(
                 format!("The previous Job failed: {summary}."),
                 format!("上一轮任务失败：{summary}。")
+            ),
+            FeedbackOrigin::StalledJob {
+                summary,
+                requested_probe_ids,
+                ..
+            } => tr!(
+                format!(
+                    "The previous Job needed more observations ({}) but no automatic pass was \
+                     left: {summary}.",
+                    requested_probe_ids.join(", ")
+                ),
+                format!(
+                    "上一轮任务需要更多观测（{}），但已没有自动轮次可用：{summary}。",
+                    requested_probe_ids.join(", ")
+                )
             ),
         };
         if let Some(comment) = &self.comment {

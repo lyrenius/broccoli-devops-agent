@@ -1,6 +1,6 @@
 # Broccoli DevOps Agent
 
-This is an agentic operations control plane for the Broccoli online judging system. It loads a static deployment topology, probes real endpoints, builds immutable Snapshots, accepts human reports, dispatches an Operate Job over an exact sanitized Snapshot View (through a deterministic Team or a model-backed one), runs the Job's proposed actions through an approved authority matrix into the Agents Platform, verifies their effect, parks every denial and failure in a three-category inbox for a human, sends human feedback back upstream as a revising Job, persists everything to disk, and recovers control state after a restart. Machines are touched only through the runbook commands you configure, and only once you leave dry-run.
+This is an agentic operations control plane for the Broccoli online judging system. It loads a static deployment topology, probes real endpoints, builds immutable Snapshots, accepts human reports, dispatches an Operate Job over an exact sanitized Snapshot View (through a deterministic Team or a model-backed one), runs the Job's proposed actions through an approved authority matrix into the Agents Platform, verifies their effect, parks every denial and failure in a three-category inbox for a human, sends human feedback back upstream as a revising Job, persists everything to disk, and recovers control state after a restart. An investigation is a bounded chain of such passes: a pass can inspect a target read-only, ask for specific probes and be superseded by a pass over a fresh Snapshot, or ask for a follow-up pass to check the effect of its actions — and a model's "solved" counts only when the Scheduler can confirm it. Machines are touched only through the runbook commands you configure, and only once you leave dry-run.
 
 See the [architecture document](./docs/architecture.md) for the complete design and the [Excalidraw source](./docs/broccoli-devops-agent-architecture.excalidraw) for the editable diagram.
 
@@ -8,7 +8,7 @@ See the [architecture document](./docs/architecture.md) for the complete design 
 
 Two files, both safe to commit — neither holds credentials:
 
-- `config/agent.toml` (copy from [`config/agent.example.toml`](./config/agent.example.toml)): the agent's output language (`[agent] language = "en"` or `"zh-CN"` — everything the agent writes, from event summaries and denial reasons to the model's diagnoses, comes out in it; fixed for the life of the process), data directory, topology path, and the model relay (`base_url`, `model`, `wire_api`) with the **name** of the environment variable that carries the API key. Export that variable before running a model-backed command.
+- `config/agent.toml` (copy from [`config/agent.example.toml`](./config/agent.example.toml)): the agent's output language (`[agent] language = "en"` or `"zh-CN"` — everything the agent writes, from event summaries and denial reasons to the model's diagnoses, comes out in it; fixed for the life of the process), data directory, topology path, the model relay (`base_url`, `model`, `wire_api`) with the **name** of the environment variable that carries the API key, the per-run budgets (`max_model_turns`, `max_tool_calls`, `max_inspections`, `max_tokens_per_run`), what the relay charges (`[model.pricing]`, per million tokens), the cumulative spend ceiling (`[budget]`), and `[agent] max_auto_passes` — how many passes the control plane runs on its own per report or per send-back before a human must continue (default three: observe, act, check). Export the key variable before running a model-backed command.
 - `config/topology.toml` (copy from [`config/topology.example.toml`](./config/topology.example.toml)): every machine and endpoint — PostgreSQL, Redis, CephFS/object storage, the API server, frontend, judge workers, and stations — with the read-only probes used to observe them: `tcp.connect` and `http.status` for reachability (with a `degraded_above_ms` latency threshold), `redis.llen` for queue backlog, `http.json` for any unauthenticated JSON counter, and `broccoli.worker` / `broccoli.queue`, which read worker heartbeats and MQ queue depths from Broccoli's admin API (the same data as the admin dashboard), each with `min`/`max`/`expect` health criteria. The admin API needs a login with `system:view`: export `BROCCOLI_PROBE_LOGIN=username:password` before running; the topology file only names the variable.
 
 `broccoli-devops-agent config show` prints the effective configuration as JSON (key redacted) for a frontend or for checking what the agent will actually use.
@@ -31,7 +31,7 @@ cd web && pnpm install && pnpm dev          # http://localhost:5180, /api proxie
 cargo run -p broccoli-tui                   # --api http://127.0.0.1:4720 --token ...
 ```
 
-The web console has the inbox in its three categories — permission requests (approve, or reject with a comment), permission denials (who refused and why; send back upstream or acknowledge), and failures (jobs and actions; the same two decisions) — plus the live Snapshot with coverage gaps, issues and jobs with their feedback and transcript links, a live event stream, freeze/resume controls, and the human-report form. Every decision records the operator's name. The console's own language (English or 简体中文) is switched at runtime from the sidebar and remembered per browser; it defaults to the agent's configured language. The TUI covers the same operations from a terminal: `1-4` screens, `j/k` select, `a` approve, `r` reject, `b` send back upstream, `x` acknowledge (the last three prompt for a comment), `s` snapshot, `f`/`F`/`u` freeze dispatch, freeze all, resume; `--as NAME` sets the recorded operator. Set `api.token` in the config (and pass `--token` to the TUI) before binding beyond localhost.
+The web console has the inbox in its three categories — permission requests (approve, or reject with a comment), permission denials (who refused and why; send back upstream or acknowledge), and failures (jobs and actions; the same two decisions) — plus the live Snapshot with coverage gaps, issues and jobs with their feedback and transcript links, a live event stream, freeze/resume controls, the human-report form, and what the model relay has cost so far against its ceiling. Every decision records the operator's name. The console's own language (English or 简体中文) is switched at runtime from the sidebar and remembered per browser; it defaults to the agent's configured language. The TUI covers the same operations from a terminal: `1-4` screens, `j/k` select, `a` approve, `r` reject, `b` send back upstream, `x` acknowledge (the last three prompt for a comment), `s` snapshot, `f`/`F`/`u` freeze dispatch, freeze all, resume; `--as NAME` sets the recorded operator. Its Overview carries the same spend panel. Set `api.token` in the config (and pass `--token` to the TUI) before binding beyond localhost.
 
 To try the consoles without a model or a deployment, seed a demo data directory that already holds one item of each inbox category, then serve it with the deterministic Team:
 
@@ -45,11 +45,13 @@ cargo run -- serve --data data-demo --topology data-demo/topology.toml --team re
 The repository is a Cargo workspace with three crates and a strict dependency direction:
 
 - **`broccoli-devops-agent`** (root) — the control plane: domain model, ports, Scheduler, Collector, stores, Platform, authority policy, Teams, the HTTP API, and CLI. Its ports (`AgentTeamPort`, `SchedulerPolicyPort`, `SnapshotJudgePort`) are the backend-neutral seam for model-backed work.
-- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call budgets, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (the OpenAI-compatible relay client lives behind its `openai` feature) and knows nothing about Broccoli.
+- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call/token budgets with a low-budget warning and wrap-up turns that offer only the terminal tools, per-request token accounting, retries with backoff on transient backend failures, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (the OpenAI-compatible relay client lives behind its `openai` feature) and knows nothing about Broccoli.
 - **[`crates/tui`](./crates/tui)** (`broccoli-tui`) — the terminal console, a pure HTTP client of the API.
 - **[`web/`](./web)** — the web console (React 19 + Vite + TypeScript + Tailwind v4), also a pure API client, served by Vite separately. It mirrors Broccoli's web UI — the same colour tokens, sidebar navigation, cards, badges, and page headers — so operators move between the judge's admin pages and the console without a visual seam, while sharing no code with Broccoli's plugin system.
 
 The control plane depends on the harness, never the reverse; the UIs depend on nothing but the API. Model-backed integrations meet the Scheduler only at the ports: `team::HarnessOperateTeam` adapts `AgentTeamPort` onto the harness today, and a codex-backed Team implementing the same port directly is the planned second option — the Scheduler cannot tell any of them apart.
+
+The model-backed Team gets six tools per pass: `read_snapshot_view`, `inspect` (a non-mutating runbook such as `service.status` or `log.tail` on in-scope targets, through the Platform, output returned fenced as untrusted data), `request_probes` (ends the pass; a fresh Snapshot with those probes starts the next one), `report_progress`, `propose_action`, and `submit_diagnosis` (`diagnosis_only` or `solved`, optionally asking for a follow-up pass once its proposals have run). Every later pass carries the earlier ones — proposals, matrix decisions, execution and verification results — in its View. The whole chain is bounded by `max_auto_passes`, stops whenever something waits for a human, and resumes from an approval or a send-back.
 
 ## Running the v0.1 slice
 
@@ -96,6 +98,50 @@ cargo run -- actions list                                     # every ActionRun 
 Authority is decided over the whole proposal: the runbook, every target's kind (a worker restart cannot be pointed at the API server), the Job's target scope and capabilities, and the arguments — then the matrix row. Every transition is a compare-and-set, the idempotency key is claimed atomically (a duplicate of a live action is denied; a retry after a failure is allowed and escalated to approval), and a command that outlives its timeout is killed with its whole process group before the failure is reported. Verification is per operation class and graded: `strong` when the effect was observed to change, `weak` when the target was already healthy, `dry_run` when nothing executed — only real evidence resolves an Issue; otherwise the Issue waits for a human to close it.
 
 The Platform executes runbooks as the commands you map in `config/agent.toml` under `[[platform.runbooks]]` (for example `ssh {target} sudo systemctl restart broccoli-worker`); credentials stay with your SSH agent. It starts in **dry-run** mode — commands are rendered and recorded as Artifacts, not executed — until you set `dry_run = false`. Verification treats a command's exit code zero as evidence only: the target must be Healthy in the after-Snapshot, or the action ends as `VerificationFailed`.
+
+## What a run costs
+
+**Tokens and cost.** Every backend response's `usage` block is parsed (both wire formats), summed
+over the run, recorded on the Job and as a `model.usage` event, and totalled from that append-only
+log. Costs are never stored — they are derived on demand from the counts and `[model.pricing]`, so
+a changed price list re-prices history correctly and a deployment without one still gets complete
+token accounting. A relay that reports no usage is counted as a request with *unknown* tokens
+rather than as a free one, and every figure says so.
+
+```bash
+cargo run -- usage          # totals, per model, against the ceiling
+```
+
+**Budgets.** `max_tokens_per_run` bounds one pass: it stops through the same wrap-up path as the
+turn and tool-call budgets, so a run stopped on cost still ends in a structured result. `[budget]`
+bounds the deployment: reaching `max_total_tokens` or `max_total_cost` freezes the Scheduler
+(recovery restores that freeze across restarts) and refuses new reports until the ceiling is raised
+and a human resumes.
+
+
+## Testbed
+
+[`testbed/`](./testbed) brings up three OrbStack Linux machines — `infra-1` (PostgreSQL,
+Redis, SeaweedFS), `app-1` (`broccoli-server` and the frontend it serves), and `judge-1`
+(a judge worker) — each with its own Docker engine, so the control plane observes and acts
+on real services across real hosts instead of localhost ports. The controller stays on the
+Mac, as it will in the contest.
+
+```bash
+testbed/01-create-machines.sh && testbed/02-install-docker.sh
+testbed/03-build-images.sh                        # builds Broccoli on app-1
+testbed/04-deploy-infra.sh && testbed/05-deploy-app.sh && testbed/06-deploy-judge.sh
+testbed/07-verify.sh                              # inject faults, assert what the agent concludes
+```
+
+Drive the agent against it with `--config config/agent.testbed.toml`, which keeps state in
+`data-testbed/` and runs the Platform with `dry_run = false`: ActionRuns really restart
+containers, through `testbed/runbook.sh`. The worker and the queue are observed through
+Broccoli's admin API, so export the testbed admin login first:
+
+```bash
+export BROCCOLI_PROBE_LOGIN="$(bash -c 'source testbed/lib.sh; echo "$ADMIN_USER:$ADMIN_PASSWORD"')"
+```
 
 ## Recommended Reading Order
 

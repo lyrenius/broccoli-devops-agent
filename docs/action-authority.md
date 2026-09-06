@@ -74,6 +74,13 @@ Operation modes are the ones already in the domain model:
    in a loop.
 6. **Models never see this matrix as an instruction.** They see refusals as
    data. The matrix lives in the Scheduler and the Platform, not in prompts.
+7. **Observe rows double as inspections.** A running Team may call a runbook
+   of rows 1 and 17 directly — within its Job's scope, through the Scheduler's
+   inspection gateway, a bounded number of times per pass — and read the
+   output. No ActionRun and no approval, because nothing changes; but the
+   Platform refuses any runbook of another row asked for this way, every
+   inspection is an event with its output Artifact, and `fully_frozen`
+   refuses inspections too.
 
 ## Open questions for you
 

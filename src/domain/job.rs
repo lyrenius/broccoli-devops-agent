@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    ArtifactId, EventId, HumanFeedback, HumanReview, IssueId, JobId, NamedValue, ResourceId,
-    SnapshotViewRef,
+    ActionRunId, ActionStatus, ApprovalState, ArtifactId, EventId, HumanFeedback, HumanReview,
+    IssueId, JobId, NamedValue, ResourceId, SnapshotViewRef, VerificationEvidence,
 };
 use crate::error::{AgentError, AgentResult};
 
@@ -59,8 +59,71 @@ impl JobStatus {
     }
 }
 
-/// What the Scheduler grants a Job: which Team, what it may touch, and what humans said about
-/// earlier passes on the same Issue.
+/// One ActionRun of an earlier pass, as the next pass gets to see it.
+///
+/// Everything here is control-plane authored except `evidence`, which quotes machine output and
+/// is fenced as untrusted data when the View is rendered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassActionRecord {
+    /// The ActionRun.
+    pub action_run_id: ActionRunId,
+    /// Runbook that was proposed.
+    pub runbook_id: String,
+    /// Targets it named.
+    pub target_ids: Vec<ResourceId>,
+    /// Arguments it carried.
+    pub arguments: Vec<NamedValue>,
+    /// Where the ActionRun ended up (or still is).
+    pub status: ActionStatus,
+    /// What the authority matrix or a human decided.
+    pub approval: ApprovalState,
+    /// Whether the Platform only rendered the commands.
+    pub dry_run: bool,
+    /// The denial's reason, when it was denied.
+    pub denial_reason: Option<String>,
+    /// The Platform's own account of the execution.
+    pub execution_summary: Option<String>,
+    /// The Scheduler's verification conclusion.
+    pub verification_summary: Option<String>,
+    /// How much the verification proved.
+    pub verification_evidence: Option<VerificationEvidence>,
+    /// Sanitized execution output (exit codes, the tail of stderr and stdout). Machine text.
+    pub evidence: Option<String>,
+}
+
+/// One earlier pass on the same Issue: what the Team concluded and what came of it.
+///
+/// Copied into every later pass so a Team sees the whole investigation so far — what was tried,
+/// what was refused, what ran and whether it worked — instead of rediscovering it. The Team's own
+/// words (`summary`, `unresolved_questions`) are model output and are fenced as untrusted data
+/// when rendered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PassRecord {
+    /// The earlier Job.
+    pub job_id: JobId,
+    /// The Job it superseded, if any.
+    pub supersedes_job_id: Option<JobId>,
+    /// The Job it revised on human feedback, if any.
+    pub revises_job_id: Option<JobId>,
+    /// The completed pass whose actions it re-observed, if any.
+    pub continues_job_id: Option<JobId>,
+    /// How the pass ended, when it has.
+    pub outcome: Option<JobOutcome>,
+    /// The Team's summary.
+    pub summary: String,
+    /// Questions the Team left open.
+    pub unresolved_questions: Vec<String>,
+    /// Observations the Team asked for.
+    pub requested_probes: Vec<ProbeRequest>,
+    /// The ActionRuns its proposals became.
+    pub actions: Vec<PassActionRecord>,
+    /// When the pass was created.
+    pub created_at: DateTime<Utc>,
+}
+
+/// What the Scheduler grants a Job: which Team, what it may touch, what humans said about
+/// earlier passes on the same Issue, what those passes did, and how many more automatic passes
+/// the Scheduler is still willing to run.
 ///
 /// This is a constructor argument, not a layer of its own: every field lands flat on the Job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,10 +138,18 @@ pub struct JobBrief {
     pub feedback: Vec<HumanFeedback>,
     /// The Job whose outcome a human sent back upstream, when this is a revision.
     pub revises_job_id: Option<JobId>,
+    /// The completed pass whose actions this pass re-observes, when this is a follow-up.
+    pub continues_job_id: Option<JobId>,
+    /// Earlier passes on the Issue, oldest first.
+    pub earlier_passes: Vec<PassRecord>,
+    /// How many further automatic passes the Scheduler will grant after this one. Zero means
+    /// this is the last automatic pass: the Team must conclude with what it has, and only a
+    /// human can start another.
+    pub follow_up_budget: u32,
 }
 
 impl JobBrief {
-    /// A first-pass brief with no feedback.
+    /// A first-pass brief with no feedback, no history, and no further automatic passes.
     pub fn new(
         team_kind: TeamKind,
         allowed_capabilities: Vec<String>,
@@ -90,6 +161,9 @@ impl JobBrief {
             allowed_target_ids,
             feedback: Vec::new(),
             revises_job_id: None,
+            continues_job_id: None,
+            earlier_passes: Vec::new(),
+            follow_up_budget: 0,
         }
     }
 
@@ -97,6 +171,19 @@ impl JobBrief {
     pub fn revising(mut self, revises_job_id: JobId, feedback: Vec<HumanFeedback>) -> Self {
         self.revises_job_id = Some(revises_job_id);
         self.feedback = feedback;
+        self
+    }
+
+    /// Turns the brief into a follow-up of a completed pass whose actions have run.
+    pub fn continuing(mut self, continues_job_id: JobId) -> Self {
+        self.continues_job_id = Some(continues_job_id);
+        self
+    }
+
+    /// Attaches the Issue's pass history and the remaining automatic-pass budget.
+    pub fn with_history(mut self, earlier_passes: Vec<PassRecord>, follow_up_budget: u32) -> Self {
+        self.earlier_passes = earlier_passes;
+        self.follow_up_budget = follow_up_budget;
         self
     }
 }
@@ -211,6 +298,11 @@ pub struct JobResult {
     pub proposed_actions: Vec<ActionProposal>,
     /// Questions that remain unanswered.
     pub unresolved_questions: Vec<String>,
+    /// Whether the Team wants another pass over a fresh Snapshot once its proposals have run,
+    /// to check their effect and decide what comes next. Honoured only within the automatic
+    /// pass budget, and only once every proposal has been executed or denied.
+    #[serde(default)]
+    pub follow_up_requested: bool,
 }
 
 impl JobResult {
@@ -228,6 +320,7 @@ impl JobResult {
             options: Vec::new(),
             proposed_actions: Vec::new(),
             unresolved_questions: Vec::new(),
+            follow_up_requested: false,
         }
     }
 }
@@ -272,6 +365,9 @@ pub struct TeamCallback {
     pub artifact_ids: Vec<ArtifactId>,
     /// Final result, present only when the callback ends the current stage.
     pub final_result: Option<JobResult>,
+    /// What the pass spent, present on the callback that ends a model-backed pass.
+    #[serde(default)]
+    pub usage: Option<ModelUsage>,
     /// Time at which the callback was created.
     pub created_at: DateTime<Utc>,
 }
@@ -290,6 +386,7 @@ impl TeamCallback {
             evidence_ids: Vec::new(),
             artifact_ids: Vec::new(),
             final_result: None,
+            usage: None,
             created_at: Utc::now(),
         }
     }
@@ -299,6 +396,12 @@ impl TeamCallback {
     /// This builder consumes and returns `self` so Teams can assemble a callback fluently.
     pub fn with_final_result(mut self, result: JobResult) -> Self {
         self.final_result = Some(result);
+        self
+    }
+
+    /// Reports what the pass spent. A deterministic Team spends nothing and never calls this.
+    pub fn with_usage(mut self, usage: ModelUsage) -> Self {
+        self.usage = Some(usage);
         self
     }
 
@@ -319,6 +422,59 @@ impl TeamCallback {
                 JobOutcome::Solved | JobOutcome::DiagnosisOnly => TeamCallbackKind::Completed,
             },
         }
+    }
+}
+
+/// What one model-backed pass spent, as the backend reported it.
+///
+/// Token counts are facts the backend states and the control plane records; money is not stored
+/// here. Prices change, are configured per deployment, and are not part of what happened — so a
+/// cost is computed from these counts and the configured price list whenever one is displayed
+/// ([`crate::usage`]), and the record itself stays true no matter what the price list says later.
+///
+/// `requests_without_usage` counts responses that carried no usage block at all. It exists so a
+/// relay that reports nothing cannot masquerade as a free pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    /// Model that was billed.
+    pub model: String,
+    /// Prompt tokens, cached ones included.
+    pub input_tokens: u64,
+    /// Portion of `input_tokens` served from the backend's prompt cache.
+    pub cached_input_tokens: u64,
+    /// Tokens the model generated.
+    pub output_tokens: u64,
+    /// Model requests the pass made.
+    pub requests: u32,
+    /// Requests whose response reported no usage, so their tokens are unknown.
+    pub requests_without_usage: u32,
+}
+
+impl ModelUsage {
+    /// Input plus output tokens.
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+
+    /// Whether every request in this record reported its usage.
+    pub fn is_complete(&self) -> bool {
+        self.requests_without_usage == 0
+    }
+
+    /// Adds another record's counts into this one; the model name of the first is kept.
+    pub fn absorb(&mut self, other: &Self) {
+        if self.model.is_empty() {
+            self.model = other.model.clone();
+        }
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.cached_input_tokens = self
+            .cached_input_tokens
+            .saturating_add(other.cached_input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.requests = self.requests.saturating_add(other.requests);
+        self.requests_without_usage = self
+            .requests_without_usage
+            .saturating_add(other.requests_without_usage);
     }
 }
 
@@ -350,12 +506,27 @@ pub struct Job {
     /// The Job a human sent back upstream, when this Job is the resulting revision.
     #[serde(default)]
     pub revises_job_id: Option<JobId>,
-    /// A human's review of this Job's failure, once given; a failed Job without one is in the
-    /// Failed Job inbox.
+    /// The completed pass whose actions this Job re-observes, when this Job is a follow-up.
+    #[serde(default)]
+    pub continues_job_id: Option<JobId>,
+    /// Earlier passes on this Issue, oldest first, rendered into the View so the Team sees the
+    /// whole investigation and the replayable input is complete on its own.
+    #[serde(default)]
+    pub earlier_passes: Vec<PassRecord>,
+    /// Further automatic passes the Scheduler will grant after this one; zero means the Team
+    /// must conclude here.
+    #[serde(default)]
+    pub follow_up_budget: u32,
+    /// A human's review of this Job, once given. A Job that failed, or that needed more data
+    /// when no automatic pass was left, waits in the Failed inbox until it has one.
     #[serde(default)]
     pub review: Option<HumanReview>,
     /// Final result returned by the Team.
     pub result: Option<JobResult>,
+    /// What this pass spent at the model relay, once it has finished. Absent on a Job run by a
+    /// deterministic Team, and on one that never reached its final callback.
+    #[serde(default)]
+    pub usage: Option<ModelUsage>,
     /// Time at which the Job was created.
     pub created_at: DateTime<Utc>,
     /// Time at which Job execution started.
@@ -381,22 +552,27 @@ impl Job {
             allowed_target_ids: brief.allowed_target_ids,
             feedback: brief.feedback,
             revises_job_id: brief.revises_job_id,
+            continues_job_id: brief.continues_job_id,
+            earlier_passes: brief.earlier_passes,
+            follow_up_budget: brief.follow_up_budget,
             review: None,
             result: None,
+            usage: None,
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
         }
     }
 
-    /// Records a human's review of a failed Job.
+    /// Records a human's review of a Job in the Failed inbox.
     ///
-    /// Only a `Failed` Job is reviewable, and only once: the review is what takes the Job out of
-    /// the Failed Job inbox, so a second review would have nothing to act on.
+    /// Only a Job that failed or stalled needing more data is reviewable, and only once: the
+    /// review is what takes the Job out of the inbox, so a second review would have nothing to
+    /// act on.
     pub fn record_review(&mut self, review: HumanReview) -> AgentResult<()> {
-        if self.status != JobStatus::Failed {
+        if !matches!(self.status, JobStatus::Failed | JobStatus::NeedsResnapshot) {
             return Err(AgentError::InvalidInput(format!(
-                "Job `{}` is `{:?}`, not `Failed`; only failed Jobs are reviewed",
+                "Job `{}` is `{:?}`, not `Failed` or `NeedsResnapshot`; only those are reviewed",
                 self.job_id, self.status
             )));
         }
@@ -410,9 +586,16 @@ impl Job {
         Ok(())
     }
 
-    /// Whether this Job sits in the Failed Job inbox: it failed and nobody has reviewed it.
+    /// Whether this Job sits in the Failed inbox: it failed, or it needs more data and no
+    /// automatic pass was left to fetch it, and nobody has reviewed it yet.
     pub fn needs_review(&self) -> bool {
-        self.status == JobStatus::Failed && self.review.is_none()
+        matches!(self.status, JobStatus::Failed | JobStatus::NeedsResnapshot)
+            && self.review.is_none()
+    }
+
+    /// One-based number of this pass on its Issue.
+    pub fn pass_number(&self) -> usize {
+        self.earlier_passes.len() + 1
     }
 
     /// Returns the canonical Snapshot ID for this Job.

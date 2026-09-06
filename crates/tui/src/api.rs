@@ -24,6 +24,81 @@ pub struct Status {
     /// Startup recovery summary, when the server recovered at startup.
     #[serde(default)]
     pub recovery: Option<Value>,
+    /// What the model relay has been asked to do, and what it cost.
+    #[serde(default)]
+    pub usage: UsageTotals,
+}
+
+/// Token and cost totals from `/api/status` and `/api/usage`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UsageTotals {
+    /// Model-backed passes counted.
+    #[serde(default)]
+    pub passes: u32,
+    /// Input tokens, cached ones included.
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Output tokens.
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Input plus output.
+    #[serde(default)]
+    pub total_tokens: u64,
+    /// Requests whose response reported no usage.
+    #[serde(default)]
+    pub requests_without_usage: u32,
+    /// Cost under the configured price list, when there is one.
+    #[serde(default)]
+    pub cost: Option<f64>,
+    /// Currency of `cost`.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// The configured ceiling and how close the totals are to it.
+    #[serde(default)]
+    pub budget: Option<BudgetStatus>,
+}
+
+/// How the totals stand against the configured spend ceiling.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BudgetStatus {
+    /// Whether the ceiling has been reached.
+    #[serde(default)]
+    pub exceeded: bool,
+    /// Fraction of the ceiling used, clamped to one.
+    #[serde(default)]
+    pub used_fraction: f64,
+}
+
+impl UsageTotals {
+    /// One line for the status bar: tokens, cost, and any gap in the record.
+    pub fn one_line(&self) -> String {
+        if self.passes == 0 {
+            return "no model passes yet".to_string();
+        }
+        let mut line = format!(
+            "{} pass(es) · {} in + {} out = {} tokens",
+            self.passes, self.input_tokens, self.output_tokens, self.total_tokens
+        );
+        if let (Some(cost), Some(currency)) = (self.cost, self.currency.as_deref()) {
+            line.push_str(&format!(" · {cost:.4} {currency}"));
+        }
+        if let Some(budget) = &self.budget {
+            line.push_str(&format!(
+                " · {:.0}% of budget",
+                budget.used_fraction * 100.0
+            ));
+            if budget.exceeded {
+                line.push_str(" (spent — dispatch frozen)");
+            }
+        }
+        if self.requests_without_usage > 0 {
+            line.push_str(&format!(
+                " · {} request(s) reported no usage",
+                self.requests_without_usage
+            ));
+        }
+        line
+    }
 }
 
 /// Object counts inside `/api/status`.

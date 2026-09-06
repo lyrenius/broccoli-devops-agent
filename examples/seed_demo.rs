@@ -16,6 +16,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use broccoli_agent_harness::Usage;
 use broccoli_agent_harness::testing::{ScriptedModelClient, call, text};
 use broccoli_devops_agent::domain::HumanReport;
 use broccoli_devops_agent::platform::{PlatformConfig, RunbookCommand};
@@ -127,7 +128,10 @@ probes = [{{ probe = "http.status", url = "http://127.0.0.1:{}/healthz" }}]
         )],
         // Report 2: prose instead of the terminal tool — a failed Job.
         vec![text("The printer looks fine to me, nothing to do.")],
-    ]);
+    ])
+    // A real relay reports its token counts; the demo's does too, so the console's spend
+    // panel and the price list have something to show.
+    .with_usage_per_turn(Usage::reported(12_400, 8_192, 1_150));
     let platform = PlatformConfig {
         dry_run: true,
         runbooks: vec![
@@ -148,6 +152,7 @@ probes = [{{ probe = "http.status", url = "http://127.0.0.1:{}/healthz" }}]
         TeamBackend::Harness {
             client: Arc::new(client),
             budget: Default::default(),
+            model: "scripted-demo-model".into(),
             label: "scripted demo".into(),
         },
         platform,

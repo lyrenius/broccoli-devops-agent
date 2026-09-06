@@ -1,4 +1,4 @@
-import type { ActionRun, EventRecord, Inbox, Issue, Job, ReviewOutcome, Snapshot, Status } from "./types";
+import type { ActionRun, EventRecord, Inbox, Issue, Job, PassOutcome, ReviewOutcome, Snapshot, Status, UsageTotals } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -41,10 +41,11 @@ export const api = {
     post<ReviewOutcome<Job>>(`/api/jobs/${id}/review`, { by, decision, comment }),
   closeIssue: (id: string, outcome: IssueClosure, by: string, comment: string) =>
     post<Issue>(`/api/issues/${id}/close`, { outcome, by, comment }),
+  usage: () => request<UsageTotals>("/api/usage"),
   events: (limit: number) => request<EventRecord[]>(`/api/events?limit=${limit}`),
   transition: (name: "freeze-dispatch" | "freeze-all" | "resume") => post<{ mode: string }>(`/api/scheduler/${name}`),
   report: (body: { title: string; description: string; reporter: string; priority?: string }) =>
-    post<{ issue: Issue; job: Job; actions: ActionRun[] }>("/api/reports", body),
+    post<{ issue: Issue; job: Job; actions: ActionRun[]; passes: PassOutcome[] }>("/api/reports", body),
 };
 
 /** Subscribes to the live event stream after the given sequence. */

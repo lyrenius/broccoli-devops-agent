@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::client::{AssistantItem, ModelClient, ModelRequest};
+use crate::client::{AssistantItem, ModelClient, ModelRequest, ModelTurn, Usage};
 use crate::conversation::Item;
 use crate::error::{HarnessError, HarnessResult};
 use crate::tool::ToolSpec;
@@ -86,7 +86,11 @@ impl OpenAiClient {
             .json(body)
             .send()
             .await
-            .map_err(|error| HarnessError::Model(format!("request to {url} failed: {error}")))?;
+            .map_err(|error| {
+                // A connection failure or request timeout is transient by nature: nothing about
+                // the request was judged. The loop retries these.
+                HarnessError::ModelUnavailable(format!("request to {url} failed: {error}"))
+            })?;
         let status = response.status();
         let text = response
             .text()
@@ -94,32 +98,87 @@ impl OpenAiClient {
             .map_err(|error| HarnessError::Model(format!("reading response failed: {error}")))?;
         if !status.is_success() {
             let snippet: String = text.chars().take(600).collect();
-            return Err(HarnessError::Model(format!(
-                "{url} returned HTTP {status}: {snippet}"
-            )));
+            let message = format!("{url} returned HTTP {status}: {snippet}");
+            return Err(if is_transient_status(status.as_u16()) {
+                HarnessError::ModelUnavailable(message)
+            } else {
+                HarnessError::Model(message)
+            });
         }
         serde_json::from_str(&text)
             .map_err(|error| HarnessError::Model(format!("invalid JSON from {url}: {error}")))
     }
 }
 
+/// HTTP statuses that mean "try again", not "the request was wrong": rate limits, timeouts, and
+/// server-side failures. Everything else (400, 401, 404, ...) is permanent for this request.
+fn is_transient_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
 #[async_trait]
 impl ModelClient for OpenAiClient {
     /// Sends the conversation in the configured wire format and parses the assistant turn.
-    async fn complete(&self, request: ModelRequest<'_>) -> HarnessResult<Vec<AssistantItem>> {
-        match self.config.wire_api {
+    ///
+    /// The response's `usage` block travels back with the items: it is the only place the real
+    /// token counts exist, and dropping it here would make every figure upstream a guess.
+    async fn complete(&self, request: ModelRequest<'_>) -> HarnessResult<ModelTurn> {
+        let response = match self.config.wire_api {
             WireApi::Responses => {
                 let body = responses_request(&self.config.model, request);
-                let response = self.post("/responses", &body).await?;
-                parse_responses_output(&response)
+                self.post("/responses", &body).await?
             }
             WireApi::Chat => {
                 let body = chat_request(&self.config.model, request);
-                let response = self.post("/chat/completions", &body).await?;
-                parse_chat_output(&response)
+                self.post("/chat/completions", &body).await?
             }
-        }
+        };
+        let items = match self.config.wire_api {
+            WireApi::Responses => parse_responses_output(&response)?,
+            WireApi::Chat => parse_chat_output(&response)?,
+        };
+        Ok(ModelTurn::with_usage(items, parse_usage(&response)))
     }
+}
+
+/// Reads the token counts out of a response body, in either wire format.
+///
+/// The Responses API names them `input_tokens`/`output_tokens`, Chat Completions
+/// `prompt_tokens`/`completion_tokens`, and relays are not always consistent about which they
+/// emit — so both spellings are accepted and the first one present wins. A body with no usable
+/// `usage` object yields [`Usage::unreported`]: the request is counted, its tokens are not
+/// invented.
+pub fn parse_usage(response: &Value) -> Usage {
+    let usage = &response["usage"];
+    if !usage.is_object() {
+        return Usage::unreported();
+    }
+    let count = |names: &[&str]| -> Option<u64> {
+        names.iter().find_map(|name| {
+            usage[*name]
+                .as_u64()
+                .or_else(|| usage[*name].as_f64().map(|v| v as u64))
+        })
+    };
+    let input = count(&["input_tokens", "prompt_tokens"]);
+    let output = count(&["output_tokens", "completion_tokens"]);
+    if input.is_none() && output.is_none() {
+        return Usage::unreported();
+    }
+    // Both formats nest the cache hit one level down, under differently named details objects.
+    let cached = usage["input_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
+        .or_else(|| usage["cached_tokens"].as_u64())
+        .unwrap_or(0);
+    let input = input.unwrap_or(0);
+    Usage::reported(input, cached.min(input), output.unwrap_or(0))
+}
+
+/// Renders a harness notice as message text. Both wire formats carry it in the user role — the
+/// only role every relay accepts mid-conversation — with a prefix that says who is speaking.
+fn notice_text(text: &str) -> String {
+    format!("[harness notice] {text}")
 }
 
 /// Encodes tool arguments the way both wire formats expect: a JSON string.
@@ -140,6 +199,7 @@ pub fn responses_request(model: &str, request: ModelRequest<'_>) -> Value {
         .iter()
         .map(|item| match item {
             Item::UserInput { text, .. } => json!({ "role": "user", "content": text }),
+            Item::Notice { text } => json!({ "role": "user", "content": notice_text(text) }),
             Item::AssistantText { text } => json!({ "role": "assistant", "content": text }),
             Item::ToolCall {
                 call_id,
@@ -265,6 +325,10 @@ pub fn chat_request(model: &str, request: ModelRequest<'_>) -> Value {
             Item::UserInput { text, .. } => {
                 flush(&mut messages, &mut pending_text, &mut pending_calls);
                 messages.push(json!({ "role": "user", "content": text }));
+            }
+            Item::Notice { text } => {
+                flush(&mut messages, &mut pending_text, &mut pending_calls);
+                messages.push(json!({ "role": "user", "content": notice_text(text) }));
             }
             Item::ToolOutput {
                 call_id, output, ..
@@ -478,6 +542,44 @@ mod tests {
             parse_chat_output(&response),
             Err(HarnessError::Model(_))
         ));
+    }
+
+    #[test]
+    fn usage_is_read_from_either_wire_format_and_never_invented() {
+        let responses = json!({
+            "output": [],
+            "usage": {
+                "input_tokens": 1200,
+                "output_tokens": 340,
+                "input_tokens_details": {"cached_tokens": 1024}
+            }
+        });
+        assert_eq!(parse_usage(&responses), Usage::reported(1200, 1024, 340));
+
+        let chat = json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 90,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 64},
+                "total_tokens": 100
+            }
+        });
+        assert_eq!(parse_usage(&chat), Usage::reported(90, 64, 10));
+
+        // A relay that reports nothing is counted as one request with unknown tokens, not as a
+        // free one: a silent zero would understate the bill.
+        let silent = parse_usage(&json!({"choices": []}));
+        assert_eq!(silent.total_tokens(), 0);
+        assert!(!silent.is_complete());
+        assert_eq!(silent.requests, 1);
+        assert!(!parse_usage(&json!({"usage": {"total_tokens": 7}})).is_complete());
+
+        // A cache figure larger than the input it is a subset of cannot be trusted to exceed it.
+        let odd = parse_usage(&json!({
+            "usage": {"input_tokens": 10, "output_tokens": 1, "cached_tokens": 99}
+        }));
+        assert_eq!(odd.cached_input_tokens, 10);
     }
 
     #[test]

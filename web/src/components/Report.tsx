@@ -3,7 +3,7 @@ import { useState } from "react";
 import { api } from "../api";
 import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
-import type { ActionRun, Issue, Job } from "../types";
+import type { ActionRun, Issue, Job, PassOutcome } from "../types";
 import { Page } from "./Shell";
 import { StatusBadge } from "./status";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Field, Input, Select, Textarea } from "./ui";
@@ -15,7 +15,7 @@ export function Report({ onChanged }: { onChanged: () => void }) {
   const [priority, setPriority] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ issue: Issue; job: Job; actions: ActionRun[] } | null>(null);
+  const [result, setResult] = useState<{ issue: Issue; job: Job; actions: ActionRun[]; passes: PassOutcome[] } | null>(null);
   const { t, status: label } = useT();
 
   const submit = async (event: React.FormEvent) => {
@@ -99,6 +99,11 @@ export function Report({ onChanged }: { onChanged: () => void }) {
                       <li key={i}>{q}</li>
                     ))}
                   </ul>
+                )}
+                {result.passes.length > 1 && (
+                  <p className="text-xs text-muted-foreground">
+                    {result.passes.length} passes ran: {result.passes.map((p) => p.stop.replace(/_/g, " ")).join(" → ")}
+                  </p>
                 )}
                 {result.actions.length > 0 && (
                   <ul className="divide-y rounded-lg border">

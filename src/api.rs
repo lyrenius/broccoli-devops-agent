@@ -120,6 +120,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/actions/{id}/approve", post(approve))
         .route("/api/actions/{id}/reject", post(reject))
         .route("/api/actions/{id}/review", post(review_action))
+        .route("/api/usage", get(usage))
         .route("/api/events", get(events))
         .route("/api/events/stream", get(events_stream))
         .route("/api/artifacts/{id}", get(artifact))
@@ -183,6 +184,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
         "uptime_secs": state.started.elapsed().as_secs(),
         "language": state.config.agent.language.tag(),
         "recovery": state.recovery,
+        "usage": state.runner.usage_totals().await?,
         "counts": {
             "issues": store.list_issues().await?.len(),
             "jobs": store.list_jobs().await?.len(),
@@ -260,6 +262,13 @@ async fn jobs(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
     )?))
 }
 
+/// Everything spent at the model relay, priced when the config carries a price list.
+async fn usage(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
+    Ok(Json(serde_json::to_value(
+        state.runner.usage_totals().await?,
+    )?))
+}
+
 #[derive(Debug, Deserialize)]
 struct ReportRequest {
     title: String,
@@ -287,10 +296,16 @@ async fn report(
     );
     report.priority = request.priority;
     let (issue, job) = state.runner.handle_report(report).await?;
-    let actions = state.runner.run_proposals(&job).await?;
-    Ok(Json(
-        json!({ "issue": issue, "job": job, "actions": actions }),
-    ))
+    let passes = state.runner.drive_passes(job).await?;
+    let issue = state.runner.store().get_issue(issue.issue_id).await?;
+    // `job` and `actions` describe the first pass, as before; `passes` is the whole chain.
+    let first = passes.first().expect("at least the first pass");
+    Ok(Json(json!({
+        "issue": issue,
+        "job": first.job,
+        "actions": first.actions,
+        "passes": passes,
+    })))
 }
 
 async fn actions(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {

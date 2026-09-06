@@ -147,6 +147,14 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
+    // The relay's running bill sits above the Snapshot: it is a live fact the Snapshot cannot
+    // show, and the first thing an operator asks about a model-backed control plane.
+    let rows_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(area);
+    draw_activity(frame, rows_area[0], app);
+    let area = rows_area[1];
     let rows: Vec<Row> = app
         .resources
         .iter()
@@ -185,6 +193,29 @@ fn draw_overview(frame: &mut Frame, area: Rect, app: &App) {
         app.status.counts.issues, app.status.counts.jobs, app.status.counts.events
     )));
     frame.render_widget(table, area);
+}
+
+/// What the relay has cost so far.
+fn draw_activity(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = Vec::new();
+    let usage = &app.status.usage;
+    let spent = usage.one_line();
+    lines.push(Line::from(Span::styled(
+        spent,
+        Style::default().fg(match &usage.budget {
+            Some(budget) if budget.exceeded => Color::Red,
+            Some(budget) if budget.used_fraction >= 0.8 => Color::Yellow,
+            _ => Color::DarkGray,
+        }),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" model spend "),
+        ),
+        area,
+    );
 }
 
 fn draw_inbox(frame: &mut Frame, area: Rect, app: &App) {

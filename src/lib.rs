@@ -12,6 +12,7 @@ pub mod collector;
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod evidence;
 pub mod i18n;
 pub mod platform;
 pub mod policy;
@@ -21,6 +22,7 @@ pub mod scheduler;
 pub mod store;
 pub mod team;
 pub mod topology;
+pub mod usage;
 pub mod view;
 
 pub use error::{AgentError, AgentResult};

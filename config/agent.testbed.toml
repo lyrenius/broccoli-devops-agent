@@ -1,0 +1,96 @@
+# Agent configuration for the OrbStack testbed (testbed/README.md).
+#
+# Same shape as config/agent.toml, with two deliberate differences:
+#   - state lives in data-testbed/ so testbed runs never mix with real operator state;
+#   - the Platform is NOT in dry-run, because the point of the testbed is to exercise the
+#     real ActionRun path against disposable machines.
+#
+# Holds no credentials: the model API key is read from the environment variable named
+# below, and the testbed service passwords live in testbed/lib.sh, never here.
+
+[agent]
+max_auto_passes = 3                     # passes per report or send-back: observe, act, check
+
+[data]
+dir = "data-testbed"
+
+[topology]
+path = "config/topology.testbed.toml"
+
+[model]
+base_url = "https://api.thuics.icu/v1"
+model = "gpt-5.6-sol"
+api_key_env = "BROCCOLI_MODEL_API_KEY"  # the NAME of the variable; export the key itself
+wire_api = "responses"
+timeout_secs = 120
+max_model_turns = 8
+max_tool_calls = 16
+max_inspections = 6                     # read-only runbook inspections the model may run per pass
+max_tokens_per_run = 0                  # per agent run, input + output as the relay reports them;
+                                        # 0 = no token limit (turns and tool calls still bound a run)
+
+# What the relay charges, per million tokens. Uncomment and fill in YOUR relay's real rates —
+# the figures below are placeholders. Without this section tokens are still counted and a token
+# budget still works; only the money cannot be shown, so every cost reads as absent rather than
+# as an invented number. Cached input is a subset of input, billed once at its own rate.
+# [model.pricing]
+# input_per_mtok = 3.0
+# cached_input_per_mtok = 0.3
+# output_per_mtok = 15.0
+# currency = "USD"
+
+# Cumulative spend ceiling across everything in the data directory. Reaching either figure
+# freezes the Scheduler (the same full freeze recovery restores across restarts) and refuses new
+# reports until it is raised and a human resumes. 0 = no ceiling. A cost ceiling needs
+# [model.pricing]; a token ceiling does not.
+[budget]
+max_total_tokens = 0
+max_total_cost = 0.0
+
+[api]
+bind = "127.0.0.1:4720"
+token = ""
+
+[platform]
+# Real execution against throwaway VMs. Set back to true to rehearse the rendering of
+# commands without touching the machines.
+dry_run = false
+command_timeout_secs = 120
+auto_repeat_window_secs = 600
+
+[platform.classification]
+tunable_config_keys = ["worker.concurrency", "server.request_timeout_secs", "database.pool_size"]
+contest_config_keys = ["contest.freeze_at", "contest.end_at", "submission.time_limit_scale"]
+security_config_keys = ["auth.secret", "server.cors.allow_origins"]
+known_internal_address_prefixes = ["192.168.138.", "192.168.139."]
+
+# Runbook commands. `{target}` is the topology resource ID; testbed/runbook.sh maps it to
+# the machine and container that host it. Paths are relative, so run the agent from the
+# repository root.
+[[platform.runbooks]]
+id = "service.status"
+command = "testbed/runbook.sh status {target}"
+
+[[platform.runbooks]]
+id = "log.tail"
+command = "testbed/runbook.sh logs {target} 100"
+
+[[platform.runbooks]]
+id = "worker.restart"
+command = "testbed/runbook.sh restart {target}"
+
+[[platform.runbooks]]
+id = "worker.start"
+command = "testbed/runbook.sh start {target}"
+
+[[platform.runbooks]]
+id = "server.restart"
+command = "testbed/runbook.sh restart {target}"
+
+[[platform.runbooks]]
+id = "frontend.restart"
+command = "testbed/runbook.sh restart {target}"
+
+[[platform.runbooks]]
+id = "machine.reboot"
+command = "testbed/runbook.sh reboot {target}"

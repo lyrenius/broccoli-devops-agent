@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActionRun, ActionRunId, Artifact, ArtifactId, DeploymentId, EventRecord, Issue, IssueCandidate,
-    IssueId, IssuePriority, Job, JobBrief, JobId, JobResult, NewEvent, OperationMode,
-    PlatformOperationResult, Snapshot, SnapshotCause, SnapshotId, SnapshotViewRef, TeamCallback,
-    TeamKind,
+    IssueId, IssuePriority, Job, JobBrief, JobId, JobResult, NamedValue, NewEvent, OperationMode,
+    PlatformOperationResult, ResourceId, Snapshot, SnapshotCause, SnapshotId, SnapshotViewRef,
+    TeamCallback, TeamKind,
 };
 use crate::error::AgentResult;
 
@@ -195,6 +195,40 @@ pub trait AgentTeamPort: Send + Sync {
     ) -> AgentResult<()>;
 }
 
+/// A read-only inspection a running Team asks for directly, within its Job's scope.
+///
+/// This is the architecture's "read-only scoped request": an Observe-class Runbook (a status
+/// query, a log tail, an allowlisted read-only database query) run through the Platform while
+/// the Job is still reasoning, with the output handed back to the Team. It is not an ActionRun —
+/// nothing changes on the machine — but it is scoped, validated, evented, and its output is an
+/// Artifact, exactly like a side effect would be.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectionRequest {
+    /// Runbook ID; must classify as a non-mutating operation class.
+    pub runbook_id: String,
+    /// Resources to inspect; each must be inside the Job's target scope.
+    pub target_ids: Vec<ResourceId>,
+    /// Structured arguments for the Runbook.
+    pub arguments: Vec<NamedValue>,
+    /// Why the Team wants to look.
+    pub reason: String,
+}
+
+/// What an inspection produced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectionResult {
+    /// Whether every command exited zero (always true for a dry run).
+    pub succeeded: bool,
+    /// Whether the Platform only rendered the commands.
+    pub dry_run: bool,
+    /// Why the request was refused before anything ran, when it was.
+    pub refused: Option<String>,
+    /// The Platform's summary of what happened.
+    pub summary: String,
+    /// The ActionOutput Artifact holding the complete output, when anything was recorded.
+    pub output_artifact_id: Option<ArtifactId>,
+}
+
 /// Agents Platform boundary for controlled machine, repository, and build operations.
 #[async_trait]
 pub trait AgentsPlatformPort: Send + Sync {
@@ -204,6 +238,34 @@ pub trait AgentsPlatformPort: Send + Sync {
     /// write complete output as an Artifact. Platform success does not mean the problem is resolved;
     /// the Scheduler still needs after-Snapshot verification.
     async fn execute_action(&self, action: &ActionRun) -> AgentResult<PlatformOperationResult>;
+
+    /// Runs a read-only inspection on behalf of a running Job.
+    ///
+    /// A concrete implementation must refuse any Runbook that classifies as a mutating operation
+    /// class, re-check target kinds and arguments as it does for an ActionRun, and store the
+    /// complete output as an Artifact produced by the Job. A refusal is a failed result with the
+    /// reason, never an exception.
+    async fn inspect(
+        &self,
+        job: &Job,
+        request: &InspectionRequest,
+    ) -> AgentResult<PlatformOperationResult>;
+}
+
+/// Gateway through which a running Team asks for a read-only inspection.
+///
+/// The Scheduler implements this: it checks the freeze mode and the Job's scope, hands the
+/// request to the Platform, and records the inspection in the EventLog. No authority-matrix
+/// decision and no approval is involved — that is what makes inspections distinct from
+/// ActionRuns — but nothing reaches a machine unscoped or unrecorded.
+#[async_trait]
+pub trait InspectionPort: Send + Sync {
+    /// Runs one inspection for the given Job and returns what it produced.
+    async fn inspect(
+        &self,
+        job_id: JobId,
+        request: InspectionRequest,
+    ) -> AgentResult<InspectionResult>;
 }
 
 /// Input for one candidate-triage consultation with the Scheduler Policy model.

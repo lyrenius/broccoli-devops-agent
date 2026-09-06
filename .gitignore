@@ -6,6 +6,11 @@
 /config/topology.toml
 /config/agent.toml
 
+# Testbed state and build logs. The testbed scripts, its topology, and its agent config
+# are committed on purpose -- only what a run produces is ignored.
+/data-testbed/
+/testbed/.log/
+
 # Web console build outputs and dependencies.
 /web/node_modules/
 /web/dist/

@@ -100,6 +100,8 @@ enum Command {
     CheckModel,
     /// Show everything waiting for a human: permission requests, denials, and failures.
     Inbox,
+    /// Show what the model relay has been asked to do, and what it cost.
+    Usage,
     /// List, approve, or reject ActionRuns held by the authority matrix.
     Actions {
         #[command(subcommand)]
@@ -312,23 +314,42 @@ fn select_backend(
     let client = model.build_client()?;
     Ok(TeamBackend::Harness {
         label: format!("{} via {}", client.model(), client.base_url()),
+        model: client.model().to_string(),
         client: Arc::new(client),
         budget: model.harness_budget(),
     })
 }
 
-/// Runs one CLI command and reports failures as readable errors.
+/// Wires the control plane over the topology named by the config.
+///
+/// Every command goes through here so the relay's price list and the spend ceiling are attached
+/// once instead of at eight call sites, where one omission would silently disable the budget.
+fn wire_runner(
+    config: &AppConfig,
+    backend: TeamBackend,
+) -> Result<SliceRunner, Box<dyn std::error::Error>> {
+    let topology = DeploymentTopology::load(&config.topology.path)?;
+    Ok(SliceRunner::wire_with(
+        topology,
+        &config.data.dir,
+        backend,
+        config.platform.clone(),
+        config.pass_policy(),
+    )?
+    .with_spend(
+        config
+            .model
+            .as_ref()
+            .and_then(|model| model.pricing.clone()),
+        config.budget.clone(),
+    ))
+}
+
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = effective_config(&cli)?;
     match cli.command {
         Command::Snapshot => {
-            let topology = DeploymentTopology::load(&config.topology.path)?;
-            let runner = SliceRunner::wire(
-                topology,
-                &config.data.dir,
-                TeamBackend::ReadOnly,
-                config.platform.clone(),
-            )?;
+            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
             let snapshot = runner.capture(SnapshotCause::Manual).await?;
             print!("{}", runner.render_snapshot(&snapshot));
         }
@@ -339,36 +360,59 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             priority,
             team,
         } => {
-            let topology = DeploymentTopology::load(&config.topology.path)?;
-            let backend = select_backend(&config, team)?;
-            let runner =
-                SliceRunner::wire(topology, &config.data.dir, backend, config.platform.clone())?;
+            let runner = wire_runner(&config, select_backend(&config, team)?)?;
             println!("team backend: {}\n", runner.team_label());
             let mut report = HumanReport::new(reporter, title, description);
             report.priority = priority;
             let (issue, job) = runner.handle_report(report).await?;
             print!("{}", SliceRunner::render_report_outcome(&issue, &job));
-            let actions = runner.run_proposals(&job).await?;
-            if !actions.is_empty() {
-                println!("\nactions:");
-                print!(
-                    "{}",
-                    SliceRunner::render_actions(&actions, runner.dry_run())
+            let passes = runner.drive_passes(job).await?;
+            print!("{}", SliceRunner::render_passes(&passes, runner.dry_run()));
+            let issue = runner.store().get_issue(issue.issue_id).await?;
+            println!("\nIssue {} · status {:?}", issue.issue_id, issue.status);
+            let totals = runner.usage_totals().await?;
+            if totals.passes > 0 {
+                println!("model usage: {}", totals.one_line());
+            }
+        }
+        Command::Usage => {
+            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
+            let totals = runner.usage_totals().await?;
+            println!("{}", totals.one_line());
+            for model in &totals.by_model {
+                let cost = match (model.cost, totals.currency.as_deref()) {
+                    (Some(cost), Some(currency)) => format!(" · {cost:.4} {currency}"),
+                    _ => String::new(),
+                };
+                println!(
+                    "  {:<28} {:>3} pass(es)  {:>9} in ({} cached) {:>9} out{}",
+                    model.model,
+                    model.passes,
+                    model.input_tokens,
+                    model.cached_input_tokens,
+                    model.output_tokens,
+                    cost
                 );
+            }
+            if totals.cost.is_none() {
+                println!(
+                    "no [model.pricing] in the agent config, so tokens are counted but not priced"
+                );
+            }
+            if let Some(budget) = &totals.budget
+                && let Some(reason) = &budget.reason
+            {
+                println!("budget: {reason} — dispatch is frozen until it is raised");
             }
         }
         Command::Recover => {
             // With a topology, interrupted actions are verified against a fresh Snapshot; a
             // missing topology file must not block recovery, so fall back to the store alone.
             let summary = match DeploymentTopology::load(&config.topology.path) {
-                Ok(topology) => {
-                    let runner = SliceRunner::wire(
-                        topology,
-                        &config.data.dir,
-                        TeamBackend::ReadOnly,
-                        config.platform.clone(),
-                    )?;
-                    runner.recover().await?
+                Ok(_) => {
+                    wire_runner(&config, TeamBackend::ReadOnly)?
+                        .recover()
+                        .await?
                 }
                 Err(error) => {
                     eprintln!(
@@ -399,13 +443,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     return Err("choose exactly one of --resolved, --cancelled, or --failed".into());
                 }
             };
-            let topology = DeploymentTopology::load(&config.topology.path)?;
-            let runner = SliceRunner::wire(
-                topology,
-                &config.data.dir,
-                TeamBackend::ReadOnly,
-                config.platform.clone(),
-            )?;
+            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
             let issue = runner.close_issue(id, closure, &by, comment).await?;
             println!("Issue {} · status {:?}", issue.issue_id, issue.status);
         }
@@ -433,13 +471,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Actions { action } => {
-            let topology = DeploymentTopology::load(&config.topology.path)?;
-            let runner = SliceRunner::wire(
-                topology,
-                &config.data.dir,
-                TeamBackend::ReadOnly,
-                config.platform.clone(),
-            )?;
+            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
             match action {
                 ActionsAction::List => {
                     let actions = runner.list_actions().await?;
@@ -465,13 +497,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Inbox => {
-            let topology = DeploymentTopology::load(&config.topology.path)?;
-            let runner = SliceRunner::wire(
-                topology,
-                &config.data.dir,
-                TeamBackend::ReadOnly,
-                config.platform.clone(),
-            )?;
+            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
             print!("{}", SliceRunner::render_inbox(&runner.inbox().await?));
         }
         Command::Review { item } => {
@@ -480,10 +506,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ReviewItem::Job { id, decision } => (decision, true, *id),
             };
             let decision = args.decision()?;
-            let topology = DeploymentTopology::load(&config.topology.path)?;
-            let backend = select_backend(&config, args.team)?;
-            let runner =
-                SliceRunner::wire(topology, &config.data.dir, backend, config.platform.clone())?;
+            let runner = wire_runner(&config, select_backend(&config, args.team)?)?;
             let revision = if is_job {
                 let outcome = runner
                     .review_job(id, &args.by, decision, args.comment.clone())
@@ -518,14 +541,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             team,
             stay_frozen,
         } => {
-            let topology = DeploymentTopology::load(&config.topology.path)?;
-            let backend = select_backend(&config, team)?;
-            let runner = Arc::new(SliceRunner::wire(
-                topology,
-                &config.data.dir,
-                backend,
-                config.platform.clone(),
-            )?);
+            let runner = Arc::new(wire_runner(&config, select_backend(&config, team)?)?);
 
             // Recovery before serving: reconcile what a previous process left behind and
             // restore its freeze state. A clean restart resumes on its own; anything else

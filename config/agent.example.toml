@@ -8,6 +8,7 @@ language = "en"                       # "en" or "zh-CN": the language everything
                                       # (diagnoses, denial reasons, event log, model output).
                                       # Fixed for the life of the process; the consoles switch
                                       # their own language at runtime.
+max_auto_passes = 3                   # passes per report or send-back: observe, act, check; 1 = one pass, then a human
 
 [data]
 dir = "data"                          # file-backed store, event log, artifact bodies
@@ -23,6 +24,27 @@ wire_api = "responses"                  # "responses" (default) or "chat" if the
 timeout_secs = 120
 max_model_turns = 8                     # per agent run
 max_tool_calls = 16                     # per agent run, refused calls included
+max_inspections = 6                     # read-only runbook inspections the model may run per pass
+max_tokens_per_run = 0                  # per agent run, input + output as the relay reports them;
+                                        # 0 = no token limit (turns and tool calls still bound a run)
+
+# What the relay charges, per million tokens. The rates below are PLACEHOLDERS — replace them
+# with your relay's real ones, or delete the section. Without it tokens are still counted and
+# a token budget still works; only the money cannot be shown, so every cost reads as absent
+# rather than as zero. Cached input is a subset of input, billed once at its own rate.
+[model.pricing]
+input_per_mtok = 3.0
+cached_input_per_mtok = 0.3
+output_per_mtok = 15.0
+currency = "USD"
+
+# Cumulative spend ceiling across everything in the data directory. Reaching either figure
+# freezes the Scheduler (the same full freeze recovery restores across restarts) and refuses new
+# reports until it is raised and a human resumes. 0 = no ceiling. A cost ceiling needs
+# [model.pricing]; a token ceiling does not.
+[budget]
+max_total_tokens = 0
+max_total_cost = 0.0
 
 [api]
 bind = "127.0.0.1:4720"                 # the web console and TUI talk to this address
@@ -43,9 +65,15 @@ known_internal_address_prefixes = ["10.0.", "192.168."]
 # Runbook commands: how each registered runbook executes on YOUR deployment. `{target}` is the
 # resource ID from the topology; `{arg:name}` substitutes a proposal argument. Credentials stay
 # with the machine's SSH agent — never in this file. A runbook without a command is refused.
+# Non-mutating runbooks (rows 1 and 17) double as inspections: a model-backed Team may run
+# them directly, within its Job's scope, to look before it proposes.
 [[platform.runbooks]]
 id = "service.status"
 command = "echo status {target}"
+
+[[platform.runbooks]]
+id = "log.tail"
+command = "echo would-run: ssh {target} journalctl -u broccoli-worker -n 100 --no-pager"
 
 [[platform.runbooks]]
 id = "worker.restart"
