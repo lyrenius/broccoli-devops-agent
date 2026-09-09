@@ -307,6 +307,15 @@ fn issue_doc(app: &App, issue: &Issue, doc: &mut Doc) {
     head.push(dim(issue.issue_id.clone()));
     doc.line(head);
     doc.text(&issue.description);
+    if let Some(closure) = &issue.closure {
+        doc.kv(
+            "Closed by",
+            &format!("{} · {}", closure.closed_by, time(&closure.closed_at)),
+        );
+        if let Some(comment) = &closure.comment {
+            doc.kv("Closing comment", comment);
+        }
+    }
     if !issue.affected_resource_ids.is_empty() {
         doc.kv("Affected", &issue.affected_resource_ids.join(", "));
     }

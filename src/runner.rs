@@ -3,7 +3,7 @@
 //! The runner assembles the file store, topology Collector, redacting View Builder, Agents
 //! Platform, authority policy, Scheduler, and one Operate Team backend, then drives the flows the
 //! CLI and API expose: capture-and-display, human report to completed Job, running the Job's
-//! proposed actions through the authority matrix, the three-category inbox (permission requests,
+//! proposed actions through the authority matrix, the inbox (human feedback, permission requests,
 //! permission denials, failures) with its human decisions — approve, reject with a comment,
 //! acknowledge, or send back upstream as a revising Job that carries the feedback — and restart
 //! recovery. The Team backend is chosen at wiring time — deterministic, or the model-backed
@@ -20,7 +20,7 @@
 //! approval, a denial, a failure), and resumes — with a fresh budget — when a human approves an
 //! action or sends an item back upstream.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -190,12 +190,47 @@ pub enum TeamBackend {
     },
 }
 
-/// The inbox: everything that waits for a human, in its three categories.
+/// An unresolved Issue and the latest pass a human can continue with feedback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitingIssue {
+    /// The Issue waiting for human input.
+    pub issue: Issue,
+    /// The pass the feedback must name, to reject stale or duplicate submissions.
+    pub job: Job,
+}
+
+/// Human closure information projected from the existing event log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueClosureRecord {
+    /// Human-selected terminal outcome.
+    pub outcome: String,
+    /// Operator who closed the Issue.
+    pub closed_by: String,
+    /// Optional closing explanation.
+    pub comment: Option<String>,
+    /// Time recorded on the closure event.
+    pub closed_at: DateTime<Utc>,
+}
+
+/// Issue API projection, including closure comments from older stored sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueRecord {
+    /// Existing Issue fields remain at the top level for API compatibility.
+    #[serde(flatten)]
+    pub issue: Issue,
+    /// Closure metadata, when a human closure was recorded.
+    pub closure: Option<IssueClosureRecord>,
+}
+
+/// The inbox: everything that waits for a human.
 ///
 /// This is a projection over the store, computed on demand, so it can never disagree with the
 /// records it is built from. Items leave the inbox only through a recorded human decision.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Inbox {
+    /// Ended investigations needing feedback, without another pending inbox decision.
+    #[serde(default)]
+    pub waiting_issues: Vec<WaitingIssue>,
     /// Approved or automatically admitted actions waiting to execute, including while frozen.
     #[serde(default)]
     pub queued_actions: Vec<ActionRun>,
@@ -212,7 +247,8 @@ pub struct Inbox {
 impl Inbox {
     /// Number of items waiting for a human across every category.
     pub fn total(&self) -> usize {
-        self.permission_requests.len()
+        self.waiting_issues.len()
+            + self.permission_requests.len()
             + self.permission_denied.len()
             + self.failed_jobs.len()
             + self.failed_actions.len()
@@ -1771,6 +1807,110 @@ impl SliceRunner {
         self.store.list_action_runs().await
     }
 
+    /// Projects closure notes from events, including comments written before this API field
+    /// existed. No migration or rewrite of the original Issue records is required.
+    pub async fn issue_records(&self) -> AgentResult<Vec<IssueRecord>> {
+        let mut closures = HashMap::new();
+        for event in self.store.list_events().await? {
+            if event.kind != "human.issue_closed" {
+                continue;
+            }
+            if let (Some(id), Some(outcome), Some(closed_by)) = (
+                event.issue_id,
+                event.payload["closure"].as_str(),
+                event.payload["closed_by"].as_str(),
+            ) {
+                closures.insert(
+                    id,
+                    IssueClosureRecord {
+                        outcome: outcome.to_string(),
+                        closed_by: closed_by.to_string(),
+                        comment: event.payload["comment"].as_str().map(str::to_string),
+                        closed_at: event.occurred_at,
+                    },
+                );
+            }
+        }
+        Ok(self
+            .store
+            .list_issues()
+            .await?
+            .into_iter()
+            .map(|issue| IssueRecord {
+                closure: closures.remove(&issue.issue_id),
+                issue,
+            })
+            .collect())
+    }
+
+    /// Sends a substantive human comment into a new pass over fresh evidence. The caller must
+    /// name the pass it saw, so a double click or stale browser cannot silently create two turns.
+    pub async fn feedback_issue(
+        &self,
+        issue_id: IssueId,
+        expected_job_id: JobId,
+        reviewer: &str,
+        comment: String,
+    ) -> AgentResult<Revision> {
+        let _serialized = self.review_lock.lock().await;
+        let comment = comment.trim().to_string();
+        if comment.is_empty() {
+            return Err(AgentError::InvalidInput(
+                tr!("Feedback comment must not be empty", "反馈内容不能为空").into(),
+            ));
+        }
+        self.refuse_if_budget_spent("continue an Issue with human feedback")
+            .await?;
+        let item = self.inbox().await?.waiting_issues.into_iter()
+            .find(|item| item.issue.issue_id == issue_id)
+            .ok_or_else(|| AgentError::InvalidInput(
+                tr!("Issue is not awaiting feedback; handle its pending decision or refresh its state", "此问题当前不接受反馈，请先处理待办决策或刷新状态").into()
+            ))?;
+        if item.job.job_id != expected_job_id {
+            return Err(AgentError::InvalidInput(
+                tr!(
+                    "This feedback refers to an older pass; refresh first",
+                    "这条反馈对应旧轮次，请刷新后重试"
+                )
+                .into(),
+            ));
+        }
+        let mut feedback = item.job.feedback.clone();
+        let note = HumanFeedback::new(
+            FeedbackOrigin::IssueComment {
+                job_id: expected_job_id,
+                summary: item
+                    .job
+                    .result
+                    .as_ref()
+                    .map(|r| r.summary.clone())
+                    .unwrap_or_default(),
+            },
+            reviewer,
+            Some(comment.clone()),
+        );
+        feedback.push(note.clone());
+        let snapshot = self.capture(SnapshotCause::HumanFeedback).await?;
+        let (job, view) = self
+            .dispatch_revision(issue_id, snapshot.snapshot_id, expected_job_id, feedback)
+            .await?;
+        self.store.append_event(crate::domain::NewEvent::new(
+            "human", "human.issue_feedback", format!("{reviewer}: {comment}"),
+        ).with_issue(issue_id).with_job(job.job_id)
+            .with_payload(json!({ "feedback": note, "previous_job_id": expected_job_id, "job_id": job.job_id }))
+            .with_trust(crate::domain::ContentTrust::Mixed)).await?;
+        let job = self.run_team(job, &view).await?;
+        let mut passes = self.drive_passes(job).await?.into_iter();
+        let first = passes
+            .next()
+            .expect("drive_passes includes its initial pass");
+        Ok(Revision {
+            job: first.job,
+            actions: first.actions,
+            follow_ups: passes.collect(),
+        })
+    }
+
     /// Computes the inbox from the store.
     pub async fn inbox(&self) -> AgentResult<Inbox> {
         let mut inbox = Inbox::default();
@@ -1798,6 +1938,37 @@ impl SliceRunner {
             .filter(|job| !archived.contains(&job.issue_id))
             .filter(Job::needs_review)
             .collect();
+        // Keep approval and failure decisions in their existing buckets. A completed
+        // diagnosis with no such decision must still offer a way to continue the Issue.
+        let blocked: HashSet<_> = inbox
+            .queued_actions
+            .iter()
+            .chain(&inbox.permission_requests)
+            .chain(&inbox.permission_denied)
+            .chain(&inbox.failed_actions)
+            .map(|action| action.issue_id)
+            .chain(inbox.failed_jobs.iter().map(|job| job.issue_id))
+            .collect();
+        let jobs = self.store.list_jobs().await?;
+        for issue in self.store.list_issues().await? {
+            if issue.is_archived()
+                || issue.status != crate::domain::IssueStatus::WaitingForHuman
+                || blocked.contains(&issue.issue_id)
+            {
+                continue;
+            }
+            if let Some(job) = jobs
+                .iter()
+                .filter(|job| job.issue_id == issue.issue_id)
+                .max_by_key(|job| (job.created_at, job.job_id))
+                .filter(|job| job.status == JobStatus::Completed)
+            {
+                inbox.waiting_issues.push(WaitingIssue {
+                    issue,
+                    job: job.clone(),
+                });
+            }
+        }
         Ok(inbox)
     }
 
@@ -1995,6 +2166,18 @@ impl SliceRunner {
     /// Renders the inbox as operator-facing text.
     pub fn render_inbox(inbox: &Inbox) -> String {
         let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "awaiting human feedback ({}):",
+            inbox.waiting_issues.len()
+        );
+        for item in &inbox.waiting_issues {
+            let _ = writeln!(
+                out,
+                "  Issue {} · Job {} · {}",
+                item.issue.issue_id, item.job.job_id, item.issue.title
+            );
+        }
         let _ = writeln!(out, "execution queue ({}):", inbox.queued_actions.len());
         for action in &inbox.queued_actions {
             let _ = writeln!(

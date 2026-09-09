@@ -170,6 +170,8 @@ pub struct Counts {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct InboxCounts {
+    /// Investigations awaiting human feedback.
+    pub waiting_issues: usize,
     /// Admitted actions waiting to execute.
     pub queued_actions: usize,
     /// Actions waiting for approval.
@@ -316,6 +318,20 @@ pub struct Issue {
     pub affected_resource_ids: Vec<String>,
     /// Set on imported archives.
     pub provenance: Option<SessionProvenance>,
+    /// Human closure explanation, including notes recovered from older events.
+    pub closure: Option<IssueClosureRecord>,
+}
+
+/// A human's recorded closure of an Issue.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct IssueClosureRecord {
+    /// Operator identity.
+    pub closed_by: String,
+    /// Closure time.
+    pub closed_at: String,
+    /// Optional explanation.
+    pub comment: Option<String>,
 }
 
 impl Issue {
@@ -481,6 +497,7 @@ impl HumanFeedback {
         let runbook = origin.runbook_id.as_deref().unwrap_or("?");
         let summary = origin.summary.as_deref().unwrap_or("");
         let mut text = match origin.kind.as_str() {
+            "issue_comment" => format!("on the previous investigation: {summary}"),
             "denied_action" => {
                 let denial = origin.denial.as_ref();
                 let mut text = format!(
@@ -710,6 +727,8 @@ impl ActionRun {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Inbox {
+    /// Completed investigations waiting for feedback.
+    pub waiting_issues: Vec<WaitingIssue>,
     /// Admitted actions queued for execution, retained during a full freeze.
     pub queued_actions: Vec<ActionRun>,
     /// Actions waiting for approval.
@@ -725,11 +744,22 @@ pub struct Inbox {
 impl Inbox {
     /// Everything waiting.
     pub fn total(&self) -> usize {
-        self.permission_requests.len()
+        self.waiting_issues.len()
+            + self.permission_requests.len()
             + self.permission_denied.len()
             + self.failed_jobs.len()
             + self.failed_actions.len()
     }
+}
+
+/// A waiting Issue and the exact pass a comment continues.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WaitingIssue {
+    /// Unresolved Issue.
+    pub issue: Issue,
+    /// Latest completed pass.
+    pub job: Job,
 }
 
 /// The revising Job a send-upstream produced.
@@ -1204,6 +1234,23 @@ impl ApiClient {
         self.post(
             &format!("/api/issues/{id}/close"),
             Some(json!({ "by": by, "outcome": outcome, "comment": comment })),
+        )
+        .await
+    }
+
+    /// Continues an unresolved investigation with a comment bound to its current pass.
+    pub async fn feedback_issue(
+        &self,
+        id: &str,
+        job_id: &str,
+        by: &str,
+        comment: &str,
+    ) -> Result<Revision, String> {
+        self.post(
+            &format!("/api/issues/{id}/feedback"),
+            Some(json!({
+                "expected_job_id": job_id, "by": by, "comment": comment,
+            })),
         )
         .await
     }

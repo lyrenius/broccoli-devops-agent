@@ -108,6 +108,13 @@ impl HumanReview {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum FeedbackOrigin {
+    /// A human continued an unresolved investigation after its previous pass ended.
+    IssueComment {
+        /// The completed pass the human was looking at.
+        job_id: JobId,
+        /// That pass's diagnosis, retained as context rather than a failure claim.
+        summary: String,
+    },
     /// A proposed action was denied by rule or by a human.
     DeniedAction {
         /// The denied ActionRun.
@@ -189,6 +196,10 @@ impl HumanFeedback {
     /// Renders the feedback as the sentences a Team should read before its next pass.
     pub fn describe(&self) -> String {
         let mut text = match &self.origin {
+            FeedbackOrigin::IssueComment { summary, .. } => tr!(
+                format!("The previous investigation is waiting for human input: {summary}."),
+                format!("上一轮调查正在等待人工补充：{summary}。")
+            ),
             FeedbackOrigin::DeniedAction {
                 runbook_id,
                 target_ids,

@@ -199,6 +199,13 @@ pub enum Pending {
         /// `send_upstream` or `acknowledge`.
         decision: &'static str,
     },
+    /// Continue an investigation with the text as feedback.
+    IssueFeedback {
+        /// Issue to continue.
+        issue_id: String,
+        /// Pass shown when the comment prompt opened.
+        job_id: String,
+    },
     /// Close an Issue with the text as comment.
     CloseIssue {
         /// Issue ID.
@@ -712,6 +719,9 @@ impl App {
             Pending::CloseIssue { id, title, outcome } => {
                 self.close_issue(id, title, outcome, text);
             }
+            Pending::IssueFeedback { issue_id, job_id } => {
+                self.feedback_issue(issue_id, job_id, text);
+            }
             Pending::Search => {
                 self.records.query = text;
                 self.records.list.select(Some(0));
@@ -884,6 +894,33 @@ impl App {
                     None => Outcome::message("acknowledged"),
                 },
                 Err(error) => Outcome::error(format!("{decision} failed: {error}")),
+            }
+        });
+    }
+
+    /// Sends a human comment into the next investigation pass.
+    pub fn feedback_issue(&mut self, issue_id: String, job_id: String, comment: String) {
+        if comment.trim().is_empty() {
+            self.message = Some("a feedback comment is required".into());
+            return;
+        }
+        let client = self.client.clone();
+        let by = self.operator.clone();
+        self.run("continuing the investigation", async move {
+            match client
+                .feedback_issue(&issue_id, &job_id, &by, &comment)
+                .await
+            {
+                Ok(revision) => Outcome::message(format!(
+                    "Revision {}: {}",
+                    short(&revision.job.job_id),
+                    revision
+                        .job
+                        .result
+                        .as_ref()
+                        .map_or("completed", |r| r.summary.as_str())
+                )),
+                Err(error) => Outcome::error(format!("feedback failed: {error}")),
             }
         });
     }

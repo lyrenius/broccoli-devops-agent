@@ -247,6 +247,23 @@ enum SessionsAction {
 /// Issue subcommands.
 #[derive(Debug, Subcommand)]
 enum IssuesAction {
+    /// Send feedback to the latest completed investigation and run another pass.
+    Feedback {
+        /// Issue ID from the inbox.
+        id: Uuid,
+        /// Pass shown in the inbox; stale pass IDs are rejected.
+        #[arg(long)]
+        job: Uuid,
+        /// Observations or instructions for the next pass.
+        #[arg(long)]
+        comment: String,
+        /// Operator identity recorded with the feedback.
+        #[arg(long = "as", default_value = "operator")]
+        by: String,
+        /// Team backend for the new investigation.
+        #[arg(long, value_enum, default_value_t = TeamChoice::Auto)]
+        team: TeamChoice,
+    },
     /// Close an Issue.
     Close {
         /// Issue ID.
@@ -520,6 +537,27 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             print_recovery(&summary);
+        }
+        Command::Issues {
+            action:
+                IssuesAction::Feedback {
+                    id,
+                    job,
+                    comment,
+                    by,
+                    team,
+                },
+        } => {
+            let runner = Arc::new(wire_runner(&config, select_backend(&config, team)?)?);
+            let _interrupt = spawn_interrupt_handler(&runner);
+            let revision = runner.feedback_issue(id, job, &by, comment).await?;
+            println!(
+                "Job {} · status {:?}",
+                revision.job.job_id, revision.job.status
+            );
+            if let Some(result) = &revision.job.result {
+                println!("{}", result.summary);
+            }
         }
         Command::Issues {
             action:

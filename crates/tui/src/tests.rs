@@ -118,6 +118,7 @@ fn populated() -> (App, mpsc::UnboundedReceiver<Msg>) {
         })),
     );
     app.inbox = Inbox {
+        waiting_issues: vec![],
         queued_actions: vec![],
         permission_requests: vec![request.clone()],
         permission_denied: vec![denied.clone()],
@@ -609,4 +610,46 @@ fn overview_shows_snapshot_review_and_its_warning() {
     assert!(page.contains("Snapshot review"), "{page}");
     assert!(page.contains("worker incident queued"), "{page}");
     assert!(page.contains("rule checks completed"), "{page}");
+}
+
+#[test]
+fn waiting_investigations_accept_feedback_and_show_closure_comments() {
+    let (mut app, _rx) = populated();
+    let mut issue = app.issues[0].clone();
+    issue.status = "waiting_for_human".into();
+    let completed = app
+        .jobs
+        .iter()
+        .find(|j| j.job_id == JOB_DONE)
+        .unwrap()
+        .clone();
+    app.inbox = Inbox::default();
+    app.inbox.waiting_issues.push(crate::api::WaitingIssue {
+        issue: issue.clone(),
+        job: completed,
+    });
+    app.set_screen(Screen::Inbox);
+    let page = render(&mut app);
+    assert!(page.contains("Awaiting input"), "{page}");
+    assert_eq!(items(&app)[0].category, Category::WaitingIssue);
+    press(&mut app, KeyCode::Char('b'));
+    assert!(matches!(
+        app.prompt.as_ref().unwrap().pending,
+        Pending::IssueFeedback { .. }
+    ));
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('x'));
+    assert!(app.prompt.is_none());
+
+    issue.status = "resolved".into();
+    issue.closure = Some(crate::api::IssueClosureRecord {
+        closed_by: "Alice".into(),
+        closed_at: NOW.into(),
+        comment: Some("Recovered with no data loss".into()),
+    });
+    app.issues = vec![issue];
+    app.set_screen(Screen::Records);
+    let page = render(&mut app);
+    assert!(page.contains("Alice"), "{page}");
+    assert!(page.contains("Recovered with no data loss"), "{page}");
 }

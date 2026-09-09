@@ -126,6 +126,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/snapshots/latest", get(latest_snapshot))
         .route("/api/issues", get(issues))
         .route("/api/issues/{id}/close", post(close_issue))
+        .route("/api/issues/{id}/feedback", post(feedback_issue))
         .route("/api/issues/{id}/session", get(export_session))
         .route("/api/sessions/import", post(import_session))
         .route("/api/jobs", get(jobs))
@@ -219,6 +220,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
             "events": store.list_events().await?.len(),
         },
         "inbox": {
+            "waiting_issues": inbox.waiting_issues.len(),
             "queued_actions": inbox.queued_actions.len(),
             "permission_requests": inbox.permission_requests.len(),
             "permission_denied": inbox.permission_denied.len(),
@@ -300,7 +302,32 @@ async fn latest_snapshot(State(state): State<Arc<ApiState>>) -> ApiResult<Value>
 
 async fn issues(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
     Ok(Json(serde_json::to_value(
-        state.runner.store().list_issues().await?,
+        state.runner.issue_records().await?,
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueFeedbackRequest {
+    expected_job_id: Uuid,
+    #[serde(flatten)]
+    who: DecisionRequest,
+}
+
+async fn feedback_issue(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<IssueFeedbackRequest>,
+) -> ApiResult<Value> {
+    Ok(Json(serde_json::to_value(
+        state
+            .runner
+            .feedback_issue(
+                id,
+                request.expected_job_id,
+                request.who.who(),
+                request.who.comment.clone().unwrap_or_default(),
+            )
+            .await?,
     )?))
 }
 
@@ -318,17 +345,23 @@ async fn close_issue(
     Path(id): Path<Uuid>,
     Json(request): Json<CloseRequest>,
 ) -> ApiResult<Value> {
-    Ok(Json(serde_json::to_value(
-        state
-            .runner
-            .close_issue(
-                id,
-                request.outcome,
-                request.who.who(),
-                request.who.comment.clone(),
-            )
-            .await?,
-    )?))
+    state
+        .runner
+        .close_issue(
+            id,
+            request.outcome,
+            request.who.who(),
+            request.who.comment.clone(),
+        )
+        .await?;
+    let record = state
+        .runner
+        .issue_records()
+        .await?
+        .into_iter()
+        .find(|record| record.issue.issue_id == id)
+        .ok_or_else(|| AgentError::InvalidInput("Closed Issue was not found".into()))?;
+    Ok(Json(serde_json::to_value(record)?))
 }
 
 async fn jobs(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {

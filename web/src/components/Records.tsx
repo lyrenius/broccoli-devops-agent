@@ -4,7 +4,8 @@ import { api } from "../api";
 import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
-import type { Issue, Job, SessionBundle } from "../types";
+import type { Issue, Job, SessionBundle, WaitingIssue } from "../types";
+import { IssueFeedback } from "./IssueFeedback";
 import { Page } from "./Shell";
 import { StatusBadge } from "./status";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, Input, Segmented } from "./ui";
@@ -30,6 +31,7 @@ function LinkButton({ href, title, download, children }: { href: string; title?:
 export function Records({ tick, onChanged }: { tick: number; onChanged: () => void }) {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [waiting, setWaiting] = useState<WaitingIssue[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -43,6 +45,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
   useEffect(() => {
     api.issues().then((list) => setIssues([...list].reverse())).catch(() => undefined);
     api.jobs().then((list) => setJobs(list)).catch(() => undefined);
+    api.inbox().then((inbox) => setWaiting(inbox.waiting_issues ?? [])).catch(() => undefined);
   }, [tick]);
 
   const close = async (issue: Issue, outcome: "resolved" | "cancelled") => {
@@ -160,6 +163,12 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                 <span className="ml-auto text-xs text-muted-foreground">{dateTime(issue.created_at)}</span>
               </div>
               <CardDescription>{issue.description}</CardDescription>
+              {issue.closure && (
+                <div className="mt-2 rounded-md border bg-muted/30 p-3 text-sm">
+                  <p className="text-xs text-muted-foreground">{t("records.closedBy", { who: issue.closure.closed_by, at: dateTime(issue.closure.closed_at) })}</p>
+                  {issue.closure.comment && <p className="mt-1 whitespace-pre-wrap"><MessageSquareQuote className="mr-1 inline h-3.5 w-3.5" />{issue.closure.comment}</p>}
+                </div>
+              )}
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <LinkButton href={traceHash(issue.issue_id)} title={t("records.trace.title")}>
                   <Waypoints />
@@ -185,6 +194,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
               </div>
             </CardHeader>
             <CardContent>
+              {waiting.filter((item) => item.issue.issue_id === issue.issue_id).map((item) => <div className="mb-4" key={item.job.job_id}><IssueFeedback item={item} onChanged={onChanged} /></div>)}
               {related.length === 0 && <p className="text-sm text-muted-foreground">{t("records.noJob")}</p>}
               {related.length > 0 && (
                 <ul className="divide-y rounded-lg border bg-muted/20">
@@ -228,6 +238,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                                   </>
                                 )}
                                 {f.origin.kind === "failed_job" && <>{t("records.feedback.job", { summary: f.origin.summary })}</>}
+                                {f.origin.kind === "issue_comment" && <>{t("feedback.previous", { summary: f.origin.summary })}</>}
                                 {f.origin.kind === "stalled_job" && <>{t("records.feedback.stalled", { probes: f.origin.requested_probe_ids.join(", "), summary: f.origin.summary })}</>}
                                 {f.comment && <span className="text-muted-foreground"> · “{f.comment}”</span>}
                               </div>

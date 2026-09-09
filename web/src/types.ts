@@ -8,6 +8,7 @@ export interface Counts {
 }
 
 export interface InboxCounts {
+  waiting_issues: number;
   queued_actions: number;
   permission_requests: number;
   permission_denied: number;
@@ -153,6 +154,12 @@ export interface Issue {
   updated_at: string;
   affected_resource_ids: string[];
   provenance?: SessionProvenance | null;
+  closure?: {
+    outcome: string;
+    closed_by: string;
+    comment: string | null;
+    closed_at: string;
+  } | null;
 }
 
 export interface ActionProposal {
@@ -196,6 +203,7 @@ export interface HumanReview {
 }
 
 export type FeedbackOrigin =
+  | { kind: "issue_comment"; job_id: string; summary: string }
   | { kind: "denied_action"; action_run_id: string; runbook_id: string; target_ids: string[]; denial: Denial }
   | { kind: "failed_action"; action_run_id: string; runbook_id: string; target_ids: string[]; summary: string; evidence: string | null }
   | { kind: "failed_job"; job_id: string; summary: string }
@@ -255,11 +263,17 @@ export interface ActionRun {
 }
 
 export interface Inbox {
+  waiting_issues: WaitingIssue[];
   queued_actions: ActionRun[];
   permission_requests: ActionRun[];
   permission_denied: ActionRun[];
   failed_jobs: Job[];
   failed_actions: ActionRun[];
+}
+
+export interface WaitingIssue {
+  issue: Issue;
+  job: Job;
 }
 
 export interface Revision {

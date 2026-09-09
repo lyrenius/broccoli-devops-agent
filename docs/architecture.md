@@ -562,7 +562,7 @@ log therefore never switches language mid-incident and transcripts replay as
 written. The consoles translate their own chrome at runtime, per viewer,
 defaulting to the agent's language.
 
-The inbox is the console's centre, in its three categories (§4.10): permission
+The inbox is the console's centre, with awaiting-input investigations and the decision categories (§4.10): permission
 requests are decided with the Team's reason and expected effect in view;
 denials show who refused and why, take a comment, and can be sent back
 upstream or acknowledged; failures show the Job's or Platform's summary and
@@ -663,15 +663,18 @@ last two; the matrix, not the capability list, decides what needs a human.
 
 ### 4.10 Inbox and feedback loop
 
-Everything that waits for a human is in one inbox with three categories. The
+Everything that waits for a human is in one inbox. Completed unresolved investigations appear as awaiting-input items when no approval or failure decision takes precedence. The
 inbox is a projection over the store — an item is in it because of what its
 record says, and it leaves only through a recorded human decision.
 
 | Category | What belongs in it | Human interaction |
 | --- | --- | --- |
+| **Awaiting input** | The latest completed pass of a WaitingForHuman Issue, when no approval or failure decision takes precedence. | Send a nonempty comment to continue over a fresh Snapshot, or close the Issue from Records. |
 | **Permission Request** | ActionRuns the matrix holds for approval (`approve` rows, and `auto` rows escalated by the repeat rule). | Approve, or reject with a comment. |
 | **Permission Denied** | ActionRuns refused by rule (`deny` and `human-only` rows, unknown Runbooks) or rejected by a human, not yet reviewed. The denial's source, reason, and comment stay on the ActionRun. | Review the reason, add feedback, then either send it back upstream or acknowledge it. |
 | **Failed** | Jobs that failed (a Team that returned `Failed`, answered without its terminal tool, ran out of budget, or crashed), Jobs that asked for more observations when no automatic pass was left, and ActionRuns whose execution or verification failed, not yet reviewed. | Review the failure, add feedback, then either send it back upstream or acknowledge it. |
+
+Awaiting-input feedback names the displayed Job ID. The runner rejects stale IDs, closed/archived Issues, and Issues that still have an approval or failure decision to handle. It stores an `IssueComment` in the new Job's feedback and records `human.issue_feedback`; the earlier completed Job is not relabelled as a failure. Human closure comments are projected from `human.issue_closed` events for both current and older sessions.
 
 Permission decisions have three paths. Automatically allowed actions proceed
 to execution. Actions that need approval enter the Permission Request inbox;

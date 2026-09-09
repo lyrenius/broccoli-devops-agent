@@ -1,10 +1,12 @@
-import { AlertTriangle, Ban, CheckCircle2, ClipboardList, Inbox as InboxIcon, ShieldQuestion, XCircle } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, ClipboardList, Inbox as InboxIcon, MessageSquareQuote, ShieldQuestion, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
+import { traceHash } from "../lib/routes";
 import type { ActionRun, Inbox as InboxData, Job, Revision, Status } from "../types";
 import { Page } from "./Shell";
+import { IssueFeedback } from "./IssueFeedback";
 import { EvidenceBadge, StatusBadge } from "./status";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, Kv, Segmented, StatTile, Textarea } from "./ui";
 
@@ -15,8 +17,8 @@ function inInbox(a: ActionRun): boolean {
   return a.denial !== null || a.status === "failed" || a.status === "verification_failed";
 }
 
-const EMPTY: InboxData = { queued_actions: [], permission_requests: [], permission_denied: [], failed_jobs: [], failed_actions: [] };
-type Filter = "all" | "requests" | "denied" | "failed";
+const EMPTY: InboxData = { waiting_issues: [], queued_actions: [], permission_requests: [], permission_denied: [], failed_jobs: [], failed_actions: [] };
+type Filter = "all" | "waiting" | "requests" | "denied" | "failed";
 
 function ItemCard({ children, accent }: { children: React.ReactNode; accent: "amber" | "red" | "muted" }) {
   const border = accent === "amber" ? "border-l-amber-500" : accent === "red" ? "border-l-red-500" : "border-l-muted-foreground/40";
@@ -34,7 +36,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
   const { t, status: label, time } = useT();
 
   useEffect(() => {
-    api.inbox().then(setInbox).catch((e) => setError((e as Error).message));
+    api.inbox().then((next) => setInbox({ ...EMPTY, ...next, waiting_issues: next.waiting_issues ?? [] })).catch((e) => setError((e as Error).message));
     api
       .actions()
       .then((all) => setHistory(all.filter((a) => !inInbox(a)).reverse()))
@@ -82,7 +84,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
 
   const failedCount = inbox.failed_jobs.length + inbox.failed_actions.length;
   const show = (section: Exclude<Filter, "all">) => filter === "all" || filter === section;
-  const total = inbox.permission_requests.length + inbox.permission_denied.length + failedCount;
+  const total = inbox.waiting_issues.length + inbox.permission_requests.length + inbox.permission_denied.length + failedCount;
 
   return (
     <Page
@@ -119,7 +121,8 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
         </Alert>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <StatTile label={t("feedback.waiting")} value={inbox.waiting_issues.length} icon={MessageSquareQuote} tone={inbox.waiting_issues.length > 0 ? "warn" : "default"} hint={t("feedback.waitingHint")} />
         <StatTile label={t("tile.requests")} value={inbox.permission_requests.length} icon={ShieldQuestion} tone={inbox.permission_requests.length > 0 ? "warn" : "default"} hint={t("tile.requests.hint")} />
         <StatTile label={t("tile.denied")} value={inbox.permission_denied.length} icon={Ban} tone={inbox.permission_denied.length > 0 ? "alert" : "default"} hint={t("tile.denied.hint")} />
         <StatTile label={t("tile.failed")} value={failedCount} icon={XCircle} tone={failedCount > 0 ? "alert" : "default"} hint={t("tile.failed.hint", { jobs: inbox.failed_jobs.length, actions: inbox.failed_actions.length })} />
@@ -158,6 +161,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
             onChange={setFilter}
             options={[
               { id: "all", label: t("filter.all"), count: total },
+              { id: "waiting", label: t("feedback.waiting"), count: inbox.waiting_issues.length },
               { id: "requests", label: t("filter.requests"), count: inbox.permission_requests.length },
               { id: "denied", label: t("filter.denied"), count: inbox.permission_denied.length },
               { id: "failed", label: t("filter.failed"), count: failedCount },
@@ -166,6 +170,18 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
         </CardHeader>
         <CardContent className="grid gap-3">
           {total === 0 && <EmptyState icon={InboxIcon} title={t("inbox.zero.title")} hint={t("inbox.zero.hint")} />}
+
+          {show("waiting") && inbox.waiting_issues.map((item) => (
+            <ItemCard key={item.issue.issue_id} accent="amber">
+              <div className="flex flex-wrap items-center gap-2">
+                <a className="font-medium text-primary hover:underline" href={traceHash(item.issue.issue_id, item.job.job_id)}>{item.issue.title}</a>
+                <StatusBadge value={item.issue.status} />
+              </div>
+              <p className="mt-2 text-sm">{item.job.result?.summary ?? item.issue.description}</p>
+              {(item.job.result?.unresolved_questions.length ?? 0) > 0 && <ul className="mt-2 list-inside list-disc text-sm text-muted-foreground">{item.job.result!.unresolved_questions.map((question, index) => <li key={index}>{question}</li>)}</ul>}
+              <IssueFeedback key={item.job.job_id} item={item} onChanged={onChanged} onRevision={setRevision} />
+            </ItemCard>
+          ))}
 
           {show("requests") &&
             inbox.permission_requests.map((a) => (

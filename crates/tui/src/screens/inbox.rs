@@ -1,4 +1,4 @@
-//! Inbox: everything that waits for a human, in three categories, and the history of every
+//! Inbox: everything that waits for a human, including human feedback, and the history of every
 //! decided action. Items leave only through a recorded decision made in the operator's name.
 
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
-use crate::api::{ActionRun, Job};
+use crate::api::{ActionRun, Issue, Job};
 use crate::app::{App, Pending};
 use crate::format::{label, pad, short, time};
 use crate::screens::step;
@@ -22,6 +22,8 @@ pub const HINTS: &str = "j/k select · [/] filter · a approve · r reject · b 
 /// Which inbox category an item belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
+    /// A completed investigation waiting for human input.
+    WaitingIssue,
     /// Admitted, waiting for execution to resume.
     Queued,
     /// Waiting for approval.
@@ -38,6 +40,7 @@ impl Category {
     /// Short label for the list.
     pub fn label(self) -> &'static str {
         match self {
+            Category::WaitingIssue => "awaiting input",
             Category::Queued => "queued",
             Category::Request => "request",
             Category::Denied => "denied",
@@ -48,6 +51,7 @@ impl Category {
 
     fn color(self) -> Color {
         match self {
+            Category::WaitingIssue => Color::Yellow,
             Category::Queued => Color::Cyan,
             Category::Request => Color::Yellow,
             Category::Denied => Color::Red,
@@ -70,15 +74,18 @@ pub enum Filter {
     Failed,
     /// Admitted actions waiting to execute.
     Queued,
+    /// Completed investigations waiting for input.
+    Waiting,
 }
 
 impl Filter {
-    const ALL: [Filter; 5] = [
+    const ALL: [Filter; 6] = [
         Filter::All,
         Filter::Requests,
         Filter::Denied,
         Filter::Failed,
         Filter::Queued,
+        Filter::Waiting,
     ];
 
     fn index(self) -> usize {
@@ -92,6 +99,7 @@ impl Filter {
 
     fn shows(self, category: Category) -> bool {
         match self {
+            Filter::Waiting => category == Category::WaitingIssue,
             Filter::Queued => category == Category::Queued,
             Filter::All => true,
             Filter::Requests => category == Category::Request,
@@ -110,6 +118,8 @@ pub struct Item {
     pub action: Option<ActionRun>,
     /// The Job, for failed Jobs.
     pub job: Option<Job>,
+    /// Issue context for a human-input item.
+    pub issue: Option<Issue>,
 }
 
 impl Item {
@@ -133,6 +143,9 @@ impl Item {
 
     /// What it is.
     pub fn title(&self) -> String {
+        if let Some(issue) = &self.issue {
+            return issue.title.clone();
+        }
         match (&self.action, &self.job) {
             (Some(action), _) => action.title(),
             (_, Some(job)) => format!("job {}", short(&job.job_id)),
@@ -141,6 +154,9 @@ impl Item {
     }
 
     fn status(&self) -> &str {
+        if let Some(issue) = &self.issue {
+            return &issue.status;
+        }
         match (&self.action, &self.job) {
             (Some(action), _) => &action.status,
             (_, Some(job)) => &job.status,
@@ -185,6 +201,7 @@ pub fn items(app: &App) -> Vec<Item> {
         category,
         action: Some(a.clone()),
         job: None,
+        issue: None,
     };
     rows.extend(
         inbox
@@ -208,6 +225,7 @@ pub fn items(app: &App) -> Vec<Item> {
         category: Category::FailedJob,
         action: None,
         job: Some(job.clone()),
+        issue: None,
     }));
     rows.extend(
         inbox
@@ -215,6 +233,12 @@ pub fn items(app: &App) -> Vec<Item> {
             .iter()
             .map(|a| action(Category::FailedAction, a)),
     );
+    rows.extend(inbox.waiting_issues.iter().map(|waiting| Item {
+        category: Category::WaitingIssue,
+        action: None,
+        job: Some(waiting.job.clone()),
+        issue: Some(waiting.issue.clone()),
+    }));
     rows.retain(|item| app.inbox_view.filter.shows(item.category));
     rows
 }
@@ -353,6 +377,27 @@ fn open_decision(app: &mut App, pending: Pending) {
         app.message = Some("approval is recorded; press u to resume queued execution".to_string());
         return;
     }
+    if item.category == Category::WaitingIssue {
+        if matches!(
+            pending,
+            Pending::Review {
+                decision: "send_upstream",
+                ..
+            }
+        ) {
+            app.open_prompt(
+                Pending::IssueFeedback {
+                    issue_id: item.issue_id().to_string(),
+                    job_id: item.id().to_string(),
+                },
+                format!("continue {} — feedback:", item.title()),
+                "",
+            );
+        } else {
+            app.message = Some("send feedback with b, or close the Issue from Records".into());
+        }
+        return;
+    }
     let id = item.id().to_string();
     let is_job = item.category == Category::FailedJob;
     let (pending, label) = match pending {
@@ -420,10 +465,16 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_tiles(frame: &mut Frame, area: Rect, app: &App) {
-    let columns = Layout::horizontal([Constraint::Percentage(34); 3]).split(area);
+    let columns = Layout::horizontal([Constraint::Percentage(25); 4]).split(area);
     let inbox = &app.inbox;
     let failed = inbox.failed_jobs.len() + inbox.failed_actions.len();
     let tiles = [
+        (
+            "Awaiting input",
+            inbox.waiting_issues.len(),
+            "send feedback to continue".to_string(),
+            Color::Yellow,
+        ),
         (
             "Permission requests",
             inbox.permission_requests.len(),
@@ -484,6 +535,7 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
         .iter()
         .map(|item| {
             let (badge_text, badge_color) = match item.category {
+                Category::WaitingIssue => ("awaiting human input".to_string(), Color::Yellow),
                 Category::Queued => ("queued for execution".to_string(), Color::Cyan),
                 Category::Request => ("needs approval".to_string(), Color::Yellow),
                 Category::Denied => (
@@ -543,6 +595,7 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
             ("Denied".to_string(), inbox.permission_denied.len()),
             ("Failed".to_string(), failed),
             ("Queued".to_string(), inbox.queued_actions.len()),
+            ("Input".to_string(), inbox.waiting_issues.len()),
         ],
         app.inbox_view.filter.index(),
     ));
@@ -582,6 +635,19 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
 /// The web console's card for one item, as a document.
 fn item_doc(item: &Item, doc: &mut Doc) {
     match (item.category, &item.action, &item.job) {
+        (Category::WaitingIssue, _, Some(job)) => {
+            doc.heading(&item.title());
+            doc.note("Waiting for human input");
+            if let Some(result) = &job.result {
+                doc.text(&result.summary);
+                for question in &result.unresolved_questions {
+                    doc.kv("Question", question);
+                }
+            }
+            doc.blank();
+            doc.note("b send feedback and continue the investigation");
+        }
+
         (Category::Queued, Some(a), _) => {
             doc.heading(&a.title());
             doc.kv("State", "Queued for execution");

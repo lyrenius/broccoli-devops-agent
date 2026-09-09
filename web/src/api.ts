@@ -1,4 +1,4 @@
-import type { ActionRun, AgentConfig, EventRecord, ImportSummary, Inbox, Issue, Job, PassOutcome, ReviewOutcome, SessionBundle, SettingChange, SettingsPage, Snapshot, Status, UsageTotals } from "./types";
+import type { ActionRun, AgentConfig, EventRecord, ImportSummary, Inbox, Issue, Job, PassOutcome, ReviewOutcome, Revision, SessionBundle, SettingChange, SettingsPage, Snapshot, Status, UsageTotals } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -41,6 +41,8 @@ export const api = {
     post<ReviewOutcome<Job>>(`/api/jobs/${id}/review`, { by, decision, comment }),
   closeIssue: (id: string, outcome: IssueClosure, by: string, comment: string) =>
     post<Issue>(`/api/issues/${id}/close`, { outcome, by, comment }),
+  feedbackIssue: (id: string, expectedJobId: string, by: string, comment: string) =>
+    post<Revision>(`/api/issues/${id}/feedback`, { expected_job_id: expectedJobId, by, comment }),
   usage: () => request<UsageTotals>("/api/usage"),
   /** Asks a running pass to stop; the Team still delivers a final result and keeps its transcript. */
   cancelJob: (id: string, by: string) => post<{ job_id: string }>(`/api/jobs/${id}/cancel`, { by }),

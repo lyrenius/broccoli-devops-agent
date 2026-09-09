@@ -1992,6 +1992,9 @@ impl TopScheduler {
                 feedback.comment.clone(),
             );
             let reconstructed = match &feedback.origin {
+                // Issue comments are already durable in the revision's feedback; unlike a
+                // failed-item review, they do not consume a review slot on the prior Job.
+                FeedbackOrigin::IssueComment { .. } => false,
                 FeedbackOrigin::DeniedAction { action_run_id, .. }
                 | FeedbackOrigin::FailedAction { action_run_id, .. } => {
                     let action = self.store.get_action_run(*action_run_id).await?;

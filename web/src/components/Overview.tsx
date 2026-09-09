@@ -101,7 +101,7 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
           value={status?.inbox.total ?? "—"}
           icon={InboxIcon}
           tone={status && status.inbox.total > 0 ? "alert" : "default"}
-          hint={status ? t("stat.inboxHint", { requests: status.inbox.permission_requests, denied: status.inbox.permission_denied, failed: status.inbox.failed_jobs + status.inbox.failed_actions }) : undefined}
+          hint={status ? t("stat.inboxHint", { waiting: status.inbox.waiting_issues ?? 0, requests: status.inbox.permission_requests, denied: status.inbox.permission_denied, failed: status.inbox.failed_jobs + status.inbox.failed_actions }) : undefined}
         />
         <StatTile label={t("stat.openIssues")} value={liveIssues} icon={ListChecks} hint={t("stat.total", { count: issues.length })} />
         <StatTile label={t("stat.events")} value={status?.counts.events ?? "—"} icon={Activity} hint={status ? t("stat.eventsHint", { jobs: status.counts.jobs, actions: status.counts.actions }) : undefined} />
