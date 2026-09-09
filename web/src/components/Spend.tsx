@@ -7,48 +7,37 @@ import { traceHash } from "../lib/routes";
 import type { EventRecord, RunningPass, UsageTotals } from "../types";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Kv, StatTile } from "./ui";
 
-/** Compact token counts: 1_234_567 reads as 1.23M, which is what a bill is discussed in. */
+/** One unit throughout the console: one Mtok is one million tokens. */
 export function tokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return `${n}`;
+  return `${(n / 1_000_000).toLocaleString("en-US", { minimumFractionDigits: 3, maximumFractionDigits: 6 })} Mtoks`;
 }
 
-/** Money is only ever shown when a price list exists; tokens are shown regardless. */
-export function money(usage: UsageTotals): string | null {
-  return usage.cost === null ? null : `${usage.cost.toFixed(4)} ${usage.currency ?? ""}`.trim();
-}
-
-/** The Overview tile: what the relay has cost, and how close that is to the ceiling. */
+/** Cumulative model usage and proximity to the configured budget. */
 export function SpendTile({ usage }: { usage: UsageTotals | undefined }) {
   const { t } = useT();
   const budget = usage?.budget ?? null;
   const noCalls = usage?.passes === 0;
-  const showCost = usage && !noCalls && usage.cost !== null;
   return (
     <StatTile
-      label={t(showCost ? "stat.spend" : "usage.title")}
-      value={usage ? (showCost ? money(usage)! : `${tokens(usage.total_tokens)} tokens`) : "—"}
+      label={t("usage.title")}
+      value={usage ? tokens(usage.total_tokens) : "—"}
       icon={Coins}
       tone={budget?.exceeded ? "alert" : budget && budget.used_fraction >= 0.8 ? "warn" : "default"}
       hint={
         usage
           ? noCalls
             ? t("usage.none")
-            : usage.cost === null
-              ? t("stat.spendNoPricing", { requests: usage.requests })
-              : t("stat.spendHint", { passes: usage.passes, tokens: tokens(usage.total_tokens) })
+            : t("stat.usageHint", { requests: usage.requests })
           : undefined
       }
     />
   );
 }
 
-/** The full breakdown: tokens in and out, the cache hit, the cost, and any gap in the record. */
+/** Input, output, cached usage, and any gap in the record. */
 export function UsageCard({ usage }: { usage: UsageTotals | null }) {
   const { t } = useT();
   if (!usage) return null;
-  const cost = money(usage);
   return (
     <Card>
       <CardHeader>
@@ -64,11 +53,10 @@ export function UsageCard({ usage }: { usage: UsageTotals | null }) {
           <>
             <Kv
               rows={[
-                { k: t("usage.input"), v: <span className="font-mono tabular-nums">{usage.input_tokens.toLocaleString()}</span> },
-                { k: t("usage.cached"), v: <span className="font-mono tabular-nums text-muted-foreground">{usage.cached_input_tokens.toLocaleString()}</span> },
-                { k: t("usage.output"), v: <span className="font-mono tabular-nums">{usage.output_tokens.toLocaleString()}</span> },
-                { k: t("usage.total"), v: <span className="font-mono font-medium tabular-nums">{usage.total_tokens.toLocaleString()}</span> },
-                ...(cost ? [{ k: t("usage.cost"), v: <span className="font-mono font-medium tabular-nums">{cost}</span> }] : []),
+                { k: t("usage.input"), v: <span className="font-mono tabular-nums">{tokens(usage.input_tokens)}</span> },
+                { k: t("usage.cached"), v: <span className="font-mono tabular-nums text-muted-foreground">{tokens(usage.cached_input_tokens)}</span> },
+                { k: t("usage.output"), v: <span className="font-mono tabular-nums">{tokens(usage.output_tokens)}</span> },
+                { k: t("usage.total"), v: <span className="font-mono font-medium tabular-nums">{tokens(usage.total_tokens)}</span> },
               ]}
             />
             {usage.by_model.length > 1 && (
@@ -78,13 +66,11 @@ export function UsageCard({ usage }: { usage: UsageTotals | null }) {
                     <span className="truncate font-mono font-medium">{model.model}</span>
                     <span className="ml-auto shrink-0 font-mono tabular-nums text-muted-foreground">
                       {tokens(model.input_tokens + model.output_tokens)}
-                      {model.cost !== null && ` · ${model.cost.toFixed(4)}`}
                     </span>
                   </li>
                 ))}
               </ul>
             )}
-            {usage.cost === null && <p className="text-xs text-muted-foreground">{t("usage.noPricing")}</p>}
             {usage.requests_without_usage > 0 && (
               <p className="text-xs text-amber-600 dark:text-amber-400">{t("usage.gap", { count: usage.requests_without_usage })}</p>
             )}
