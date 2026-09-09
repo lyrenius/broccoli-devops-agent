@@ -1284,7 +1284,18 @@ impl TopScheduler {
     /// `Running` with nobody responsible for it. Platform success only moves the action to
     /// `Verifying`; `verify_action` decides the terminal state.
     pub async fn execute_action(&self, action_run_id: ActionRunId) -> AgentResult<ActionRun> {
-        self.ensure_actions_allowed("execute_action").await?;
+        // Keep admission and Ready -> Running on the same side of a freeze. Once Running is
+        // persisted the action has started; freezing never cancels an already admitted command.
+        let mode = self.mode.read().await;
+        if matches!(
+            *mode,
+            SchedulerMode::FullyFrozen | SchedulerMode::Recovering
+        ) {
+            return Err(AgentError::SchedulerFrozen {
+                mode: format!("{mode:?}"),
+                operation: "execute_action",
+            });
+        }
         let platform = self.require_platform("execute_action")?;
 
         let ready = self.store.get_action_run(action_run_id).await?;
@@ -1293,6 +1304,7 @@ impl TopScheduler {
         self.store
             .update_action_run_if(&ready, running.clone())
             .await?;
+        drop(mode);
         self.store
             .append_event(
                 NewEvent::new(
@@ -1755,8 +1767,9 @@ impl TopScheduler {
     /// Team any more, so it is failed into the inbox; an action that was `Running` has an unknown
     /// outcome (the command may or may not have completed), so it is failed into the inbox with
     /// that warning; one that was `Verifying` is verified now when an after-capture request is
-    /// supplied, otherwise failed as unverified; one never evaluated or never started is denied
-    /// so it can be proposed again. A revising Job whose review record was not written before
+    /// supplied, otherwise failed as unverified; one never evaluated is denied so it can be
+    /// proposed again. Ready actions retain their approval in the execution queue for resume.
+    /// A revising Job whose review record was not written before
     /// the crash gets it written now. Every touched Issue is reconciled.
     ///
     /// The previous process's last persisted mode is read back from the event log. Recovery ends
@@ -1838,14 +1851,9 @@ impl TopScheduler {
                     )))?;
                     self.store.update_action_run_if(action, next).await?;
                 }
-                ActionStatus::Ready => {
-                    let mut next = action.clone();
-                    next.deny(interrupted(tr!(
-                        "before execution started; propose it again if still needed",
-                        "，尚未开始执行；如仍需要请重新提议"
-                    )))?;
-                    self.store.update_action_run_if(action, next).await?;
-                }
+                // Ready is the durable execution queue. Nothing has started, so keep its
+                // approval and let the runner drain it when the operator resumes.
+                ActionStatus::Ready => continue,
                 ActionStatus::Running => {
                     let mut next = action.clone();
                     next.record_execution_result(PlatformOperationResult::new(

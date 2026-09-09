@@ -673,7 +673,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let summary = runner.recover().await?;
             print_recovery(&summary);
             if summary.is_clean_restart() && !stay_frozen {
-                runner.scheduler().resume().await?;
+                runner.resume().await?;
                 println!("clean restart: dispatch resumed");
             } else {
                 let why = if stay_frozen {

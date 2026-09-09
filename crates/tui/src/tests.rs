@@ -118,6 +118,7 @@ fn populated() -> (App, mpsc::UnboundedReceiver<Msg>) {
         })),
     );
     app.inbox = Inbox {
+        queued_actions: vec![],
         permission_requests: vec![request.clone()],
         permission_denied: vec![denied.clone()],
         failed_jobs: vec![failed_job],
@@ -574,4 +575,25 @@ fn events_tail_follows_the_newest_and_the_trace_takes_steps() {
     );
     assert!(app.trace.dirty, "any other event re-reads the session");
     assert_eq!(app.trace.last_seq, 11);
+}
+
+#[test]
+fn queued_actions_are_visible_without_asking_for_another_decision() {
+    let (mut app, _rx) = populated();
+    let mut queued = action(ACTION, "mq.purge", "ready", "approved");
+    queued.approved_by = Some("alice".into());
+    app.actions.push(queued.clone());
+    app.inbox.queued_actions.push(queued);
+    app.set_screen(Screen::Inbox);
+    assert_eq!(items(&app)[0].category, Category::Queued);
+    let page = render(&mut app);
+    assert!(page.contains("Queued for execution"), "{page}");
+    assert!(page.contains("alice"), "{page}");
+    assert!(page.contains("no second approval"), "{page}");
+    for key in ['a', 'r', 'b', 'x'] {
+        press(&mut app, KeyCode::Char(key));
+        assert!(app.prompt.is_none());
+    }
+    press(&mut app, KeyCode::Char('h'));
+    assert!(!render(&mut app).contains("approved by alice"));
 }

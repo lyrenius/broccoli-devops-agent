@@ -22,6 +22,8 @@ pub const HINTS: &str = "j/k select · [/] filter · a approve · r reject · b 
 /// Which inbox category an item belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
+    /// Admitted, waiting for execution to resume.
+    Queued,
     /// Waiting for approval.
     Request,
     /// Denied by rule or by a human, awaiting review.
@@ -36,6 +38,7 @@ impl Category {
     /// Short label for the list.
     pub fn label(self) -> &'static str {
         match self {
+            Category::Queued => "queued",
             Category::Request => "request",
             Category::Denied => "denied",
             Category::FailedJob => "failed job",
@@ -45,6 +48,7 @@ impl Category {
 
     fn color(self) -> Color {
         match self {
+            Category::Queued => Color::Cyan,
             Category::Request => Color::Yellow,
             Category::Denied => Color::Red,
             Category::FailedJob | Category::FailedAction => Color::Magenta,
@@ -64,14 +68,17 @@ pub enum Filter {
     Denied,
     /// Failed Jobs and actions.
     Failed,
+    /// Admitted actions waiting to execute.
+    Queued,
 }
 
 impl Filter {
-    const ALL: [Filter; 4] = [
+    const ALL: [Filter; 5] = [
         Filter::All,
         Filter::Requests,
         Filter::Denied,
         Filter::Failed,
+        Filter::Queued,
     ];
 
     fn index(self) -> usize {
@@ -85,6 +92,7 @@ impl Filter {
 
     fn shows(self, category: Category) -> bool {
         match self {
+            Filter::Queued => category == Category::Queued,
             Filter::All => true,
             Filter::Requests => category == Category::Request,
             Filter::Denied => category == Category::Denied,
@@ -178,6 +186,12 @@ pub fn items(app: &App) -> Vec<Item> {
         action: Some(a.clone()),
         job: None,
     };
+    rows.extend(
+        inbox
+            .queued_actions
+            .iter()
+            .map(|a| action(Category::Queued, a)),
+    );
     rows.extend(
         inbox
             .permission_requests
@@ -335,6 +349,10 @@ fn open_decision(app: &mut App, pending: Pending) {
     let Some(item) = selected_waiting(app) else {
         return;
     };
+    if item.category == Category::Queued {
+        app.message = Some("approval is recorded; press u to resume queued execution".to_string());
+        return;
+    }
     let id = item.id().to_string();
     let is_job = item.category == Category::FailedJob;
     let (pending, label) = match pending {
@@ -466,6 +484,7 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
         .iter()
         .map(|item| {
             let (badge_text, badge_color) = match item.category {
+                Category::Queued => ("queued for execution".to_string(), Color::Cyan),
                 Category::Request => ("needs approval".to_string(), Color::Yellow),
                 Category::Denied => (
                     format!(
@@ -508,9 +527,9 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
         .collect();
     let inbox = &app.inbox;
     let failed = inbox.failed_jobs.len() + inbox.failed_actions.len();
-    let total = inbox.total();
+    let total = inbox.total() + inbox.queued_actions.len();
     let mut title = vec![Span::raw(format!(
-        " Waiting for you · {} ",
+        " Waiting · {} ",
         if total == 0 {
             "nothing waits for a human".to_string()
         } else {
@@ -523,6 +542,7 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
             ("Requests".to_string(), inbox.permission_requests.len()),
             ("Denied".to_string(), inbox.permission_denied.len()),
             ("Failed".to_string(), failed),
+            ("Queued".to_string(), inbox.queued_actions.len()),
         ],
         app.inbox_view.filter.index(),
     ));
@@ -562,6 +582,16 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
 /// The web console's card for one item, as a document.
 fn item_doc(item: &Item, doc: &mut Doc) {
     match (item.category, &item.action, &item.job) {
+        (Category::Queued, Some(a), _) => {
+            doc.heading(&a.title());
+            doc.kv("State", "Queued for execution");
+            doc.kv("Approval", a.approved_by.as_deref().unwrap_or("automatic"));
+            doc.kv("Why", &a.reason);
+            doc.kv("Expected effect", &a.expected_effect);
+            doc.note(
+                "Approval is recorded. Press u to resume execution; no second approval is needed.",
+            );
+        }
         (Category::Request, Some(a), _) => {
             doc.line(vec![
                 bold(a.title()),
@@ -577,7 +607,7 @@ fn item_doc(item: &Item, doc: &mut Doc) {
                 "every target must be Healthy in the after-Snapshot; a dry run passes as dry-run evidence only",
             );
             doc.blank();
-            doc.note("a approve and run · r reject with a comment");
+            doc.note("a approve (queues while fully frozen) · r reject with a comment");
         }
         (Category::Denied, Some(a), _) => {
             let denial = a.denial.as_ref();

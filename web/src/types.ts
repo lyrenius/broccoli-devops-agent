@@ -8,6 +8,7 @@ export interface Counts {
 }
 
 export interface InboxCounts {
+  queued_actions: number;
   permission_requests: number;
   permission_denied: number;
   failed_jobs: number;
@@ -241,6 +242,7 @@ export interface ActionRun {
 }
 
 export interface Inbox {
+  queued_actions: ActionRun[];
   permission_requests: ActionRun[];
   permission_denied: ActionRun[];
   failed_jobs: Job[];

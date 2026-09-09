@@ -10,12 +10,12 @@ import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, C
 
 /** Mirrors the runner's inbox membership rule, so History shows exactly what the inbox does not. */
 function inInbox(a: ActionRun): boolean {
-  if (a.status === "waiting_for_approval") return true;
+  if (a.status === "waiting_for_approval" || a.status === "ready") return true;
   if (a.review !== null) return false;
   return a.denial !== null || a.status === "failed" || a.status === "verification_failed";
 }
 
-const EMPTY: InboxData = { permission_requests: [], permission_denied: [], failed_jobs: [], failed_actions: [] };
+const EMPTY: InboxData = { queued_actions: [], permission_requests: [], permission_denied: [], failed_jobs: [], failed_actions: [] };
 type Filter = "all" | "requests" | "denied" | "failed";
 
 function ItemCard({ children, accent }: { children: React.ReactNode; accent: "amber" | "red" | "muted" }) {
@@ -124,6 +124,28 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
         <StatTile label={t("tile.denied")} value={inbox.permission_denied.length} icon={Ban} tone={inbox.permission_denied.length > 0 ? "alert" : "default"} hint={t("tile.denied.hint")} />
         <StatTile label={t("tile.failed")} value={failedCount} icon={XCircle} tone={failedCount > 0 ? "alert" : "default"} hint={t("tile.failed.hint", { jobs: inbox.failed_jobs.length, actions: inbox.failed_actions.length })} />
       </div>
+
+      {inbox.queued_actions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>{t("queue.title", { count: inbox.queued_actions.length })}</CardTitle>
+            <CardDescription>{t("queue.desc")}</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {inbox.queued_actions.map((a) => (
+              <ItemCard key={a.action_run_id} accent="amber">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-sm font-medium">{a.runbook_id}</span>
+                  <span className="font-mono text-xs text-muted-foreground">on {a.target_ids.join(", ")}</span>
+                  <Badge variant="warning">{t("queue.badge")}</Badge>
+                  {a.approved_by && <span className="text-xs text-muted-foreground">{t("approval.by", { who: a.approved_by })}</span>}
+                </div>
+                <p className="mt-2 text-sm text-muted-foreground">{a.reason}</p>
+              </ItemCard>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

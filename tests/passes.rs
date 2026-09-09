@@ -960,3 +960,236 @@ async fn a_failed_follow_up_leaves_the_issue_unresolved() {
         IssueStatus::WaitingForHuman
     );
 }
+
+/// Approval while fully frozen persists a visible queue entry. A restart preserves it, and
+/// concurrent HTTP resume requests execute and verify it once without asking for approval again.
+#[tokio::test(flavor = "multi_thread")]
+async fn frozen_approvals_survive_restart_and_http_resume_executes_once() {
+    let worker = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = worker.local_addr().unwrap().port();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("executed.txt");
+    let topology = topology(port, port);
+    let mut platform = platform_config(false);
+    platform
+        .runbooks
+        .iter_mut()
+        .find(|r| r.id == "mq.purge")
+        .unwrap()
+        .command = format!("echo executed >> {}", log.display());
+    let runner = SliceRunner::wire(
+        topology.clone(),
+        dir.path(),
+        TeamBackend::Harness {
+            client: Arc::new(ScriptedModelClient::new(vec![
+                vec![propose("c1", "mq.purge", "redis-mq")],
+                vec![submit("c2", "purge needed", "diagnosis_only", false)],
+            ])),
+            budget: Default::default(),
+            model: "scripted".into(),
+            label: "scripted".into(),
+        },
+        platform.clone(),
+    )
+    .unwrap();
+    let (issue, job) = runner
+        .handle_report(HumanReport::new("op", "Queue incident", "purge needed"))
+        .await
+        .unwrap();
+    let passes = runner.drive_passes(job).await.unwrap();
+    let id = passes[0].actions[0].action_run_id;
+    runner.scheduler().freeze_all().await.unwrap();
+    let approved = runner.approve_action(id, "alice").await.unwrap();
+    assert_eq!(approved.status, ActionStatus::Ready);
+    assert_eq!(approved.approved_by.as_deref(), Some("alice"));
+    assert_eq!(runner.inbox().await.unwrap().queued_actions.len(), 1);
+    assert!(!log.exists());
+    drop(runner);
+
+    let runner =
+        Arc::new(SliceRunner::wire(topology, dir.path(), TeamBackend::ReadOnly, platform).unwrap());
+    let recovery = runner.recover().await.unwrap();
+    assert_eq!(
+        recovery.final_mode,
+        broccoli_devops_agent::scheduler::SchedulerMode::FullyFrozen
+    );
+    assert!(recovery.interrupted_action_ids.is_empty());
+    let inbox = runner.inbox().await.unwrap();
+    assert_eq!(inbox.queued_actions[0].action_run_id, id);
+    assert!(inbox.permission_requests.is_empty());
+    assert!(!log.exists());
+
+    let config = broccoli_devops_agent::config::AppConfig {
+        platform: runner.settings().current().platform,
+        ..Default::default()
+    };
+    let state = Arc::new(broccoli_devops_agent::api::ApiState::new(
+        runner.clone(),
+        config,
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, broccoli_devops_agent::api::router(state))
+            .await
+            .unwrap()
+    });
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/api/scheduler/resume");
+    let (a, b) = tokio::join!(client.post(&url).send(), client.post(&url).send());
+    assert!(a.unwrap().status().is_success());
+    assert!(b.unwrap().status().is_success());
+    assert_eq!(std::fs::read_to_string(log).unwrap(), "executed\n");
+    assert_eq!(
+        runner.store().get_action_run(id).await.unwrap().status,
+        ActionStatus::Succeeded
+    );
+    assert!(runner.inbox().await.unwrap().queued_actions.is_empty());
+    assert_eq!(
+        runner
+            .store()
+            .get_issue(issue.issue_id)
+            .await
+            .unwrap()
+            .status,
+        IssueStatus::Resolved
+    );
+    let events = runner.store().list_events().await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == "action.started" && e.action_run_id == Some(id))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == "human.action_approved" && e.action_run_id == Some(id))
+            .count(),
+        1
+    );
+    server.abort();
+}
+
+/// Draining an approved action retains the original follow-up semantics, including its budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn resuming_the_queue_continues_the_pass_once() {
+    let worker = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let Harness { runner, .. } = harness(
+        dir.path(),
+        worker.local_addr().unwrap().port(),
+        true,
+        PassPolicy::default(),
+        vec![
+            vec![propose("c1", "mq.purge", "redis-mq")],
+            vec![submit("c2", "check the purge", "diagnosis_only", true)],
+            vec![submit("c3", "dry-run only", "diagnosis_only", false)],
+        ],
+    );
+    let (_, job) = runner
+        .handle_report(HumanReport::new("op", "Queue incident", "purge needed"))
+        .await
+        .unwrap();
+    let passes = runner.drive_passes(job).await.unwrap();
+    runner.scheduler().freeze_all().await.unwrap();
+    assert_eq!(
+        runner
+            .approve_action(passes[0].actions[0].action_run_id, "alice")
+            .await
+            .unwrap()
+            .status,
+        ActionStatus::Ready
+    );
+    assert_eq!(runner.store().list_jobs().await.unwrap().len(), 1);
+    runner.resume().await.unwrap();
+    runner.resume().await.unwrap();
+    let jobs = runner.store().list_jobs().await.unwrap();
+    assert_eq!(jobs.len(), 2);
+    assert_eq!(jobs[1].continues_job_id, Some(passes[0].job.job_id));
+    assert_eq!(jobs[1].follow_up_budget, passes[0].job.follow_up_budget - 1);
+}
+
+/// Freezing during a queue drain lets the admitted command finish, and leaves the next one
+/// queued. Failed execution/verification remains visible in the ordinary failure inbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_freeze_stops_the_queue_before_the_next_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("executed.txt");
+    let Harness { runner, .. } = harness(
+        dir.path(),
+        closed_port(),
+        false,
+        PassPolicy::default(),
+        vec![
+            vec![
+                propose("c1", "mq.purge", "redis-mq"),
+                call(
+                    "c2",
+                    "propose_action",
+                    json!({
+                        "runbook_id": "mq.purge", "target_ids": ["redis-mq"], "reason": "a second queue operation", "expected_effect": "queue cleared"
+                    }),
+                ),
+            ],
+            vec![submit(
+                "c3",
+                "two pending operations",
+                "diagnosis_only",
+                false,
+            )],
+        ],
+    );
+    let mut live = runner.settings().current();
+    live.platform
+        .runbooks
+        .iter_mut()
+        .find(|r| r.id == "mq.purge")
+        .unwrap()
+        .command = format!("sleep 0.2; echo executed >> {}", log.display());
+    runner.apply_live(live);
+    let runner = Arc::new(runner);
+    let (_, job) = runner
+        .handle_report(HumanReport::new(
+            "op",
+            "Queue incident",
+            "two pending operations",
+        ))
+        .await
+        .unwrap();
+    let passes = runner.drive_passes(job).await.unwrap();
+    let first = passes[0].actions[0].action_run_id;
+    let second = passes[0].actions[1].action_run_id;
+    runner.scheduler().freeze_all().await.unwrap();
+    for id in [first, second] {
+        assert_eq!(
+            runner.approve_action(id, "alice").await.unwrap().status,
+            ActionStatus::Ready
+        );
+    }
+    let resumed = runner.clone();
+    let drain = tokio::spawn(async move { resumed.resume().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while runner.store().get_action_run(first).await.unwrap().status != ActionStatus::Running {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runner.scheduler().freeze_all().await.unwrap();
+    drain.await.unwrap().unwrap();
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "executed\n");
+    let inbox = runner.inbox().await.unwrap();
+    assert_eq!(inbox.queued_actions.len(), 1);
+    assert_eq!(inbox.queued_actions[0].action_run_id, second);
+    assert_eq!(inbox.failed_actions.len(), 1);
+    assert_eq!(inbox.failed_actions[0].action_run_id, first);
+    runner.resume().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(log).unwrap(),
+        "executed\nexecuted\n"
+    );
+    assert!(runner.inbox().await.unwrap().queued_actions.is_empty());
+    assert_eq!(runner.inbox().await.unwrap().failed_actions.len(), 2);
+}

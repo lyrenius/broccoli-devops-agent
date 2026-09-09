@@ -94,6 +94,9 @@ export const en = {
   "gaps.none": "None — every resource was observed.",
 
   "inbox.title": "Inbox",
+  "queue.title": "Execution queue ({count})",
+  "queue.desc": "Approval is recorded. These actions wait while execution is frozen and run when the Scheduler resumes; no second approval is needed.",
+  "queue.badge": "queued for execution",
   "evidence.observation": "observation only",
   "inbox.subtitle": "Everything that waits for a human, in three categories. Items leave only through a recorded decision made in your name.",
   "inbox.dryRunBadge": "Platform dry-run: approved actions are rendered, not executed",

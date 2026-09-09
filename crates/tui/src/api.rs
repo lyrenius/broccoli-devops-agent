@@ -168,6 +168,8 @@ pub struct Counts {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct InboxCounts {
+    /// Admitted actions waiting to execute.
+    pub queued_actions: usize,
     /// Actions waiting for approval.
     pub permission_requests: usize,
     /// Denied actions awaiting review.
@@ -671,7 +673,7 @@ impl ActionRun {
     /// Mirrors the runner's inbox membership rule, so History shows exactly what the inbox
     /// does not.
     pub fn in_inbox(&self) -> bool {
-        if self.status == "waiting_for_approval" {
+        if matches!(self.status.as_str(), "waiting_for_approval" | "ready") {
             return true;
         }
         if self.review.is_some() {
@@ -692,6 +694,8 @@ impl ActionRun {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Inbox {
+    /// Admitted actions queued for execution, retained during a full freeze.
+    pub queued_actions: Vec<ActionRun>,
     /// Actions waiting for approval.
     pub permission_requests: Vec<ActionRun>,
     /// Denied actions awaiting review.

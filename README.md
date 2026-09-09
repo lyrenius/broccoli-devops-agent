@@ -259,6 +259,8 @@ Authority is decided over the whole proposal: the runbook, every target's kind (
 
 A completed Job means its investigation or observation finished; it does not by itself resolve the Issue. Read-only ActionRuns record `observation` evidence. An Issue can resolve automatically only with verified remediation or a Scheduler-confirmed `solved` result, after every proposal in the pass has been processed and its actions settled. A requested follow-up keeps the Issue open until that pass concludes.
 
+Approving an action while the Scheduler is fully frozen records the approval and leaves the action `Ready` in the **Execution queue**, shown by the web console, TUI, and `inbox` command. **Resume** drains the queue and verifies each action without asking for approval again. Queued actions survive a controller restart; running actions with an unknown outcome still go to recovery review. A new full freeze lets the admitted action finish and leaves the remaining queue for the next resume.
+
 The Platform executes runbooks as the commands you map in `config/agent.toml` under `[[platform.runbooks]]` (for example `ssh {target} sudo systemctl restart broccoli-worker`); credentials stay with your SSH agent. It starts in **dry-run** mode — commands are rendered and recorded as Artifacts, not executed — until you set `dry_run = false`. Verification treats a command's exit code zero as evidence only: the target must be Healthy in the after-Snapshot, or the action ends as `VerificationFailed`.
 
 ## Watching a run, and what it costs

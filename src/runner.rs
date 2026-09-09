@@ -195,6 +195,9 @@ pub enum TeamBackend {
 /// records it is built from. Items leave the inbox only through a recorded human decision.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Inbox {
+    /// Approved or automatically admitted actions waiting to execute, including while frozen.
+    #[serde(default)]
+    pub queued_actions: Vec<ActionRun>,
     /// Actions the matrix holds for human approval.
     pub permission_requests: Vec<ActionRun>,
     /// Actions denied by rule or by a human, not yet reviewed.
@@ -265,6 +268,11 @@ pub struct SliceRunner {
     /// Serializes review-plus-dispatch so two reviewers of one item cannot both dispatch a
     /// revision; the store's compare-and-set catches what slips past process boundaries.
     review_lock: Mutex<()>,
+    /// Serializes queue drains while keeping unrelated API requests responsive.
+    queue_lock: Mutex<()>,
+    /// An approval and a concurrent resume may see the same Ready action. Serialize that
+    /// action through verification, while allowing distinct targets to execute concurrently.
+    execution_locks: Mutex<HashMap<ActionRunId, Arc<Mutex<()>>>>,
     /// Claim a follow-up before releasing the lock, then run the Team outside it.
     follow_up_lock: Mutex<()>,
 }
@@ -378,6 +386,8 @@ impl SliceRunner {
             running: Mutex::new(HashMap::new()),
             watchers: broadcast::channel(256).0,
             review_lock: Mutex::new(()),
+            queue_lock: Mutex::new(()),
+            execution_locks: Mutex::new(HashMap::new()),
             follow_up_lock: Mutex::new(()),
         })
     }
@@ -859,14 +869,20 @@ impl SliceRunner {
             .result
             .as_ref()
             .is_some_and(|result| result.follow_up_requested);
-        if actions.is_empty() || !requested {
-            return Ok(Some(PassStop::Done));
+        if actions
+            .iter()
+            .any(|action| action.status == ActionStatus::Ready)
+        {
+            return Ok(Some(PassStop::Frozen));
         }
         if actions
             .iter()
             .any(|action| action.status == ActionStatus::WaitingForApproval)
         {
             return Ok(Some(PassStop::WaitingForApproval));
+        }
+        if actions.is_empty() || !requested {
+            return Ok(Some(PassStop::Done));
         }
         if !actions.iter().any(action_was_executed) {
             return Ok(Some(PassStop::NothingRan));
@@ -1092,9 +1108,28 @@ impl SliceRunner {
         Ok(actions)
     }
 
-    /// Executes a `Ready` action through the Platform and verifies its effect.
+    /// Executes a `Ready` action and verifies it, or leaves it durably queued while frozen.
+    /// Concurrent callers for the same action observe its current result without replaying it.
     pub async fn execute_and_verify(&self, action_run_id: ActionRunId) -> AgentResult<ActionRun> {
-        let action = self.scheduler.execute_action(action_run_id).await?;
+        let lock = self
+            .execution_locks
+            .lock()
+            .await
+            .entry(action_run_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _execution = lock.lock().await;
+        let current = self.store.get_action_run(action_run_id).await?;
+        if current.status != ActionStatus::Ready {
+            return Ok(current);
+        }
+        let action = match self.scheduler.execute_action(action_run_id).await {
+            Ok(action) => action,
+            Err(AgentError::SchedulerFrozen { .. }) => {
+                return self.store.get_action_run(action_run_id).await;
+            }
+            Err(error) => return Err(error),
+        };
         if action.status != ActionStatus::Verifying {
             return Ok(action);
         }
@@ -1106,7 +1141,8 @@ impl SliceRunner {
             .await
     }
 
-    /// Records a human approval by name and runs the action to completion.
+    /// Records a human approval and executes it when allowed. During a full freeze the Ready
+    /// action remains in the execution queue; resuming drains that queue without re-approval.
     ///
     /// When the proposing pass asked for a follow-up and this approval settled its last held
     /// action, the chain resumes: the follow-up pass runs before this returns (its Job is in
@@ -1122,6 +1158,31 @@ impl SliceRunner {
         let action = self.execute_and_verify(action_run_id).await?;
         self.follow_up_after_approval(&action).await?;
         Ok(action)
+    }
+
+    /// Resumes dispatch and drains the durable execution queue in creation order. Each start
+    /// rechecks freeze mode, so a new full freeze stops the drain after the admitted action.
+    pub async fn resume(&self) -> AgentResult<()> {
+        let _drain = self.queue_lock.lock().await;
+        self.scheduler.resume().await?;
+        let archived = self.scheduler.archived_issue_ids().await?;
+        let queued: Vec<_> = self
+            .store
+            .list_action_runs()
+            .await?
+            .into_iter()
+            .filter(|action| {
+                action.status == ActionStatus::Ready && !archived.contains(&action.issue_id)
+            })
+            .collect();
+        for pending in queued {
+            let action = self.execute_and_verify(pending.action_run_id).await?;
+            if action.status == ActionStatus::Ready {
+                break;
+            }
+            self.follow_up_after_approval(&action).await?;
+        }
+        Ok(())
     }
 
     /// Records a human rejection with its comment; the action is cancelled and never executes.
@@ -1395,7 +1456,9 @@ impl SliceRunner {
             if archived.contains(&action.issue_id) {
                 continue;
             }
-            if action.status == ActionStatus::WaitingForApproval {
+            if action.status == ActionStatus::Ready {
+                inbox.queued_actions.push(action);
+            } else if action.status == ActionStatus::WaitingForApproval {
                 inbox.permission_requests.push(action);
             } else if action.review.is_none() && action.denial.is_some() {
                 inbox.permission_denied.push(action);
@@ -1608,6 +1671,17 @@ impl SliceRunner {
     /// Renders the inbox as operator-facing text.
     pub fn render_inbox(inbox: &Inbox) -> String {
         let mut out = String::new();
+        let _ = writeln!(out, "execution queue ({}):", inbox.queued_actions.len());
+        for action in &inbox.queued_actions {
+            let _ = writeln!(
+                out,
+                "  {}  {} on {} — queued; resumes when execution is allowed ({:?})",
+                action.action_run_id,
+                action.runbook_id,
+                action.target_ids.join(","),
+                action.approval
+            );
+        }
         let _ = writeln!(
             out,
             "permission requests ({}):",

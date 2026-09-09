@@ -58,7 +58,10 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         .map(|screen| {
             let mut spans = vec![Span::raw(screen.title())];
             if *screen == Screen::Inbox {
-                let total = app.status.as_ref().map_or(0, |s| s.inbox.total);
+                let total = app
+                    .status
+                    .as_ref()
+                    .map_or(0, |s| s.inbox.total + s.inbox.queued_actions);
                 if total > 0 {
                     spans.push(Span::styled(
                         format!(" {total} "),

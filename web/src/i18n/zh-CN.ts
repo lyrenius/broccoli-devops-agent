@@ -96,6 +96,9 @@ export const zhCN: Record<Key, string> = {
   "gaps.none": "无——所有资源均已观测。",
 
   "inbox.title": "收件箱",
+  "queue.title": "执行队列（{count}）",
+  "queue.desc": "权限已确认。操作在全冻结期间排队，调度器恢复后执行，无需再次批准。",
+  "queue.badge": "排队待执行",
   "evidence.observation": "仅完成观测",
   "inbox.subtitle": "所有等待人工处理的事项，分为三类。事项只有在以你的名义做出决定后才会离开收件箱。",
   "inbox.dryRunBadge": "执行平台处于演练模式：批准的操作只会渲染记录，不会真正执行",

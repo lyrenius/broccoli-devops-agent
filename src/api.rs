@@ -218,6 +218,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
             "events": store.list_events().await?.len(),
         },
         "inbox": {
+            "queued_actions": inbox.queued_actions.len(),
             "permission_requests": inbox.permission_requests.len(),
             "permission_denied": inbox.permission_denied.len(),
             "failed_jobs": inbox.failed_jobs.len(),
@@ -654,7 +655,7 @@ async fn scheduler_transition(
     match transition.as_str() {
         "freeze-dispatch" => scheduler.freeze_dispatch().await?,
         "freeze-all" => scheduler.freeze_all().await?,
-        "resume" => scheduler.resume().await?,
+        "resume" => state.runner.resume().await?,
         other => {
             return Err(ApiError(
                 StatusCode::NOT_FOUND,

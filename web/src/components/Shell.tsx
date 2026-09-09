@@ -101,18 +101,22 @@ export function Shell({
 }) {
   const [theme, toggleTheme] = useTheme();
   const [operator, setOperator] = useOperator();
-  const [busy, setBusy] = useState(false);
+  const [pendingTransition, setPendingTransition] = useState<string | null>(null);
+  const [transitionError, setTransitionError] = useState<string | null>(null);
   const { t, status: statusLabel } = useT();
   const { locale, setLocale } = useLocale();
   const mode = status?.mode ?? "unknown";
 
   const transition = async (name: "freeze-dispatch" | "freeze-all" | "resume") => {
-    setBusy(true);
+    setPendingTransition(name);
+    setTransitionError(null);
     try {
       await api.transition(name);
       onChanged();
+    } catch (e) {
+      setTransitionError((e as Error).message);
     } finally {
-      setBusy(false);
+      setPendingTransition((current) => current === name ? null : current);
     }
   };
 
@@ -143,9 +147,9 @@ export function Shell({
                     label={t(item.label)}
                     onClick={() => onTab(item.id)}
                     trailing={
-                      item.id === "inbox" && status && status.inbox.total > 0 ? (
+                      item.id === "inbox" && status && status.inbox.total + status.inbox.queued_actions > 0 ? (
                         <span className="ml-auto rounded-md bg-sidebar-primary px-1.5 text-[11px] font-bold leading-5 text-sidebar-primary-foreground tabular-nums">
-                          {status.inbox.total}
+                          {status.inbox.total + status.inbox.queued_actions}
                         </span>
                       ) : undefined
                     }
@@ -163,13 +167,13 @@ export function Shell({
             </div>
             <ul className="flex flex-col gap-1">
               <li>
-                <MenuButton icon={Snowflake} label={t("scheduler.freezeDispatch")} onClick={() => void transition("freeze-dispatch")} className={cn((busy || mode === "dispatch_frozen") && "pointer-events-none opacity-50")} />
+                <MenuButton icon={Snowflake} label={t("scheduler.freezeDispatch")} onClick={() => void transition("freeze-dispatch")} className={cn((pendingTransition === "freeze-dispatch" || mode === "dispatch_frozen") && "pointer-events-none opacity-50")} />
               </li>
               <li>
-                <MenuButton icon={ShieldAlert} label={t("scheduler.freezeAll")} onClick={() => void transition("freeze-all")} className={cn((busy || mode === "fully_frozen") && "pointer-events-none opacity-50")} />
+                <MenuButton icon={ShieldAlert} label={t("scheduler.freezeAll")} onClick={() => void transition("freeze-all")} className={cn((pendingTransition === "freeze-all" || mode === "fully_frozen") && "pointer-events-none opacity-50")} />
               </li>
               <li>
-                <MenuButton icon={Play} label={t("scheduler.resume")} onClick={() => void transition("resume")} className={cn((busy || mode === "running") && "pointer-events-none opacity-50")} />
+                <MenuButton icon={Play} label={t("scheduler.resume")} onClick={() => void transition("resume")} className={cn((pendingTransition !== null || (mode === "running" && !status?.inbox.queued_actions)) && "pointer-events-none opacity-50")} />
               </li>
             </ul>
             {status && (
@@ -186,6 +190,7 @@ export function Shell({
               </div>
             )}
             {error && <div className="mt-2 px-2 text-xs text-destructive">{t("api.unreachable", { error })}</div>}
+            {transitionError && <div className="mt-2 px-2 text-xs text-destructive">{transitionError}</div>}
           </div>
         </div>
 
