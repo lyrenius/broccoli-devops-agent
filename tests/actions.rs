@@ -239,9 +239,9 @@ async fn contest_mode_denies_destructive_rows() {
     assert_eq!(actions[0].approval, ApprovalState::Rejected);
 }
 
-/// A runbook without a configured command is refused by the Platform, not silently skipped.
+/// Missing implementations become human tasks before the Platform starts.
 #[tokio::test]
-async fn platform_refuses_unconfigured_runbooks() {
+async fn unconfigured_runbooks_wait_for_human_without_execution() {
     let dir = tempfile::tempdir().unwrap();
     let client = ScriptedModelClient::new(vec![
         vec![propose("c1", "worker.start", "worker-1")],
@@ -264,23 +264,220 @@ async fn platform_refuses_unconfigured_runbooks() {
         .await
         .unwrap();
     let actions = runner.run_proposals(&job).await.unwrap();
-    // worker.start is auto in rehearsal, so it reaches the Platform — which has no command.
-    assert_eq!(actions[0].status, ActionStatus::Failed);
+    assert_eq!(actions[0].status, ActionStatus::WaitingForHuman);
     assert!(
         actions[0]
-            .execution_summary
+            .human_intervention
             .as_deref()
             .unwrap()
             .contains("no command is configured")
     );
-    // The Platform's output record is a registered Artifact, resolvable by ID.
-    let artifact = runner
-        .store()
-        .get_artifact(actions[0].execution_artifact_id.unwrap())
+    assert!(actions[0].started_at.is_none());
+    assert!(actions[0].execution_artifact_id.is_none());
+    assert!(actions[0].denial.is_none());
+    assert!(
+        runner
+            .approve_action(actions[0].action_run_id, "op")
+            .await
+            .is_err()
+    );
+    let inbox = runner.inbox().await.unwrap();
+    assert_eq!(inbox.blocked_actions.len(), 1);
+    assert!(inbox.failed_actions.is_empty());
+    assert!(inbox.permission_denied.is_empty());
+    assert!(
+        inbox.waiting_issues.is_empty(),
+        "do not duplicate the same issue in input"
+    );
+    assert_eq!(
+        runner
+            .store()
+            .get_issue(actions[0].issue_id)
+            .await
+            .unwrap()
+            .status,
+        broccoli_devops_agent::domain::IssueStatus::WaitingForHuman
+    );
+    assert!(
+        !runner
+            .store()
+            .list_events()
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "action.started")
+    );
+}
+
+/// Unknown runbooks are persisted for human implementation; out-of-scope targets stay denied.
+#[tokio::test]
+async fn unknown_runbooks_reach_humans_without_weakening_scope_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = ScriptedModelClient::new(vec![
+        vec![propose("c1", "worker.custom_fix", "worker-1")],
+        vec![propose("c2", "worker.custom_fix", "outside-scope")],
+        vec![propose("c3", "worker.start", "redis-mq")],
+        vec![diagnosis("c4")],
+    ]);
+    let runner = SliceRunner::wire(
+        topology(OperationMode::Rehearsal, closed_port(), closed_port()),
+        dir.path(),
+        TeamBackend::Harness {
+            client: std::sync::Arc::new(client),
+            budget: Default::default(),
+            model: "scripted-model".into(),
+            label: "scripted".into(),
+        },
+        platform_config(),
+    )
+    .unwrap();
+    let (_, job) = runner
+        .handle_report(HumanReport::new(
+            "op",
+            "Repair worker",
+            "inspect the failure",
+        ))
         .await
         .unwrap();
+    let actions = runner.run_proposals(&job).await.unwrap();
     assert_eq!(
-        artifact.produced_by_action_run_id,
-        Some(actions[0].action_run_id)
+        actions.len(),
+        3,
+        "unknown proposals must survive the model tool boundary"
     );
+    assert_eq!(actions[0].status, ActionStatus::WaitingForHuman);
+    assert!(
+        actions[0]
+            .human_intervention
+            .as_deref()
+            .unwrap()
+            .contains("not in the Runbook Registry")
+    );
+    for denied in &actions[1..] {
+        assert_eq!(denied.status, ActionStatus::Cancelled);
+        assert!(denied.denial.is_some());
+        assert!(denied.started_at.is_none());
+    }
+    let inbox = runner.inbox().await.unwrap();
+    assert_eq!(inbox.blocked_actions.len(), 1);
+    assert_eq!(inbox.permission_denied.len(), 2);
+    assert!(inbox.failed_actions.is_empty());
+}
+
+/// A pending approval cannot run after its implementation is removed from live settings.
+#[tokio::test]
+async fn approval_rechecks_command_availability_before_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = SliceRunner::wire(
+        topology(OperationMode::Rehearsal, closed_port(), closed_port()),
+        dir.path(),
+        TeamBackend::Harness {
+            client: std::sync::Arc::new(ScriptedModelClient::new(vec![
+                vec![propose("c1", "mq.purge", "redis-mq")],
+                vec![diagnosis("c2")],
+            ])),
+            budget: Default::default(),
+            model: "scripted-model".into(),
+            label: "scripted".into(),
+        },
+        platform_config(),
+    )
+    .unwrap();
+    let (_, job) = runner
+        .handle_report(HumanReport::new("op", "Queue", "inspect it"))
+        .await
+        .unwrap();
+    let actions = runner.run_proposals(&job).await.unwrap();
+    assert_eq!(actions[0].status, ActionStatus::WaitingForApproval);
+    let mut live = runner.settings().current();
+    live.platform.runbooks.clear();
+    runner.settings().replace(live);
+    let blocked = runner
+        .approve_action(actions[0].action_run_id, "op")
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, ActionStatus::WaitingForHuman);
+    assert!(blocked.started_at.is_none());
+    assert!(blocked.execution_artifact_id.is_none());
+    assert_eq!(runner.inbox().await.unwrap().blocked_actions.len(), 1);
+}
+
+/// Waiting survives a restart, and revised work is evaluated afresh after configuration is fixed.
+#[tokio::test]
+async fn blocked_action_survives_restart_and_can_be_revised_after_configuration() {
+    use broccoli_devops_agent::runner::{InboxDecision, PassStop};
+    let dir = tempfile::tempdir().unwrap();
+    let worker = TcpListener::bind("127.0.0.1:0").unwrap();
+    let topo = topology(
+        OperationMode::Rehearsal,
+        worker.local_addr().unwrap().port(),
+        closed_port(),
+    );
+    let runner = SliceRunner::wire(
+        topo.clone(),
+        dir.path(),
+        TeamBackend::Harness {
+            client: std::sync::Arc::new(ScriptedModelClient::new(vec![
+                vec![propose("c1", "worker.start", "worker-1")],
+                vec![diagnosis("c2")],
+            ])),
+            budget: Default::default(),
+            model: "scripted-model".into(),
+            label: "scripted".into(),
+        },
+        platform_config(),
+    )
+    .unwrap();
+    let (_, job) = runner
+        .handle_report(HumanReport::new("op", "Worker", "inspect it"))
+        .await
+        .unwrap();
+    let passes = runner.drive_passes(job).await.unwrap();
+    assert_eq!(passes[0].stop, PassStop::WaitingForHuman);
+    let id = passes[0].actions[0].action_run_id;
+    drop(runner);
+    let restarted = SliceRunner::wire(
+        topo,
+        dir.path(),
+        TeamBackend::Harness {
+            client: std::sync::Arc::new(ScriptedModelClient::new(vec![
+                vec![propose("c3", "worker.start", "worker-1")],
+                vec![diagnosis("c4")],
+            ])),
+            budget: Default::default(),
+            model: "scripted-model".into(),
+            label: "scripted".into(),
+        },
+        platform_config(),
+    )
+    .unwrap();
+    restarted.recover().await.unwrap();
+    assert_eq!(
+        restarted.inbox().await.unwrap().blocked_actions[0].action_run_id,
+        id
+    );
+    let mut live = restarted.settings().current();
+    live.platform.runbooks.push(RunbookCommand {
+        id: "worker.start".into(),
+        command: "echo start {target}".into(),
+    });
+    restarted.settings().replace(live);
+    restarted.resume().await.unwrap();
+    let reviewed = restarted
+        .review_action(
+            id,
+            "op",
+            InboxDecision::SendUpstream,
+            Some("implementation configured; reassess".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reviewed.reviewed.status, ActionStatus::Cancelled);
+    let revision = reviewed.revision.unwrap();
+    assert_eq!(revision.actions[0].status, ActionStatus::Succeeded);
+    assert_eq!(
+        revision.actions[0].verification_evidence,
+        Some(VerificationEvidence::DryRun)
+    );
+    assert!(restarted.inbox().await.unwrap().blocked_actions.is_empty());
 }

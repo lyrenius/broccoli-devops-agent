@@ -240,6 +240,7 @@ impl SnapshotViewBuilderPort for RedactingViewBuilder {
                             "approval": action.approval,
                             "dry_run": action.dry_run,
                             "denial_reason": action.denial_reason,
+                            "human_intervention": action.human_intervention,
                             "execution_summary": action.execution_summary,
                             "verification_summary": action.verification_summary,
                             "verification_evidence": action.verification_evidence,

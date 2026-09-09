@@ -221,6 +221,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
         },
         "inbox": {
             "waiting_issues": inbox.waiting_issues.len(),
+            "blocked_actions": inbox.blocked_actions.len(),
             "queued_actions": inbox.queued_actions.len(),
             "permission_requests": inbox.permission_requests.len(),
             "permission_denied": inbox.permission_denied.len(),

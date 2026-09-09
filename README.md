@@ -43,7 +43,7 @@ cargo run -- serve --data data-demo --topology data-demo/topology.toml --team re
 cd web && pnpm install && pnpm dev
 ```
 
-Open <http://localhost:5180>. The inbox holds a permission request (approve it, or reject it with a comment), a rule denial, a failed action, and a failed Job (acknowledge them, or send them back upstream to watch a revising pass run with your comment in front of it). The Overview shows the live Snapshot with its coverage gaps; the Issues & jobs page shows every pass; Trace opens the transcript behind one.
+Open <http://localhost:5180>. The inbox holds a permission request (approve it, or reject it with a comment), a rule denial, an action awaiting human implementation, and a failed Job (acknowledge them, or send them back upstream to watch a revising pass run with your comment in front of it). The Overview shows the live Snapshot with its coverage gaps; the Issues & jobs page shows every pass; Trace opens the transcript behind one.
 
 ### 2. Watch a pass run live
 
@@ -274,6 +274,8 @@ A completed Job means its investigation or observation finished; it does not by 
 Approving an action while the Scheduler is fully frozen records the approval and leaves the action `Ready` in the **Execution queue**, shown by the web console, TUI, and `inbox` command. **Resume** drains the queue and verifies each action without asking for approval again. Queued actions survive a controller restart; running actions with an unknown outcome still go to recovery review. A new full freeze lets the admitted action finish and leaves the remaining queue for the next resume.
 
 The Platform executes runbooks as the commands you map in `config/agent.toml` under `[[platform.runbooks]]` (for example `ssh {target} sudo systemctl restart broccoli-worker`); credentials stay with your SSH agent. It starts in **dry-run** mode — commands are rendered and recorded as Artifacts, not executed — until you set `dry_run = false`. Verification treats a command's exit code zero as evidence only: the target must be Healthy in the after-Snapshot, or the action ends as `VerificationFailed`.
+
+An unregistered action runbook, or an allowed runbook without a configured command, is held as `WaitingForHuman` in the Inbox. No command runs. Provide a reviewed implementation or a manual outcome and send feedback upstream to reassess it; direct approval cannot bypass a missing implementation. Actual execution failures and policy denials remain separate.
 
 ## Watching a run, and what it costs
 

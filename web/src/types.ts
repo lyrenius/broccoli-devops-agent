@@ -9,6 +9,7 @@ export interface Counts {
 
 export interface InboxCounts {
   waiting_issues: number;
+  blocked_actions?: number;
   queued_actions: number;
   permission_requests: number;
   permission_denied: number;
@@ -203,6 +204,7 @@ export interface HumanReview {
 }
 
 export type FeedbackOrigin =
+  | { kind: "blocked_action"; action_run_id: string; runbook_id: string; target_ids: string[]; reason: string }
   | { kind: "issue_comment"; job_id: string; summary: string }
   | { kind: "denied_action"; action_run_id: string; runbook_id: string; target_ids: string[]; denial: Denial }
   | { kind: "failed_action"; action_run_id: string; runbook_id: string; target_ids: string[]; summary: string; evidence: string | null }
@@ -254,6 +256,7 @@ export interface ActionRun {
   approval: string;
   approved_by: string | null;
   denial: Denial | null;
+  human_intervention?: string | null;
   review: HumanReview | null;
   execution_summary: string | null;
   dry_run: boolean;
@@ -264,6 +267,7 @@ export interface ActionRun {
 
 export interface Inbox {
   waiting_issues: WaitingIssue[];
+  blocked_actions: ActionRun[];
   queued_actions: ActionRun[];
   permission_requests: ActionRun[];
   permission_denied: ActionRun[];

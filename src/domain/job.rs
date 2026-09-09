@@ -82,6 +82,9 @@ pub struct PassActionRecord {
     pub dry_run: bool,
     /// The denial's reason, when it was denied.
     pub denial_reason: Option<String>,
+    /// A missing implementation that required human handling, without execution.
+    #[serde(default)]
+    pub human_intervention: Option<String>,
     /// The Platform's own account of the execution.
     pub execution_summary: Option<String>,
     /// The Scheduler's verification conclusion.

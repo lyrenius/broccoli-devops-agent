@@ -668,13 +668,13 @@ impl HarnessOperateTeam {
                         name: "propose_action".into(),
                         description: "Proposes one operation for the Scheduler to run through the \
                                       authority matrix. It may be executed automatically, held for \
-                                      human approval, or denied; you will not see the outcome in \
+                                      human approval, denied, or returned for human implementation; you will not see the outcome in \
                                       this pass. Propose only when the Snapshot View supports it."
                             .into(),
                         parameters: json!({
                             "type": "object",
                             "properties": {
-                                "runbook_id": { "type": "string", "enum": *runbook_ids },
+                                "runbook_id": { "type": "string", "description": format!("Prefer registered runbooks: {}. An unregistered runbook is a request for human implementation and will not execute.", runbook_ids.join(", ")) },
                                 "target_ids": { "type": "array", "items": { "type": "string" } },
                                 "arguments": {
                                     "type": "object",
@@ -699,12 +699,10 @@ impl HarnessOperateTeam {
                                 .as_str()
                                 .ok_or("`runbook_id` must be a string")?
                                 .to_string();
-                            if !runbook_ids.contains(&runbook_id) {
-                                return Err(format!(
-                                    "unknown runbook `{runbook_id}`; choose one of: {}",
-                                    runbook_ids.join(", ")
-                                ));
+                            if runbook_id.trim().is_empty() {
+                                return Err("`runbook_id` must not be empty".into());
                             }
+                            let requires_human = !runbook_ids.contains(&runbook_id);
                             let target_ids = string_list(&arguments["target_ids"])?;
                             if target_ids.is_empty() {
                                 return Err("`target_ids` must name at least one resource".into());
@@ -734,6 +732,7 @@ impl HarnessOperateTeam {
                             run.proposals.push(proposal);
                             Ok(json!({
                                 "queued": true,
+                                "requires_human": requires_human,
                                 "proposal_index": run.proposals.len() - 1,
                                 "note": if run.view_read {
                                     Value::Null

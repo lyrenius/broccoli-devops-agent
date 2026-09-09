@@ -119,6 +119,7 @@ fn populated() -> (App, mpsc::UnboundedReceiver<Msg>) {
     );
     app.inbox = Inbox {
         waiting_issues: vec![],
+        blocked_actions: vec![],
         queued_actions: vec![],
         permission_requests: vec![request.clone()],
         permission_denied: vec![denied.clone()],
@@ -652,4 +653,31 @@ fn waiting_investigations_accept_feedback_and_show_closure_comments() {
     let page = render(&mut app);
     assert!(page.contains("Alice"), "{page}");
     assert!(page.contains("Recovered with no data loss"), "{page}");
+}
+
+#[test]
+fn blocked_actions_are_human_tasks_with_review_controls() {
+    let (mut app, _rx) = app();
+    let mut blocked = action(ACTION, "worker.start", "waiting_for_human", "unevaluated");
+    blocked.human_intervention = Some("No command configured; nothing executed".into());
+    assert!(blocked.in_inbox());
+    app.inbox.blocked_actions.push(blocked);
+    app.set_screen(Screen::Inbox);
+    app.inbox_view.list.select(Some(0));
+    assert_eq!(app.inbox.total(), 1);
+    assert_eq!(items(&app)[0].category, Category::BlockedAction);
+    press(&mut app, KeyCode::Char('a'));
+    assert!(
+        app.prompt.is_none(),
+        "approval cannot supply a missing implementation"
+    );
+    press(&mut app, KeyCode::Char('b'));
+    assert!(matches!(
+        app.prompt.as_ref().unwrap().pending,
+        Pending::Review {
+            is_job: false,
+            decision: "send_upstream",
+            ..
+        }
+    ));
 }

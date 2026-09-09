@@ -249,6 +249,12 @@ pub struct InspectionResult {
 /// Agents Platform boundary for controlled machine, repository, and build operations.
 #[async_trait]
 pub trait AgentsPlatformPort: Send + Sync {
+    /// A missing execution implementation. Checking availability does not execute anything.
+    /// Adapters with no configurable command mapping may use the default.
+    fn missing_implementation(&self, _action: &ActionRun) -> Option<String> {
+        None
+    }
+
     /// Executes an ActionRun that has reached `Ready`.
     ///
     /// A concrete implementation must check capability, target, idempotency key, and timeout and must

@@ -115,6 +115,17 @@ pub enum FeedbackOrigin {
         /// That pass's diagnosis, retained as context rather than a failure claim.
         summary: String,
     },
+    /// A proposal could not execute because a runbook or command implementation is missing.
+    BlockedAction {
+        /// The action needing human intervention.
+        action_run_id: ActionRunId,
+        /// Proposed runbook and targets; nothing ran.
+        runbook_id: String,
+        /// Proposed target resources.
+        target_ids: Vec<ResourceId>,
+        /// The missing capability that the human is addressing.
+        reason: String,
+    },
     /// A proposed action was denied by rule or by a human.
     DeniedAction {
         /// The denied ActionRun.
@@ -196,6 +207,21 @@ impl HumanFeedback {
     /// Renders the feedback as the sentences a Team should read before its next pass.
     pub fn describe(&self) -> String {
         let mut text = match &self.origin {
+            FeedbackOrigin::BlockedAction {
+                runbook_id,
+                target_ids,
+                reason,
+                ..
+            } => tr!(
+                format!(
+                    "The proposed action `{runbook_id}` on {} was not executed and needs human intervention: {reason}.",
+                    target_ids.join(", ")
+                ),
+                format!(
+                    "针对 {} 的提议 `{runbook_id}` 尚未执行，需要人工处理：{reason}。",
+                    target_ids.join(", ")
+                )
+            ),
             FeedbackOrigin::IssueComment { summary, .. } => tr!(
                 format!("The previous investigation is waiting for human input: {summary}."),
                 format!("上一轮调查正在等待人工补充：{summary}。")

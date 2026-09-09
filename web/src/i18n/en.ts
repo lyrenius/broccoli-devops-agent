@@ -176,8 +176,10 @@ export const en = {
 
   "feedback.issueCreated": "Issue created: {time}",
   "feedback.passStarted": "Pass started: {time}",
+  "blocked.help": "No command was executed. Provide an implementation or a manual result, then send feedback for a fresh assessment. Acknowledge removes this item without running it.",
+  "blocked.comment": "Describe the configuration fix, alternative, or manual outcome…",
   "feedback.waiting": "Awaiting input",
-  "feedback.waitingHint": "Investigations needing a human reply",
+  "feedback.waitingHint": "Investigations and actions needing human input",
   "feedback.comment": "Feedback for the investigation",
   "feedback.placeholder": "Add observations, answer questions, or adjust the investigation direction",
   "feedback.send": "Send feedback and continue",

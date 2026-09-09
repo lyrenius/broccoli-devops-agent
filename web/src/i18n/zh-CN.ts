@@ -178,8 +178,10 @@ export const zhCN: Record<Key, string> = {
 
   "feedback.issueCreated": "问题创建：{time}",
   "feedback.passStarted": "本轮开始：{time}",
+  "blocked.help": "尚未执行。请补全实现、提供替代方案或人工处理结果，再送回上游重新评估；“知悉”仅结束此项待办。",
+  "blocked.comment": "填写配置补全、替代方案或人工处理结果…",
   "feedback.waiting": "待反馈",
-  "feedback.waitingHint": "等待人工补充的调查",
+  "feedback.waitingHint": "等待人工补充或处理的调查与操作",
   "feedback.comment": "调查反馈",
   "feedback.placeholder": "补充现象、回答问题或调整调查方向",
   "feedback.send": "发送反馈并继续调查",

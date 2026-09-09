@@ -38,6 +38,8 @@ pub enum ActionStatus {
     Proposed,
     /// Policy requires human approval.
     WaitingForApproval,
+    /// The proposal cannot execute until a human supplies a missing implementation.
+    WaitingForHuman,
     /// Preconditions and approval allow the action to enter the execution queue.
     Ready,
     /// The Agents Platform is executing the action.
@@ -90,6 +92,9 @@ pub struct PlatformOperationResult {
     /// Whether the Platform only rendered the commands (dry run) instead of executing them.
     #[serde(default)]
     pub dry_run: bool,
+    /// No command ran: an implementation is missing and a human must resolve it.
+    #[serde(default)]
+    pub requires_human: bool,
     /// Artifact ID containing complete stdout, stderr, or diagnostic output.
     pub output_artifact_id: Option<ArtifactId>,
     /// Execution summary suitable for display and logging.
@@ -110,6 +115,7 @@ impl PlatformOperationResult {
             operation_id: Uuid::now_v7(),
             succeeded,
             dry_run: false,
+            requires_human: false,
             output_artifact_id,
             summary: summary.into(),
         }
@@ -118,6 +124,13 @@ impl PlatformOperationResult {
     /// Marks the result as a dry run: rendered, recorded, not executed.
     pub fn as_dry_run(mut self) -> Self {
         self.dry_run = true;
+        self
+    }
+
+    /// Marks a non-executed request as a capability gap, rather than an execution failure.
+    pub fn awaiting_human(mut self) -> Self {
+        self.succeeded = false;
+        self.requires_human = true;
         self
     }
 }
@@ -157,6 +170,9 @@ pub struct ActionRun {
     /// Why the action will not run, when it was denied by rule or by a human.
     #[serde(default)]
     pub denial: Option<Denial>,
+    /// A missing runbook or command implementation that needs human intervention.
+    #[serde(default)]
+    pub human_intervention: Option<String>,
     /// A human's review of the denial or failure, once given. A denied or failed action without
     /// one is in the inbox.
     #[serde(default)]
@@ -231,6 +247,7 @@ impl ActionRun {
             approval: ApprovalState::Unevaluated,
             approved_by: None,
             denial: None,
+            human_intervention: None,
             review: None,
             before_snapshot_id,
             after_snapshot_id: None,
@@ -286,13 +303,21 @@ impl ActionRun {
         Ok(())
     }
 
+    /// Parks an unexecutable proposal without rejecting it or claiming execution failed.
+    /// Human approval alone cannot make it executable; a revised proposal is checked anew.
+    pub fn wait_for_human(&mut self, reason: impl Into<String>) -> AgentResult<()> {
+        self.transition_to(ActionStatus::WaitingForHuman)?;
+        self.human_intervention = Some(reason.into());
+        Ok(())
+    }
+
     /// Records a human's review of a denied or failed action.
     ///
     /// Only an action in the inbox can be reviewed, and only once: the review is what removes it.
     pub fn record_review(&mut self, review: HumanReview) -> AgentResult<()> {
         if !self.needs_review() {
             return Err(AgentError::InvalidInput(format!(
-                "ActionRun `{}` is `{:?}` with{} a denial and {} review; only unreviewed denied \
+                "ActionRun `{}` is `{:?}` with{} a denial and {} review; only unreviewed denied, blocked \
                  or failed actions are reviewed",
                 self.action_run_id,
                 self.status,
@@ -300,13 +325,19 @@ impl ActionRun {
                 if self.review.is_some() { "a" } else { "no" },
             )));
         }
+        if self.status == ActionStatus::WaitingForHuman {
+            self.transition_to(ActionStatus::Cancelled)?;
+        }
         self.review = Some(review);
         Ok(())
     }
 
-    /// Whether this action sits in the Permission Denied or Failed inbox.
+    /// Whether this action is waiting for a human review (denied, blocked, or failed).
     pub fn needs_review(&self) -> bool {
-        self.review.is_none() && (self.denial.is_some() || self.has_failed())
+        self.review.is_none()
+            && (self.denial.is_some()
+                || self.has_failed()
+                || self.status == ActionStatus::WaitingForHuman)
     }
 
     /// Whether this action still holds its idempotency key: it may yet run, is running, or ran to
@@ -348,8 +379,11 @@ impl ActionRun {
 
         self.platform_operation_id = Some(result.operation_id);
         self.execution_artifact_id = result.output_artifact_id;
-        self.execution_summary = Some(result.summary);
+        self.execution_summary = Some(result.summary.clone());
         self.dry_run = result.dry_run;
+        if result.requires_human {
+            return self.wait_for_human(result.summary);
+        }
         self.transition_to(if result.succeeded {
             ActionStatus::Verifying
         } else {
@@ -416,15 +450,18 @@ impl ActionRun {
 fn is_valid_transition(current: ActionStatus, next: ActionStatus) -> bool {
     use ActionStatus::{
         Cancelled, Failed, Proposed, Ready, Running, Succeeded, VerificationFailed, Verifying,
-        WaitingForApproval,
+        WaitingForApproval, WaitingForHuman,
     };
 
     matches!(
         (current, next),
-        (Proposed, WaitingForApproval | Ready | Cancelled)
-            | (WaitingForApproval, Ready | Cancelled)
-            | (Ready, Running | Cancelled)
-            | (Running, Verifying | Failed | Cancelled)
+        (
+            Proposed,
+            WaitingForApproval | WaitingForHuman | Ready | Cancelled
+        ) | (WaitingForApproval, Ready | WaitingForHuman | Cancelled)
+            | (WaitingForHuman, Cancelled)
+            | (Ready, Running | WaitingForHuman | Cancelled)
+            | (Running, Verifying | Failed | WaitingForHuman | Cancelled)
             | (Verifying, Succeeded | VerificationFailed | Failed)
     )
 }

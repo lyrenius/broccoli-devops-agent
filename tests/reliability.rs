@@ -186,10 +186,17 @@ async fn retries_escalate_and_concurrent_approvals_apply_once() {
     let dir = tempfile::tempdir().unwrap();
     let (worker, worker_port) = listener();
     let platform = PlatformConfig {
-        runbooks: vec![RunbookCommand {
-            id: "mq.purge".into(),
-            command: "echo purge {target}".into(),
-        }],
+        dry_run: false,
+        runbooks: vec![
+            RunbookCommand {
+                id: "worker.restart".into(),
+                command: "exit 1".into(),
+            },
+            RunbookCommand {
+                id: "mq.purge".into(),
+                command: "echo purge {target}".into(),
+            },
+        ],
         ..PlatformConfig::default()
     };
     let runner = runner(
@@ -203,7 +210,7 @@ async fn retries_escalate_and_concurrent_approvals_apply_once() {
         platform,
         vec![
             vec![
-                // No command is configured for worker.restart: the first fails at the Platform,
+                // The configured worker.restart command exits with an error,
                 // which releases its idempotency key; the identical second is admitted but
                 // escalated to approval by the repeat rule, so a failing restart cannot loop.
                 propose("c1", "worker.restart", "worker-1"),

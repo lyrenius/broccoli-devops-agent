@@ -1,4 +1,4 @@
-//! Seeds a demo data directory with every inbox category, using a scripted model instead of a
+//! Seeds a demo data directory with representative inbox categories, using a scripted model instead of a
 //! relay, so the consoles can be tried without a model or a deployment:
 //!
 //! ```bash
@@ -7,7 +7,7 @@
 //! ```
 //!
 //! The seeded state holds one permission request (a queue purge), one rule denial (an
-//! operation-mode change no Team may hold), one failed action (a worker start the Platform has no
+//! operation-mode change no Team may hold), one action awaiting human implementation (a worker start the Platform has no
 //! command for), and one failed Job (a model that answered in prose). Reviewing an item in the
 //! console with "send back upstream" then runs the deterministic Team as the revision, so the
 //! whole loop is visible.
@@ -130,7 +130,7 @@ probes = [{{ probe = "http.status", url = "http://127.0.0.1:{}/healthz" }}]
         vec![text("The printer looks fine to me, nothing to do.")],
     ])
     // A real relay reports its token counts; the demo's does too, so the console's spend
-    // panel and the price list have something to show.
+    // panel has something to show.
     .with_usage_per_turn(Usage::reported(12_400, 8_192, 1_150));
     let platform = PlatformConfig {
         dry_run: true,

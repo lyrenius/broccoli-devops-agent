@@ -165,10 +165,10 @@ async fn agent_output_follows_the_configured_language() {
     );
 
     let failed = &actions[1];
-    assert_eq!(failed.status, ActionStatus::Failed);
+    assert_eq!(failed.status, ActionStatus::WaitingForHuman);
     assert!(
         failed
-            .execution_summary
+            .human_intervention
             .as_deref()
             .unwrap()
             .contains("未配置命令")

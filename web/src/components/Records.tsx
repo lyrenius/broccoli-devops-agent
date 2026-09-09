@@ -270,6 +270,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                                     {f.origin.evidence && <pre className="mt-1 whitespace-pre-wrap rounded bg-muted/60 p-2 font-mono text-[11px] text-muted-foreground">{f.origin.evidence}</pre>}
                                   </>
                                 )}
+                                {f.origin.kind === "blocked_action" && <>{f.origin.runbook_id}: {f.origin.reason}</>}
                                 {f.origin.kind === "failed_job" && <>{t("records.feedback.job", { summary: f.origin.summary })}</>}
                                 {f.origin.kind === "issue_comment" && <>{t("feedback.previous", { summary: f.origin.summary })}</>}
                                 {f.origin.kind === "stalled_job" && <>{t("records.feedback.stalled", { probes: f.origin.requested_probe_ids.join(", "), summary: f.origin.summary })}</>}

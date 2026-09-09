@@ -190,7 +190,8 @@ fn draw_tiles(frame: &mut Frame, area: Rect, app: &App) {
             status.map_or("—".to_string(), |s| s.inbox.total.to_string()),
             status.map_or(String::new(), |s| {
                 format!(
-                    "{} requests · {} denied · {} failed",
+                    "{} awaiting input · {} requests · {} denied · {} failed",
+                    s.inbox.waiting_issues + s.inbox.blocked_actions,
                     s.inbox.permission_requests,
                     s.inbox.permission_denied,
                     s.inbox.failed_jobs + s.inbox.failed_actions

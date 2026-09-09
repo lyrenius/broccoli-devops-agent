@@ -1149,6 +1149,18 @@ impl TopScheduler {
             mode: before.operation_mode,
             recent_auto_repeat,
         });
+        if decision.class.is_none()
+            && !action.target_ids.is_empty()
+            && action.target_ids.iter().all(|target| {
+                job.allowed_target_ids.contains(target)
+                    && self.authority.resources().contains_key(target)
+            })
+        {
+            return self.wait_for_action_implementation(action, tr!(
+                format!("{}; a human must provide a reviewed implementation or an alternative; no command was executed", decision.rationale),
+                format!("{}；请人工补充经过审核的实现或提供替代方案，尚未执行任何命令", decision.rationale)
+            )).await;
+        }
         self.store
             .append_event(
                 NewEvent::new(
@@ -1172,12 +1184,43 @@ impl TopScheduler {
                 )
                 .await;
         }
+        if let Some(reason) = self
+            .platform
+            .as_ref()
+            .and_then(|platform| platform.missing_implementation(&action))
+        {
+            return self.wait_for_action_implementation(action, reason).await;
+        }
         let mut next = action.clone();
         next.apply_approval(decision.approval)?;
         self.store
             .update_action_run_if(&action, next.clone())
             .await?;
         self.reconcile_issue(job.issue_id).await?;
+        Ok(next)
+    }
+
+    /// Persists an unexecuted proposal as a human task; approval cannot bypass this state.
+    async fn wait_for_action_implementation(
+        &self,
+        action: ActionRun,
+        reason: String,
+    ) -> AgentResult<ActionRun> {
+        let mut next = action.clone();
+        next.wait_for_human(reason.clone())?;
+        self.store
+            .update_action_run_if(&action, next.clone())
+            .await?;
+        self.store
+            .append_event(
+                NewEvent::new("top-scheduler", "scheduler.action_needs_human", reason)
+                    .with_issue(next.issue_id)
+                    .with_job(next.originating_job_id)
+                    .with_action(next.action_run_id)
+                    .with_payload(serde_json::to_value(&next)?),
+            )
+            .await?;
+        self.reconcile_issue(next.issue_id).await?;
         Ok(next)
     }
 
@@ -1364,6 +1407,12 @@ impl TopScheduler {
         let platform = self.require_platform("execute_action")?;
 
         let ready = self.store.get_action_run(action_run_id).await?;
+        if ready.status == ActionStatus::Ready
+            && let Some(reason) = platform.missing_implementation(&ready)
+        {
+            drop(mode);
+            return self.wait_for_action_implementation(ready, reason).await;
+        }
         let mut running = ready.clone();
         running.start()?;
         self.store
@@ -1403,12 +1452,20 @@ impl TopScheduler {
             .await?;
         self.store
             .append_event(
-                NewEvent::new("agents-platform", "action.executed", result.summary.clone())
-                    .with_issue(next.issue_id)
-                    .with_action(action_run_id)
-                    .with_payload(serde_json::to_value(&result)?)
-                    .with_artifacts(result.output_artifact_id.into_iter().collect())
-                    .with_trust(ContentTrust::Mixed),
+                NewEvent::new(
+                    "agents-platform",
+                    if result.requires_human {
+                        "scheduler.action_needs_human"
+                    } else {
+                        "action.executed"
+                    },
+                    result.summary.clone(),
+                )
+                .with_issue(next.issue_id)
+                .with_action(action_run_id)
+                .with_payload(serde_json::to_value(&result)?)
+                .with_artifacts(result.output_artifact_id.into_iter().collect())
+                .with_trust(ContentTrust::Mixed),
             )
             .await?;
         self.reconcile_issue(next.issue_id).await?;
@@ -1996,6 +2053,7 @@ impl TopScheduler {
                 // failed-item review, they do not consume a review slot on the prior Job.
                 FeedbackOrigin::IssueComment { .. } => false,
                 FeedbackOrigin::DeniedAction { action_run_id, .. }
+                | FeedbackOrigin::BlockedAction { action_run_id, .. }
                 | FeedbackOrigin::FailedAction { action_run_id, .. } => {
                     let action = self.store.get_action_run(*action_run_id).await?;
                     if action.needs_review() {

@@ -283,6 +283,7 @@ function ActionRow({ action }: { action: ActionRun }) {
         {action.verification_evidence && <Badge variant={action.verification_evidence === "strong" ? "success" : "warning"}>{t(`evidence.${action.verification_evidence}`)}</Badge>}
       </div>
       <p className="text-muted-foreground">{action.reason}</p>
+      {action.human_intervention && <p className="text-amber-600 dark:text-amber-400">{action.human_intervention}</p>}
       {action.denial && (
         <p>
           <span className="font-medium">{t("kv.denialReason")}:</span> {action.denial.reason}

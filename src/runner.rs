@@ -231,6 +231,9 @@ pub struct Inbox {
     /// Ended investigations needing feedback, without another pending inbox decision.
     #[serde(default)]
     pub waiting_issues: Vec<WaitingIssue>,
+    /// Proposals with a missing runbook or executable command, requiring human intervention.
+    #[serde(default)]
+    pub blocked_actions: Vec<ActionRun>,
     /// Approved or automatically admitted actions waiting to execute, including while frozen.
     #[serde(default)]
     pub queued_actions: Vec<ActionRun>,
@@ -248,6 +251,7 @@ impl Inbox {
     /// Number of items waiting for a human across every category.
     pub fn total(&self) -> usize {
         self.waiting_issues.len()
+            + self.blocked_actions.len()
             + self.permission_requests.len()
             + self.permission_denied.len()
             + self.failed_jobs.len()
@@ -1187,6 +1191,12 @@ impl SliceRunner {
             .is_some_and(|result| result.follow_up_requested);
         if actions
             .iter()
+            .any(|action| action.status == ActionStatus::WaitingForHuman)
+        {
+            return Ok(Some(PassStop::WaitingForHuman));
+        }
+        if actions
+            .iter()
             .any(|action| action.status == ActionStatus::Ready)
         {
             return Ok(Some(PassStop::Frozen));
@@ -1360,6 +1370,7 @@ impl SliceRunner {
                         None => denial.reason.clone(),
                     }),
                     execution_summary: action.execution_summary.clone(),
+                    human_intervention: action.human_intervention.clone(),
                     verification_summary: action.verification_summary.clone(),
                     verification_evidence: action.verification_evidence,
                     evidence: self.execution_evidence(action).await,
@@ -1537,27 +1548,36 @@ impl SliceRunner {
                 "ActionRun `{action_run_id}` is not in the inbox"
             )));
         }
-        let origin = match &action.denial {
-            Some(denial) => FeedbackOrigin::DeniedAction {
+        let origin = if let Some(reason) = &action.human_intervention {
+            FeedbackOrigin::BlockedAction {
                 action_run_id,
                 runbook_id: action.runbook_id.clone(),
                 target_ids: action.target_ids.clone(),
-                denial: denial.clone(),
-            },
-            None => FeedbackOrigin::FailedAction {
-                action_run_id,
-                runbook_id: action.runbook_id.clone(),
-                target_ids: action.target_ids.clone(),
-                summary: match (&action.verification_summary, &action.execution_summary) {
-                    (Some(verification), _) => verification.clone(),
-                    (None, Some(execution)) => execution.clone(),
-                    (None, None) => tr!(
-                        format!("execution ended as {:?}", action.status),
-                        format!("执行以 {:?} 结束", action.status)
-                    ),
+                reason: reason.clone(),
+            }
+        } else {
+            match &action.denial {
+                Some(denial) => FeedbackOrigin::DeniedAction {
+                    action_run_id,
+                    runbook_id: action.runbook_id.clone(),
+                    target_ids: action.target_ids.clone(),
+                    denial: denial.clone(),
                 },
-                evidence: self.execution_evidence(&action).await,
-            },
+                None => FeedbackOrigin::FailedAction {
+                    action_run_id,
+                    runbook_id: action.runbook_id.clone(),
+                    target_ids: action.target_ids.clone(),
+                    summary: match (&action.verification_summary, &action.execution_summary) {
+                        (Some(verification), _) => verification.clone(),
+                        (None, Some(execution)) => execution.clone(),
+                        (None, None) => tr!(
+                            format!("execution ended as {:?}", action.status),
+                            format!("执行以 {:?} 结束", action.status)
+                        ),
+                    },
+                    evidence: self.execution_evidence(&action).await,
+                },
+            }
         };
         self.review(
             action.issue_id,
@@ -1924,6 +1944,8 @@ impl SliceRunner {
                 inbox.queued_actions.push(action);
             } else if action.status == ActionStatus::WaitingForApproval {
                 inbox.permission_requests.push(action);
+            } else if action.status == ActionStatus::WaitingForHuman && action.review.is_none() {
+                inbox.blocked_actions.push(action);
             } else if action.review.is_none() && action.denial.is_some() {
                 inbox.permission_denied.push(action);
             } else if action.review.is_none() && action.has_failed() {
@@ -1946,6 +1968,7 @@ impl SliceRunner {
             .chain(&inbox.permission_requests)
             .chain(&inbox.permission_denied)
             .chain(&inbox.failed_actions)
+            .chain(&inbox.blocked_actions)
             .map(|action| action.issue_id)
             .chain(inbox.failed_jobs.iter().map(|job| job.issue_id))
             .collect();
@@ -2096,6 +2119,9 @@ impl SliceRunner {
                         .unwrap_or_default()
                 );
             }
+            if let Some(reason) = &action.human_intervention {
+                let _ = writeln!(out, "    awaiting human: {reason}");
+            }
             if let Some(summary) = &action.execution_summary {
                 let _ = writeln!(out, "    execution:    {summary}");
             }
@@ -2178,6 +2204,12 @@ impl SliceRunner {
                 item.issue.issue_id, item.job.job_id, item.issue.title
             );
         }
+        let _ = writeln!(
+            out,
+            "actions needing human implementation ({}):",
+            inbox.blocked_actions.len()
+        );
+        out.push_str(&Self::render_actions(&inbox.blocked_actions, false));
         let _ = writeln!(out, "execution queue ({}):", inbox.queued_actions.len());
         for action in &inbox.queued_actions {
             let _ = writeln!(

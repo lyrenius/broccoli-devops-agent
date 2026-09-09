@@ -82,6 +82,16 @@ Operation modes are the ones already in the domain model:
    inspection is an event with its output Artifact, and `fully_frozen`
    refuses inspections too.
 
+8. **Missing implementations wait for a human.** A proposal with an unregistered
+   runbook, or an otherwise allowed runbook without a configured command, becomes
+   `WaitingForHuman` and appears in the Inbox's awaiting-input group. It has not
+   executed and is not a rule denial or an execution failure. The human can supply
+   an implementation, an alternative, or a manual outcome and send feedback
+   upstream; the revised proposal goes through scope, policy, and availability
+   checks again. Approval alone cannot run the held proposal. Acknowledging it
+   ends that action without executing it. Scope and authority violations retain
+   their existing denial behavior.
+
 ## Open questions for you
 
 - Row 3 / 4 during a contest: is an automatic server restart acceptable if a

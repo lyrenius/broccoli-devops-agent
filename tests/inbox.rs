@@ -410,17 +410,16 @@ async fn failed_jobs_wait_for_review() {
     assert!(kinds.iter().any(|kind| kind == "scheduler.job_failed"));
 }
 
-/// An action the Platform refuses is a failure for the Failed inbox, and sending it upstream
-/// tells the next pass what went wrong.
+/// A missing implementation waits for a human; feedback explains that nothing ran.
 #[tokio::test]
-async fn failed_actions_can_be_sent_upstream() {
+async fn blocked_actions_can_be_sent_upstream() {
     let worker = TcpListener::bind("127.0.0.1:0").unwrap();
     let dir = tempfile::tempdir().unwrap();
     let runner = harness_runner(
         dir.path(),
         worker.local_addr().unwrap().port(),
         vec![
-            // worker.start is auto in rehearsal but has no configured command → refused.
+            // worker.start is auto in rehearsal but has no configured command.
             vec![propose("c1", "worker.start", "worker-1")],
             vec![diagnosis("c2")],
             // Revision: no proposals this time.
@@ -436,9 +435,10 @@ async fn failed_actions_can_be_sent_upstream() {
         .await
         .unwrap();
     let actions = runner.run_proposals(&job).await.unwrap();
-    assert_eq!(actions[0].status, ActionStatus::Failed);
+    assert_eq!(actions[0].status, ActionStatus::WaitingForHuman);
     let inbox = runner.inbox().await.unwrap();
-    assert_eq!(inbox.failed_actions.len(), 1);
+    assert_eq!(inbox.blocked_actions.len(), 1);
+    assert!(inbox.failed_actions.is_empty());
     assert!(inbox.permission_denied.is_empty());
 
     let outcome = runner
@@ -451,27 +451,20 @@ async fn failed_actions_can_be_sent_upstream() {
         .await
         .unwrap();
     let revision = outcome.revision.unwrap();
-    let FeedbackOrigin::FailedAction {
-        summary, evidence, ..
-    } = &revision.job.feedback[0].origin
-    else {
-        panic!("feedback about a failed action");
+    let FeedbackOrigin::BlockedAction { reason, .. } = &revision.job.feedback[0].origin else {
+        panic!("feedback about an unexecuted action");
     };
-    assert!(summary.contains("no command is configured"), "{summary}");
-    // The Platform's refusal travels upstream as sanitized evidence, fenced in the View.
-    assert!(
-        evidence
-            .as_deref()
-            .unwrap()
-            .contains("refused: no command configured")
-    );
+    assert!(reason.contains("no command is configured"), "{reason}");
+    assert_eq!(outcome.reviewed.status, ActionStatus::Cancelled);
+    assert!(runner.inbox().await.unwrap().blocked_actions.is_empty());
     let view = runner
         .store()
         .get_artifact(revision.job.snapshot_view.artifact_id)
         .await
         .unwrap();
     let view_body = String::from_utf8(runner.artifacts().read_verified(&view).unwrap()).unwrap();
-    assert!(view_body.contains("execution_evidence"));
+    assert!(view_body.contains("blocked_action"));
+    assert!(view_body.contains("no command is configured"));
     assert!(revision.actions.is_empty());
     assert!(runner.inbox().await.unwrap().failed_actions.is_empty());
 }

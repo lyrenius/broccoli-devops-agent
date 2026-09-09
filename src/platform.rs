@@ -475,19 +475,20 @@ impl LocalCommandPlatform {
         let Some(runbook) = config
             .runbooks
             .iter()
-            .find(|runbook| runbook.id == runbook_id)
+            .find(|runbook| runbook.id == runbook_id && !runbook.command.trim().is_empty())
         else {
             return self
                 .finish(
                     producer,
                     false,
                     tr!(
-                        format!("refused: no command is configured for runbook `{runbook_id}`"),
-                        format!("已拒绝：runbook `{runbook_id}` 未配置命令")
+                        format!("human intervention required: no command is configured for runbook `{runbook_id}`; no command was executed"),
+                        format!("需要人工处理：runbook `{runbook_id}` 未配置命令，尚未执行任何命令")
                     ),
-                    json!({ "refused": "no command configured", "runbook_id": runbook_id }),
+                    json!({ "requires_human": "no command configured", "runbook_id": runbook_id }),
                 )
-                .await;
+                .await
+                .map(|result| if inspection { result } else { result.awaiting_human() });
         };
 
         let mut commands = Vec::new();
@@ -592,6 +593,17 @@ impl LocalCommandPlatform {
 
 #[async_trait]
 impl AgentsPlatformPort for LocalCommandPlatform {
+    fn missing_implementation(&self, action: &ActionRun) -> Option<String> {
+        let configured =
+            self.config().runbooks.iter().any(|runbook| {
+                runbook.id == action.runbook_id && !runbook.command.trim().is_empty()
+            });
+        (!configured).then(|| tr!(
+            format!("no command is configured for runbook `{}`; configure an implementation or handle it manually, then send feedback; no command was executed", action.runbook_id),
+            format!("runbook `{}` 未配置命令；请补全实现或人工处理后反馈，尚未执行任何命令", action.runbook_id)
+        ))
+    }
+
     /// Validates, renders, and (unless dry-run) executes the runbook once per target.
     ///
     /// Refusals are reported as failed results, not errors: the ActionRun records exactly why the

@@ -172,6 +172,8 @@ pub struct Counts {
 pub struct InboxCounts {
     /// Investigations awaiting human feedback.
     pub waiting_issues: usize,
+    /// Actions requiring an implementation.
+    pub blocked_actions: usize,
     /// Admitted actions waiting to execute.
     pub queued_actions: usize,
     /// Actions waiting for approval.
@@ -468,6 +470,8 @@ pub struct FeedbackOrigin {
     pub denial: Option<Denial>,
     /// The summary, for failures.
     pub summary: Option<String>,
+    /// Missing capability, for blocked actions.
+    pub reason: Option<String>,
     /// Evidence, for failed actions.
     pub evidence: Option<String>,
     /// Probes the stalled Job asked for.
@@ -497,6 +501,10 @@ impl HumanFeedback {
         let runbook = origin.runbook_id.as_deref().unwrap_or("?");
         let summary = origin.summary.as_deref().unwrap_or("");
         let mut text = match origin.kind.as_str() {
+            "blocked_action" => format!(
+                "on the unexecuted {runbook}: {}",
+                origin.reason.as_deref().unwrap_or("")
+            ),
             "issue_comment" => format!("on the previous investigation: {summary}"),
             "denied_action" => {
                 let denial = origin.denial.as_ref();
@@ -683,6 +691,8 @@ pub struct ActionRun {
     pub approved_by: Option<String>,
     /// Denial, when denied.
     pub denial: Option<Denial>,
+    /// Missing execution capability that needs a human.
+    pub human_intervention: Option<String>,
     /// Review, once given.
     pub review: Option<HumanReview>,
     /// The Platform's own summary of the execution.
@@ -712,7 +722,11 @@ impl ActionRun {
         if self.review.is_some() {
             return false;
         }
-        self.denial.is_some() || matches!(self.status.as_str(), "failed" | "verification_failed")
+        self.denial.is_some()
+            || matches!(
+                self.status.as_str(),
+                "failed" | "verification_failed" | "waiting_for_human"
+            )
     }
 
     /// The evidence badge text, when there is evidence.
@@ -729,6 +743,8 @@ impl ActionRun {
 pub struct Inbox {
     /// Completed investigations waiting for feedback.
     pub waiting_issues: Vec<WaitingIssue>,
+    /// Actions requiring an implementation.
+    pub blocked_actions: Vec<ActionRun>,
     /// Admitted actions queued for execution, retained during a full freeze.
     pub queued_actions: Vec<ActionRun>,
     /// Actions waiting for approval.
@@ -745,6 +761,7 @@ impl Inbox {
     /// Everything waiting.
     pub fn total(&self) -> usize {
         self.waiting_issues.len()
+            + self.blocked_actions.len()
             + self.permission_requests.len()
             + self.permission_denied.len()
             + self.failed_jobs.len()

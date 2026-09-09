@@ -24,6 +24,8 @@ pub const HINTS: &str = "j/k select · [/] filter · a approve · r reject · b 
 pub enum Category {
     /// A completed investigation waiting for human input.
     WaitingIssue,
+    /// Missing runbook or command implementation.
+    BlockedAction,
     /// Admitted, waiting for execution to resume.
     Queued,
     /// Waiting for approval.
@@ -41,6 +43,7 @@ impl Category {
     pub fn label(self) -> &'static str {
         match self {
             Category::WaitingIssue => "awaiting input",
+            Category::BlockedAction => "needs implementation",
             Category::Queued => "queued",
             Category::Request => "request",
             Category::Denied => "denied",
@@ -51,7 +54,7 @@ impl Category {
 
     fn color(self) -> Color {
         match self {
-            Category::WaitingIssue => Color::Yellow,
+            Category::WaitingIssue | Category::BlockedAction => Color::Yellow,
             Category::Queued => Color::Cyan,
             Category::Request => Color::Yellow,
             Category::Denied => Color::Red,
@@ -99,7 +102,7 @@ impl Filter {
 
     fn shows(self, category: Category) -> bool {
         match self {
-            Filter::Waiting => category == Category::WaitingIssue,
+            Filter::Waiting => matches!(category, Category::WaitingIssue | Category::BlockedAction),
             Filter::Queued => category == Category::Queued,
             Filter::All => true,
             Filter::Requests => category == Category::Request,
@@ -232,6 +235,12 @@ pub fn items(app: &App) -> Vec<Item> {
             .failed_actions
             .iter()
             .map(|a| action(Category::FailedAction, a)),
+    );
+    rows.extend(
+        inbox
+            .blocked_actions
+            .iter()
+            .map(|a| action(Category::BlockedAction, a)),
     );
     rows.extend(inbox.waiting_issues.iter().map(|waiting| Item {
         category: Category::WaitingIssue,
@@ -471,7 +480,7 @@ fn draw_tiles(frame: &mut Frame, area: Rect, app: &App) {
     let tiles = [
         (
             "Awaiting input",
-            inbox.waiting_issues.len(),
+            (inbox.waiting_issues.len() + inbox.blocked_actions.len()),
             "send feedback to continue".to_string(),
             Color::Yellow,
         ),
@@ -536,6 +545,7 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
         .map(|item| {
             let (badge_text, badge_color) = match item.category {
                 Category::WaitingIssue => ("awaiting human input".to_string(), Color::Yellow),
+                Category::BlockedAction => ("needs implementation".to_string(), Color::Yellow),
                 Category::Queued => ("queued for execution".to_string(), Color::Cyan),
                 Category::Request => ("needs approval".to_string(), Color::Yellow),
                 Category::Denied => (
@@ -595,7 +605,10 @@ fn draw_waiting(frame: &mut Frame, list_area: Rect, detail_area: Rect, app: &mut
             ("Denied".to_string(), inbox.permission_denied.len()),
             ("Failed".to_string(), failed),
             ("Queued".to_string(), inbox.queued_actions.len()),
-            ("Input".to_string(), inbox.waiting_issues.len()),
+            (
+                "Input".to_string(),
+                (inbox.waiting_issues.len() + inbox.blocked_actions.len()),
+            ),
         ],
         app.inbox_view.filter.index(),
     ));
@@ -648,6 +661,16 @@ fn item_doc(item: &Item, doc: &mut Doc) {
             doc.note("b send feedback and continue the investigation");
         }
 
+        (Category::BlockedAction, Some(a), _) => {
+            doc.heading(&a.title());
+            doc.kv("State", "Waiting for human intervention; nothing executed");
+            doc.kv("Why", &a.reason);
+            doc.kv(
+                "Missing capability",
+                a.human_intervention.as_deref().unwrap_or(""),
+            );
+            doc.note("Provide an implementation or manual outcome, then b to send feedback; x acknowledges without execution.");
+        }
         (Category::Queued, Some(a), _) => {
             doc.heading(&a.title());
             doc.kv("State", "Queued for execution");

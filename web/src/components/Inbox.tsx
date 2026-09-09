@@ -15,6 +15,7 @@ import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, C
 function inInbox(a: ActionRun): boolean {
   if (a.status === "waiting_for_approval" || a.status === "ready") return true;
   if (a.review !== null) return false;
+  if (a.status === "waiting_for_human") return true;
   return a.denial !== null || a.status === "failed" || a.status === "verification_failed";
 }
 
@@ -28,7 +29,7 @@ const HISTORY_LABELS: Record<string, Key> = {
   "human.pass_cancelled": "history.human.pass_cancelled",
 };
 
-const EMPTY: InboxData = { waiting_issues: [], queued_actions: [], permission_requests: [], permission_denied: [], failed_jobs: [], failed_actions: [] };
+const EMPTY: InboxData = { waiting_issues: [], blocked_actions: [], queued_actions: [], permission_requests: [], permission_denied: [], failed_jobs: [], failed_actions: [] };
 type Filter = "all" | "waiting" | "requests" | "denied" | "failed";
 
 function ItemCard({ children, accent }: { children: React.ReactNode; accent: "amber" | "red" | "muted" }) {
@@ -52,7 +53,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
   const { t, status: label, time, dateTime } = useT();
 
   useEffect(() => {
-    api.inbox().then((next) => setInbox({ ...EMPTY, ...next, waiting_issues: next.waiting_issues ?? [] })).catch((e) => setError((e as Error).message));
+    api.inbox().then((next) => setInbox({ ...EMPTY, ...next, waiting_issues: next.waiting_issues ?? [], blocked_actions: next.blocked_actions ?? [] })).catch((e) => setError((e as Error).message));
   }, [tick]);
 
   useEffect(() => {
@@ -113,9 +114,10 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
     </div>
   );
 
+  const waitingCount = inbox.waiting_issues.length + inbox.blocked_actions.length;
   const failedCount = inbox.failed_jobs.length + inbox.failed_actions.length;
   const show = (section: Exclude<Filter, "all">) => filter === "all" || filter === section;
-  const total = inbox.waiting_issues.length + inbox.permission_requests.length + inbox.permission_denied.length + failedCount;
+  const total = waitingCount + inbox.permission_requests.length + inbox.permission_denied.length + failedCount;
 
   return (
     <Page
@@ -153,7 +155,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
       )}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatTile label={t("feedback.waiting")} value={inbox.waiting_issues.length} icon={MessageSquareQuote} tone={inbox.waiting_issues.length > 0 ? "warn" : "default"} hint={t("feedback.waitingHint")} />
+        <StatTile label={t("feedback.waiting")} value={waitingCount} icon={MessageSquareQuote} tone={waitingCount > 0 ? "warn" : "default"} hint={t("feedback.waitingHint")} />
         <StatTile label={t("tile.requests")} value={inbox.permission_requests.length} icon={ShieldQuestion} tone={inbox.permission_requests.length > 0 ? "warn" : "default"} hint={t("tile.requests.hint")} />
         <StatTile label={t("tile.denied")} value={inbox.permission_denied.length} icon={Ban} tone={inbox.permission_denied.length > 0 ? "alert" : "default"} hint={t("tile.denied.hint")} />
         <StatTile label={t("tile.failed")} value={failedCount} icon={XCircle} tone={failedCount > 0 ? "alert" : "default"} hint={t("tile.failed.hint", { jobs: inbox.failed_jobs.length, actions: inbox.failed_actions.length })} />
@@ -192,7 +194,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
             onChange={setFilter}
             options={[
               { id: "all", label: t("filter.all"), count: total },
-              { id: "waiting", label: t("feedback.waiting"), count: inbox.waiting_issues.length },
+              { id: "waiting", label: t("feedback.waiting"), count: waitingCount },
               { id: "requests", label: t("filter.requests"), count: inbox.permission_requests.length },
               { id: "denied", label: t("filter.denied"), count: inbox.permission_denied.length },
               { id: "failed", label: t("filter.failed"), count: failedCount },
@@ -223,6 +225,20 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                   return undefined;
                 })} title={t("btn.resolve.title")}><CheckCircle2 />{t("btn.resolve")}</Button>
               </div>
+            </ItemCard>
+          ))}
+
+          {show("waiting") && inbox.blocked_actions.map((action) => (
+            <ItemCard key={action.action_run_id} accent="amber">
+              <div className="flex flex-wrap items-center gap-2">
+                <a className="font-mono text-sm text-primary hover:underline" href={traceHash(action.issue_id, action.originating_job_id)}>{action.runbook_id} · {action.target_ids.join(", ")}</a>
+                <StatusBadge value={action.status} />
+                <time dateTime={action.created_at} className="ml-auto text-xs text-muted-foreground">{dateTime(action.created_at)}</time>
+              </div>
+              <p className="mt-2 text-sm">{action.reason}</p>
+              <Alert tone="warning" icon={AlertTriangle}><p>{action.human_intervention}</p></Alert>
+              <p className="mt-2 text-xs text-muted-foreground">{t("blocked.help")}</p>
+              {reviewControls(action.action_run_id, t("blocked.comment"), () => reviewAction(action, "send_upstream"), () => reviewAction(action, "acknowledge"))}
             </ItemCard>
           ))}
 
@@ -375,7 +391,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                         {a.approved_by && t("approval.by", { who: a.approved_by })}
                       </td>
                       <td className="px-3 py-2 text-xs text-muted-foreground">
-                        {a.denial ? `${a.denial.reason}${a.denial.comment ? ` — ${a.denial.comment}` : ""}` : a.verification_summary ?? a.execution_summary ?? "—"}
+                        {a.denial ? `${a.denial.reason}${a.denial.comment ? ` — ${a.denial.comment}` : ""}` : a.human_intervention ?? a.verification_summary ?? a.execution_summary ?? "—"}
                         {a.verification_evidence && (
                           <div className="mt-1">
                             <EvidenceBadge evidence={a.verification_evidence} />
