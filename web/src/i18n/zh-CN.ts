@@ -166,6 +166,8 @@ export const zhCN: Record<Key, string> = {
   "evidence.weak": "弱证据",
   "evidence.dry_run": "演练证据",
 
+  "feedback.issueCreated": "问题创建：{time}",
+  "feedback.passStarted": "本轮开始：{time}",
   "feedback.waiting": "待反馈",
   "feedback.waitingHint": "等待人工补充的调查",
   "feedback.comment": "调查反馈",

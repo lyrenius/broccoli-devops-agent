@@ -33,7 +33,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState<Revision | null>(null);
-  const { t, status: label, time } = useT();
+  const { t, status: label, time, dateTime } = useT();
 
   useEffect(() => {
     api.inbox().then((next) => setInbox({ ...EMPTY, ...next, waiting_issues: next.waiting_issues ?? [] })).catch((e) => setError((e as Error).message));
@@ -176,6 +176,10 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
               <div className="flex flex-wrap items-center gap-2">
                 <a className="font-medium text-primary hover:underline" href={traceHash(item.issue.issue_id, item.job.job_id)}>{item.issue.title}</a>
                 <StatusBadge value={item.issue.status} />
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                <time dateTime={item.issue.created_at}>{t("feedback.issueCreated", { time: dateTime(item.issue.created_at) })}</time>
+                <time dateTime={item.job.created_at}>{t("feedback.passStarted", { time: dateTime(item.job.created_at) })}</time>
               </div>
               <p className="mt-2 text-sm">{item.job.result?.summary ?? item.issue.description}</p>
               {(item.job.result?.unresolved_questions.length ?? 0) > 0 && <ul className="mt-2 list-inside list-disc text-sm text-muted-foreground">{item.job.result!.unresolved_questions.map((question, index) => <li key={index}>{question}</li>)}</ul>}

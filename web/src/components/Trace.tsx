@@ -7,7 +7,7 @@ import { loadOperator } from "../lib/prefs";
 import type { ActionRun, EventRecord, Job, SessionBundle, TraceStep, Transcript, TranscriptEntry, TurnRecord } from "../types";
 import { Page } from "./Shell";
 import { StatusBadge } from "./status";
-import { Alert, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState } from "./ui";
+import { Alert, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui";
 
 const LIVE_JOB = new Set(["queued", "running"]);
 
@@ -205,7 +205,6 @@ function TurnDivider({ turn }: { turn: TurnRecord }) {
 /** The turn-by-turn view of one pass: stored transcript when there is one, live steps until then. */
 function PassTrace({ job, transcript, steps, live, endAt }: { job: Job; transcript: Transcript | null | "gone"; steps: TraceStep[]; live: boolean; endAt: number | null }) {
   const { t } = useT();
-  const bottom = useRef<HTMLDivElement>(null);
   const stored = transcript && transcript !== "gone" ? transcript : null;
   const entries: TranscriptEntry[] = useMemo(() => {
     if (stored) return stored.entries;
@@ -214,10 +213,6 @@ function PassTrace({ job, transcript, steps, live, endAt }: { job: Job; transcri
   const truncated = useMemo(() => new Set(stored ? [] : steps.filter((s) => s.truncated).map((s) => s.index)), [stored, steps]);
   const rows = useMemo(() => buildRows(entries, stored?.turns, live ? null : endAt), [entries, stored, live, endAt]);
   const maxDuration = rows.reduce((m, r) => Math.max(m, r.duration), 0);
-
-  useEffect(() => {
-    if (live) bottom.current?.scrollIntoView({ block: "nearest" });
-  }, [live, rows.length]);
 
   const turns = stored?.turns ?? [];
   const toolCalls = entries.filter((e) => e.item.type === "tool_call").length;
@@ -266,8 +261,7 @@ function PassTrace({ job, transcript, steps, live, endAt }: { job: Job; transcri
             <EntryCard row={row} maxDuration={maxDuration} truncated={truncated} />
           </Fragment>
         ))}
-        <div ref={bottom} />
-      </div>
+        </div>
     </div>
   );
 }
@@ -310,7 +304,7 @@ function ActionRow({ action }: { action: ActionRun }) {
 }
 
 export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: string; tick: number }) {
-  const { t, status: label, dateTime, time } = useT();
+  const { t, status: label, dateTime } = useT();
   const [bundle, setBundle] = useState<SessionBundle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<string | undefined>(jobId);
@@ -442,6 +436,19 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
       }
       actions={
         <>
+          {jobs.length > 0 && <select
+            aria-label={t("trace.chain")}
+            className="h-8 max-w-full rounded-md border border-input bg-background px-2 text-xs"
+            value={selected?.job_id ?? ""}
+            onChange={(event) => {
+              setPicked(event.target.value);
+              window.history.replaceState(null, "", `#trace/${issueId}/${event.target.value}`);
+            }}
+          >
+            {jobs.map((job, i) => <option key={job.job_id} value={job.job_id}>
+              {t("trace.pass", { n: i + 1 })} · {dateTime(job.created_at)} · {label(job.status)} · {t(`trace.relation.${relationOf(job).kind}` as "trace.relation.initial")}
+            </option>)}
+          </select>}
           <a href="#records" className="inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs font-medium hover:bg-accent hover:text-accent-foreground [&_svg]:size-4">
             <ArrowLeft />
             {t("trace.back")}
@@ -459,59 +466,89 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t("trace.chain")}</CardTitle>
-          <CardDescription>{t("trace.chain.desc")}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {jobs.length === 0 && <EmptyState icon={Waypoints} title={t("records.noJob")} />}
-          <div className="flex items-stretch gap-1 overflow-x-auto pb-1">
-            {jobs.map((job, i) => {
-              const relation = relationOf(job);
-              const live = LIVE_JOB.has(job.status);
-              const end = endOf(job);
-              const isSelected = selected?.job_id === job.job_id;
-              return (
-                <Fragment key={job.job_id}>
-                  {i > 0 && (
-                    <div className="flex shrink-0 flex-col items-center justify-center px-1 text-[10px] text-muted-foreground" title={relation.from ? t(`trace.relation.${relation.kind}.long` as "trace.relation.probes.long", { id: short(relation.from) }) : undefined}>
-                      <ChevronRight className="h-4 w-4" />
-                      <span className="whitespace-nowrap">{t(`trace.relation.${relation.kind}` as "trace.relation.initial")}</span>
-                    </div>
-                  )}
-                  <button
-                    onClick={() => {
-                      setPicked(job.job_id);
-                      window.history.replaceState(null, "", `#trace/${issueId}/${job.job_id}`);
-                    }}
-                    className={cn("w-60 shrink-0 cursor-pointer rounded-lg border p-3 text-left transition-colors hover:bg-accent/40", isSelected && "border-primary ring-1 ring-primary")}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold">{t("trace.pass", { n: i + 1 })}</span>
-                      <StatusBadge value={job.status} />
-                      {live && <Radio className="h-3.5 w-3.5 animate-pulse text-emerald-500" />}
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-x-2 text-[11px] text-muted-foreground">
-                      <span>{job.result ? label(job.result.outcome) : label(job.status)}</span>
-                      {job.usage && <span>· {t("trace.tokens", { n: (job.usage.input_tokens + job.usage.output_tokens).toLocaleString() })}</span>}
-                      {!job.usage && !live && job.result && <span>· {t("trace.noModel")}</span>}
-                      <span>· {fmtDuration((live ? Date.now() : (end ?? ms(job.created_at))) - ms(job.created_at))}</span>
-                    </div>
-                    <div className="mt-1 truncate text-xs" title={job.result?.summary}>
-                      {job.result?.summary ?? time(job.created_at)}
-                    </div>
-                  </button>
-                </Fragment>
-              );
-            })}
-          </div>
-        </CardContent>
-      </Card>
-
       {selected && (
-        <div className="grid gap-4 xl:grid-cols-3">
-          <Card className="xl:col-span-2">
+        <div className="grid gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t("trace.result")}</CardTitle>
+              <CardDescription>{t("trace.pass", { n: jobs.findIndex((job) => job.job_id === selected.job_id) + 1 })} · {t("feedback.passStarted", { time: dateTime(selected.created_at) })}</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-2 text-sm">
+              {!selected.result && <p className="text-muted-foreground">{t("trace.result.none")}</p>}
+              {selected.result && (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline">{label(selected.result.outcome)}</Badge>
+                    {selected.result.follow_up_requested && <Badge variant="outline">{t("trace.relation.followUp")}</Badge>}
+                  </div>
+                  <p>{selected.result.summary}</p>
+                  {selected.result.unresolved_questions.length > 0 && (
+                    <ul className="list-disc pl-5 text-xs text-muted-foreground">
+                      {selected.result.unresolved_questions.map((q, i) => (
+                        <li key={i}>{q}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {selected.result.requested_probes && selected.result.requested_probes.length > 0 && (
+                    <ul className="text-xs text-muted-foreground">
+                      {selected.result.requested_probes.map((p, i) => (
+                        <li key={i}>
+                          <span className="font-mono">{p.probe_id}</span> on <span className="font-mono">{p.target_ids.join(", ")}</span> — {p.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
+              {selected.feedback.length > 0 && (
+                <div className="mt-1 grid gap-1.5">
+                  <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("trace.feedback")}</span>
+                  {selected.feedback.map((f) => (
+                    <div key={f.feedback_id} className="rounded-md border border-primary/30 bg-primary/5 p-2 text-xs">
+                      <span className="font-medium">{f.reviewer}</span>
+                      {f.comment && <> · “{f.comment}”</>}
+                      <div className="text-muted-foreground">{f.origin.kind.replace(/_/g, " ")}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t("trace.actions")}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {actionsOf(selected).length === 0 && <p className="text-sm text-muted-foreground">{t("trace.actions.none")}</p>}
+              {actionsOf(selected).length > 0 && (
+                <ul className="divide-y rounded-lg border bg-muted/20">
+                  {actionsOf(selected).map((action) => (
+                    <ActionRow key={action.action_run_id} action={action} />
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t("trace.events")}</CardTitle>
+              <CardDescription>{t("trace.events.desc")}</CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="max-h-[32rem] overflow-y-auto font-mono text-[11px]">
+                {events.map((e) => (
+                  <div key={e.sequence} className={cn("grid grid-cols-[10rem_7rem_1fr] gap-2 border-b border-dashed px-4 py-1.5 last:border-b-0", e.job_id === selected.job_id && "bg-primary/5")} title={e.kind}>
+                    <span className="tabular-nums text-muted-foreground">{dateTime(e.occurred_at)}</span>
+                    <span className={cn("truncate", actorTone(e.actor))}>{e.actor}</span>
+                    <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{e.summary}</span>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
                 {t("trace.transcript")}
@@ -537,87 +574,6 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
             </CardContent>
           </Card>
 
-          <div className="grid content-start gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">{t("trace.result")}</CardTitle>
-              </CardHeader>
-              <CardContent className="grid gap-2 text-sm">
-                {!selected.result && <p className="text-muted-foreground">{t("trace.result.none")}</p>}
-                {selected.result && (
-                  <>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline">{label(selected.result.outcome)}</Badge>
-                      {selected.result.follow_up_requested && <Badge variant="outline">{t("trace.relation.followUp")}</Badge>}
-                    </div>
-                    <p>{selected.result.summary}</p>
-                    {selected.result.unresolved_questions.length > 0 && (
-                      <ul className="list-disc pl-5 text-xs text-muted-foreground">
-                        {selected.result.unresolved_questions.map((q, i) => (
-                          <li key={i}>{q}</li>
-                        ))}
-                      </ul>
-                    )}
-                    {selected.result.requested_probes && selected.result.requested_probes.length > 0 && (
-                      <ul className="text-xs text-muted-foreground">
-                        {selected.result.requested_probes.map((p, i) => (
-                          <li key={i}>
-                            <span className="font-mono">{p.probe_id}</span> on <span className="font-mono">{p.target_ids.join(", ")}</span> — {p.reason}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </>
-                )}
-                {selected.feedback.length > 0 && (
-                  <div className="mt-1 grid gap-1.5">
-                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("trace.feedback")}</span>
-                    {selected.feedback.map((f) => (
-                      <div key={f.feedback_id} className="rounded-md border border-primary/30 bg-primary/5 p-2 text-xs">
-                        <span className="font-medium">{f.reviewer}</span>
-                        {f.comment && <> · “{f.comment}”</>}
-                        <div className="text-muted-foreground">{f.origin.kind.replace(/_/g, " ")}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">{t("trace.actions")}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {actionsOf(selected).length === 0 && <p className="text-sm text-muted-foreground">{t("trace.actions.none")}</p>}
-                {actionsOf(selected).length > 0 && (
-                  <ul className="divide-y rounded-lg border bg-muted/20">
-                    {actionsOf(selected).map((action) => (
-                      <ActionRow key={action.action_run_id} action={action} />
-                    ))}
-                  </ul>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">{t("trace.events")}</CardTitle>
-                <CardDescription>{t("trace.events.desc")}</CardDescription>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="max-h-[32rem] overflow-y-auto font-mono text-[11px]">
-                  {events.map((e) => (
-                    <div key={e.sequence} className={cn("grid grid-cols-[3.5rem_5.5rem_1fr] gap-2 border-b border-dashed px-4 py-1.5 last:border-b-0", e.job_id === selected.job_id && "bg-primary/5")} title={e.kind}>
-                      <span className="tabular-nums text-muted-foreground">{e.occurred_at.slice(11, 19)}</span>
-                      <span className={cn("truncate", actorTone(e.actor))}>{e.actor}</span>
-                      <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{e.summary}</span>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          </div>
         </div>
       )}
     </Page>

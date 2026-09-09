@@ -164,6 +164,8 @@ export const en = {
   "evidence.weak": "weak evidence",
   "evidence.dry_run": "dry-run evidence",
 
+  "feedback.issueCreated": "Issue created: {time}",
+  "feedback.passStarted": "Pass started: {time}",
   "feedback.waiting": "Awaiting input",
   "feedback.waitingHint": "Investigations needing a human reply",
   "feedback.comment": "Feedback for the investigation",
