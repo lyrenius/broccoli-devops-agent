@@ -1591,9 +1591,10 @@ impl TopScheduler {
     /// The rule, in order: a Job still running means `Investigating`; an action ready or running
     /// means `Mitigating`, one awaiting verification means `Verifying`; anything in an inbox —
     /// a permission request, an unreviewed denial or failure, a Job waiting on a human — means
-    /// `WaitingForHuman`. With nothing outstanding, the latest pass decides: a `Solved` result,
-    /// or a mutating action of the latest Job that succeeded with real evidence, resolves
-    /// the Issue; otherwise it waits for a human to close it or send it on. Acknowledging an
+    /// `WaitingForHuman`. Every proposal must be materialized and every action settled before
+    /// resolution. A confirmed `Solved` result, or a verified mutation in a pass that requests
+    /// no follow-up, resolves the Issue; observation alone completes work, not remediation.
+    /// Otherwise it waits for a human to close it or send it on. Acknowledging an
     /// inbox item therefore never resolves an Issue by itself. Terminal Issues are left alone.
     pub async fn reconcile_issue(&self, issue_id: IssueId) -> AgentResult<Issue> {
         let issue = self.store.get_issue(issue_id).await?;
@@ -2337,10 +2338,12 @@ fn derive_issue_status(
             tr!("a Job is running", "有任务正在运行").to_string(),
         ));
     }
-    if actions
-        .iter()
-        .any(|action| matches!(action.status, ActionStatus::Ready | ActionStatus::Running))
-    {
+    if actions.iter().any(|action| {
+        matches!(
+            action.status,
+            ActionStatus::Proposed | ActionStatus::Ready | ActionStatus::Running
+        )
+    }) {
         return Some((
             IssueStatus::Mitigating,
             tr!("an action is ready or executing", "有操作就绪或正在执行").to_string(),
@@ -2375,6 +2378,19 @@ fn derive_issue_status(
             .to_string(),
         ));
     }
+    if jobs
+        .iter()
+        .any(|job| job.status == JobStatus::Completed && !job.proposals_materialized(actions))
+    {
+        return Some((
+            IssueStatus::WaitingForHuman,
+            tr!(
+                "the pass still has proposals that have not been processed",
+                "本轮仍有尚未处理的操作提议"
+            )
+            .to_string(),
+        ));
+    }
     let latest_job = jobs.iter().max_by_key(|job| (job.created_at, job.job_id))?;
     if latest_job
         .result
@@ -2393,7 +2409,12 @@ fn derive_issue_status(
     let remediated = actions.iter().any(|action| {
         action.originating_job_id == latest_job.job_id && is_remediation(action, authority)
     });
-    if remediated {
+    if remediated
+        && !latest_job
+            .result
+            .as_ref()
+            .is_some_and(|result| result.follow_up_requested)
+    {
         return Some((
             IssueStatus::Resolved,
             tr!(

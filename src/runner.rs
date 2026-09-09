@@ -265,6 +265,8 @@ pub struct SliceRunner {
     /// Serializes review-plus-dispatch so two reviewers of one item cannot both dispatch a
     /// revision; the store's compare-and-set catches what slips past process boundaries.
     review_lock: Mutex<()>,
+    /// Claim a follow-up before releasing the lock, then run the Team outside it.
+    follow_up_lock: Mutex<()>,
 }
 
 impl SliceRunner {
@@ -376,6 +378,7 @@ impl SliceRunner {
             running: Mutex::new(HashMap::new()),
             watchers: broadcast::channel(256).0,
             review_lock: Mutex::new(()),
+            follow_up_lock: Mutex::new(()),
         })
     }
 
@@ -919,6 +922,7 @@ impl SliceRunner {
         &self,
         action: &ActionRun,
     ) -> AgentResult<Option<Vec<PassOutcome>>> {
+        let follow_up_guard = self.follow_up_lock.lock().await;
         let job = self.store.get_job(action.originating_job_id).await?;
         let requested = job
             .result
@@ -934,7 +938,8 @@ impl SliceRunner {
             .into_iter()
             .filter(|candidate| candidate.originating_job_id == job.job_id)
             .collect();
-        if siblings.iter().any(|sibling| !sibling.status.is_terminal())
+        if !job.proposals_materialized(&siblings)
+            || siblings.iter().any(|sibling| !sibling.status.is_terminal())
             || !siblings.iter().any(action_was_executed)
         {
             return Ok(None);
@@ -949,6 +954,7 @@ impl SliceRunner {
             return Ok(None);
         }
         let (next, view) = self.dispatch_follow_up(&job, &siblings).await?;
+        drop(follow_up_guard);
         let next = self.run_team(next, &view).await?;
         Ok(Some(self.drive_passes(next).await?))
     }
@@ -1074,13 +1080,15 @@ impl SliceRunner {
                     key,
                 )
                 .await?;
-            let action = if action.status == ActionStatus::Ready {
-                self.execute_and_verify(action.action_run_id).await?
+            // A later proposal may retry an earlier failure and needs its own before-Snapshot.
+            // Reconciliation sees the full proposal list, so a partial batch cannot resolve.
+            if action.status == ActionStatus::Ready {
+                actions.push(self.execute_and_verify(action.action_run_id).await?);
             } else {
-                action
-            };
-            actions.push(action);
+                actions.push(action);
+            }
         }
+        self.scheduler.reconcile_issue(job.issue_id).await?;
         Ok(actions)
     }
 

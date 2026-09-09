@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    ActionRunId, ActionStatus, ApprovalState, ArtifactId, EventId, HumanFeedback, HumanReview,
-    IssueId, JobId, NamedValue, ResourceId, SnapshotViewRef, TraceStep, VerificationEvidence,
+    ActionRun, ActionRunId, ActionStatus, ApprovalState, ArtifactId, EventId, HumanFeedback,
+    HumanReview, IssueId, JobId, NamedValue, ResourceId, SnapshotViewRef, TraceStep,
+    VerificationEvidence,
 };
 use crate::error::{AgentError, AgentResult};
 
@@ -548,6 +549,30 @@ pub struct Job {
 }
 
 impl Job {
+    /// Every proposal must have its own ActionRun before the pass can settle. Matching records
+    /// rather than counts prevents a duplicate record from hiding a different, missing proposal
+    /// and also works for sessions written before this boundary was enforced.
+    pub fn proposals_materialized(&self, actions: &[ActionRun]) -> bool {
+        let Some(result) = &self.result else {
+            return true;
+        };
+        let mut remaining: Vec<_> = actions
+            .iter()
+            .filter(|action| action.originating_job_id == self.job_id)
+            .collect();
+        result.proposed_actions.iter().all(|proposal| {
+            if let Some(index) = remaining
+                .iter()
+                .position(|action| action.matches_proposal(proposal))
+            {
+                remaining.swap_remove(index);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     /// Creates a queued Job permanently bound to the given Snapshot View.
     ///
     /// This function does not decide whether the Issue permits this Team kind or inspect Artifact

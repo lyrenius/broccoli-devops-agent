@@ -193,6 +193,16 @@ pub struct ActionRun {
 }
 
 impl ActionRun {
+    /// Whether this record represents the given proposal, including its intended effect.
+    pub fn matches_proposal(&self, proposal: &ActionProposal) -> bool {
+        self.runbook_id == proposal.runbook_id
+            && self.target_ids == proposal.target_ids
+            && self.arguments == proposal.arguments
+            && self.reason == proposal.reason
+            && self.expected_effect == proposal.expected_effect
+            && self.verification_probe_ids == proposal.verification_probe_ids
+    }
+
     /// Converts an Agent Team ActionProposal into an unexecuted ActionRun.
     ///
     /// This function only copies the structured proposal and records the before Snapshot. The

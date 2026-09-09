@@ -789,3 +789,174 @@ async fn observations_do_not_resolve_issues_or_support_solved_claims() {
         );
     }
 }
+
+/// All proposals must be represented before any individual success can settle the Issue.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_waits_for_every_proposal_and_for_later_approval() {
+    let worker = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let Harness { runner, .. } = harness(
+        dir.path(),
+        worker.local_addr().unwrap().port(),
+        false,
+        PassPolicy::default(),
+        vec![
+            vec![
+                propose("c1", "worker.restart", "worker-1"),
+                propose("c2", "mq.purge", "redis-mq"),
+            ],
+            vec![submit("c3", "both actions needed", "diagnosis_only", false)],
+        ],
+    );
+    let (issue, job) = runner
+        .handle_report(HumanReport::new(
+            "op",
+            "Queue incident",
+            "both actions needed",
+        ))
+        .await
+        .unwrap();
+    let passes = runner.drive_passes(job).await.unwrap();
+    assert_eq!(passes[0].actions[0].status, ActionStatus::Succeeded);
+    assert_eq!(
+        passes[0].actions[1].status,
+        ActionStatus::WaitingForApproval
+    );
+    assert_eq!(
+        runner
+            .store()
+            .get_issue(issue.issue_id)
+            .await
+            .unwrap()
+            .status,
+        IssueStatus::WaitingForHuman
+    );
+    let second = runner
+        .approve_action(passes[0].actions[1].action_run_id, "alice")
+        .await
+        .unwrap();
+    assert_eq!(second.status, ActionStatus::VerificationFailed);
+    assert_eq!(
+        runner
+            .store()
+            .get_issue(issue.issue_id)
+            .await
+            .unwrap()
+            .status,
+        IssueStatus::WaitingForHuman
+    );
+    assert!(
+        !runner
+            .store()
+            .list_events()
+            .await
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "scheduler.issue_reconciled" && e.payload["to"] == "resolved")
+    );
+}
+
+/// Reconciliation also protects a partially materialized batch, such as after an interrupted write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_batch_does_not_resolve_and_a_complete_batch_does() {
+    let worker = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let Harness { runner, .. } = harness(
+        dir.path(),
+        worker.local_addr().unwrap().port(),
+        false,
+        PassPolicy::default(),
+        vec![
+            vec![
+                propose("c1", "worker.restart", "worker-1"),
+                propose("c2", "service.status", "worker-1"),
+            ],
+            vec![submit("c3", "repair and inspect", "diagnosis_only", false)],
+        ],
+    );
+    let (issue, job) = runner
+        .handle_report(HumanReport::new(
+            "op",
+            "Worker incident",
+            "repair and inspect",
+        ))
+        .await
+        .unwrap();
+    let proposals = &job.result.as_ref().unwrap().proposed_actions;
+    for (index, proposal) in proposals.iter().enumerate() {
+        let deployment = &runner.topology().deployment;
+        let capture = broccoli_devops_agent::ports::CaptureRequest {
+            deployment_id: deployment.id,
+            topology_revision: deployment.topology_revision.clone(),
+            cause: SnapshotCause::BeforeAction,
+            operation_mode: deployment.operation_mode,
+            parent_snapshot_id: None,
+            requested_probe_ids: vec![],
+        };
+        let action = runner
+            .scheduler()
+            .create_action_run(
+                job.job_id,
+                proposal.clone(),
+                capture,
+                format!("partial-{index}"),
+            )
+            .await
+            .unwrap();
+        let action = runner
+            .execute_and_verify(action.action_run_id)
+            .await
+            .unwrap();
+        assert_eq!(action.status, ActionStatus::Succeeded);
+        assert_eq!(
+            runner
+                .store()
+                .get_issue(issue.issue_id)
+                .await
+                .unwrap()
+                .status,
+            if index == 0 {
+                IssueStatus::WaitingForHuman
+            } else {
+                IssueStatus::Resolved
+            }
+        );
+    }
+}
+
+/// A successful mutation cannot pre-empt the follow-up pass that was requested to check it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_follow_up_leaves_the_issue_unresolved() {
+    let worker = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let Harness { runner, .. } = harness(
+        dir.path(),
+        worker.local_addr().unwrap().port(),
+        false,
+        PassPolicy::default(),
+        vec![
+            vec![propose("c1", "worker.restart", "worker-1")],
+            vec![submit("c2", "check after restart", "diagnosis_only", true)],
+            vec![AssistantItem::Text {
+                text: "could not finish the follow-up".into(),
+            }],
+        ],
+    );
+    let (issue, job) = runner
+        .handle_report(HumanReport::new("op", "Worker incident", "check the fix"))
+        .await
+        .unwrap();
+    let passes = runner.drive_passes(job).await.unwrap();
+    assert_eq!(passes.len(), 2);
+    assert_eq!(passes[0].actions[0].status, ActionStatus::Succeeded);
+    assert_eq!(passes[1].job.status, JobStatus::Failed);
+    assert_eq!(
+        runner
+            .store()
+            .get_issue(issue.issue_id)
+            .await
+            .unwrap()
+            .status,
+        IssueStatus::WaitingForHuman
+    );
+}
