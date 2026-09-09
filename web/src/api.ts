@@ -46,12 +46,14 @@ export const api = {
   usage: () => request<UsageTotals>("/api/usage"),
   /** Asks a running pass to stop; the Team still delivers a final result and keeps its transcript. */
   cancelJob: (id: string, by: string) => post<{ job_id: string }>(`/api/jobs/${id}/cancel`, { by }),
-  events: (limit: number | undefined, filter?: { issue_id?: string; job_id?: string; after?: number }) => {
+  events: (limit: number | undefined, filter?: { issue_id?: string; job_id?: string; after?: number; before?: number; q?: string }) => {
     const query = new URLSearchParams();
     if (limit !== undefined) query.set("limit", String(limit));
     if (filter?.issue_id) query.set("issue_id", filter.issue_id);
     if (filter?.job_id) query.set("job_id", filter.job_id);
     if (filter?.after !== undefined) query.set("after", String(filter.after));
+    if (filter?.before !== undefined) query.set("before", String(filter.before));
+    if (filter?.q) query.set("q", filter.q);
     return request<EventRecord[]>(`/api/events?${query}`);
   },
   /** The Issue with its whole pass chain — passes, actions, Snapshots, transcripts, events. */
@@ -74,8 +76,10 @@ export const api = {
 };
 
 /** Subscribes to the live event stream after the given sequence. */
-export function streamEvents(after: number, onEvent: (event: EventRecord) => void): () => void {
+export function streamEvents(after: number, onEvent: (event: EventRecord) => void, onConnection?: (connected: boolean) => void): () => void {
   const source = new EventSource(`/api/events/stream?after=${after}`);
+  source.addEventListener("open", () => onConnection?.(true));
+  source.addEventListener("error", () => onConnection?.(false));
   source.addEventListener("log", (message) => {
     onEvent(JSON.parse((message as MessageEvent<string>).data) as EventRecord);
   });

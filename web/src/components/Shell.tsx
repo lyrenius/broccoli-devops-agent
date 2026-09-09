@@ -238,12 +238,12 @@ export function Page({
   return (
     <div className="p-6">
       <div className="sticky top-0 z-10 -mx-6 -mt-6 mb-4 border-b bg-background px-6 pb-4 pt-6">
-        <div className="flex items-center gap-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <Icon className="h-6 w-6 shrink-0 text-primary" />
-            <h1 className="truncate text-2xl font-bold tracking-tight">{title}</h1>
+        <div className="flex min-w-0 flex-col gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <Icon className="mt-1 h-6 w-6 shrink-0 text-primary" />
+            <h1 title={title} className="min-w-0 text-2xl font-bold tracking-tight [overflow-wrap:anywhere]">{title}</h1>
           </div>
-          {actions && <div className="ml-auto flex shrink-0 items-center gap-2">{actions}</div>}
+          {actions && <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 [&>*]:max-w-full">{actions}</div>}
         </div>
         {subtitle && <div className="mt-3 text-sm text-muted-foreground">{subtitle}</div>}
       </div>

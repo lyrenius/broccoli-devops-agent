@@ -119,10 +119,10 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 }
 
 /** The four-up number tiles of the admin System page. */
-export function StatTile({ label, value, icon: Icon, tone = "default", hint }: { label: string; value: ReactNode; icon: LucideIcon; tone?: "default" | "alert" | "warn"; hint?: string }) {
+export function StatTile({ label, value, icon: Icon, tone = "default", hint, href }: { label: string; value: ReactNode; icon: LucideIcon; tone?: "default" | "alert" | "warn"; hint?: string; href?: string }) {
   const color = tone === "alert" ? "text-destructive" : tone === "warn" ? "text-amber-600 dark:text-amber-400" : "text-foreground";
-  return (
-    <Card>
+  const content = (
+    <Card className="h-full">
       <CardContent className="pt-6">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -135,6 +135,7 @@ export function StatTile({ label, value, icon: Icon, tone = "default", hint }: {
       </CardContent>
     </Card>
   );
+  return href ? <a href={href} className="rounded-xl transition-colors hover:bg-accent/30 focus-visible:outline-2 focus-visible:outline-primary">{content}</a> : content;
 }
 
 /** Dashed placeholder for an empty list. */

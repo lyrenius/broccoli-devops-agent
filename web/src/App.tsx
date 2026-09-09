@@ -17,7 +17,7 @@ const TABS: Tab[] = ["overview", "inbox", "records", "events", "report", "settin
 type Route = { tab: Tab } | { tab: "records"; trace: { issueId: string; jobId?: string } };
 
 function routeFromHash(): Route {
-  const hash = window.location.hash.replace("#", "");
+  const hash = window.location.hash.replace("#", "").split("?")[0];
   const trace = /^trace\/([0-9a-f-]{36})(?:\/([0-9a-f-]{36}))?$/i.exec(hash);
   if (trace) return { tab: "records", trace: { issueId: trace[1], jobId: trace[2] } };
   return { tab: (TABS as string[]).includes(hash) ? (hash as Tab) : "overview" };

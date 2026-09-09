@@ -5,6 +5,7 @@ import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
 import type { Issue, Job, SessionBundle, WaitingIssue } from "../types";
+import { JobTimes } from "./JobTimes";
 import { IssueFeedback } from "./IssueFeedback";
 import { Page } from "./Shell";
 import { StatusBadge } from "./status";
@@ -13,6 +14,18 @@ import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, C
 const LIVE = new Set(["open", "investigating", "waiting_for_human", "mitigating", "verifying"]);
 
 type Filter = "all" | "live" | "closed" | "archived";
+
+function readView(): { filter: Filter; query: string } {
+  const params = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+  const filter = params.get("filter");
+  return { filter: filter === "live" || filter === "closed" || filter === "archived" ? filter : "all", query: params.get("q") ?? "" };
+}
+function viewHash(filter: Filter, query: string) {
+  const params = new URLSearchParams();
+  if (filter !== "all") params.set("filter", filter);
+  if (query.trim()) params.set("q", query);
+  return `#records${params.size ? `?${params}` : ""}`;
+}
 
 /** A link styled as a small outline button (a real anchor, so downloads and hashes just work). */
 function LinkButton({ href, title, download, children }: { href: string; title?: string; download?: boolean; children: React.ReactNode }) {
@@ -36,9 +49,31 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [comments, setComments] = useState<Record<string, string>>({});
-  const [filter, setFilter] = useState<Filter>("all");
-  const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [filter, setFilterValue] = useState<Filter>(() => readView().filter);
+  const [query, setQueryValue] = useState(() => readView().query);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem("broccoli.records.expanded") ?? "{}");
+      return Object.fromEntries(Object.entries(saved ?? {}).filter(([, value]) => typeof value === "boolean")) as Record<string, boolean>;
+    } catch { return {}; }
+  });
+  const updateView = (nextFilter: Filter, nextQuery: string) => {
+    setFilterValue(nextFilter); setQueryValue(nextQuery);
+    window.history.replaceState(null, "", viewHash(nextFilter, nextQuery));
+  };
+  const setFilter = (next: Filter) => updateView(next, query);
+  const setQuery = (next: string) => updateView(filter, next);
+  useEffect(() => {
+    const sync = () => { const view = readView(); setFilterValue(view.filter); setQueryValue(view.query); };
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("broccoli.records.expanded", JSON.stringify(expanded));
+      sessionStorage.setItem("broccoli.records.location", viewHash(filter, query));
+    } catch { /* Storage is optional; URL filters still survive navigation. */ }
+  }, [expanded, filter, query]);
   const [importing, setImporting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const { t, status: label, dateTime } = useT();
@@ -242,7 +277,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                         <StatusBadge value={job.status} />
                         {job.result && <Badge variant="outline">{label(job.result.outcome)}</Badge>}
                         {(job.earlier_passes?.length ?? 0) > 0 && <Badge variant="outline">{t("records.pass", { n: (job.earlier_passes?.length ?? 0) + 1 })}</Badge>}
-                        {job.revises_job_id && <Badge variant="outline">{t("records.revises", { id: `${job.revises_job_id.slice(0, 8)}…` })}</Badge>}
+                        {job.revises_job_id && <a className="text-xs text-primary hover:underline" href={traceHash(issue.issue_id, job.revises_job_id)}>{t("records.revises", { id: `…${job.revises_job_id.slice(-8)}` })}</a>}
                         {job.supersedes_job_id && <Badge variant="outline">{t("records.supersedes", { id: `${job.supersedes_job_id.slice(0, 8)}…` })}</Badge>}
                         {job.continues_job_id && <Badge variant="outline">{t("records.follows", { id: `${job.continues_job_id.slice(0, 8)}…` })}</Badge>}
                         {job.review && (
@@ -251,6 +286,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                           </Badge>
                         )}
                       </div>
+                      <div className="mt-2"><JobTimes job={job} /></div>
                       {job.feedback.length > 0 && (
                         <ul className="mt-2 grid gap-1.5">
                           {job.feedback.map((f) => (
@@ -258,6 +294,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                               <MessageSquareQuote className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                               <div className="min-w-0">
                                 <span className="font-medium">{f.reviewer}</span>{" "}
+                                <time dateTime={f.recorded_at} className="text-muted-foreground">{dateTime(f.recorded_at)}</time>{" "}
                                 {f.origin.kind === "denied_action" && (
                                   <>
                                     {t("records.feedback.denied", { runbook: f.origin.runbook_id, reason: f.origin.denial.reason })}

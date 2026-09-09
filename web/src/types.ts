@@ -225,6 +225,8 @@ export interface Job {
   team_kind: string;
   status: string;
   created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
   snapshot_view: { snapshot_id: string; artifact_id: string; content_sha256: string };
   usage?: ModelUsage | null;
   feedback: HumanFeedback[];
@@ -263,6 +265,8 @@ export interface ActionRun {
   verification_summary: string | null;
   verification_evidence: "dry_run" | "observation" | "weak" | "strong" | null;
   created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
 }
 
 export interface Inbox {

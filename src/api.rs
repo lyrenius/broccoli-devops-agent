@@ -553,6 +553,10 @@ struct EventsQuery {
     issue_id: Option<Uuid>,
     /// Return only events bound to this Job.
     job_id: Option<Uuid>,
+    /// Return older events, excluding this sequence (backward pagination).
+    before: Option<u64>,
+    /// Case-insensitive text search across kind, actor, summary and associated IDs.
+    q: Option<String>,
 }
 
 async fn events(
@@ -560,9 +564,28 @@ async fn events(
     Query(query): Query<EventsQuery>,
 ) -> ApiResult<Value> {
     let events = state.runner.store().list_events().await?;
+    let needle = query.q.as_deref().unwrap_or("").trim().to_lowercase();
     let mut selected: Vec<_> = events
         .into_iter()
         .filter(|event| event.sequence > query.after)
+        .filter(|event| query.before.is_none_or(|before| event.sequence < before))
+        .filter(|event| {
+            needle.is_empty()
+                || format!(
+                    "{} {} {} {} {} {}",
+                    event.kind,
+                    event.actor,
+                    event.summary,
+                    event.issue_id.map(|id| id.to_string()).unwrap_or_default(),
+                    event.job_id.map(|id| id.to_string()).unwrap_or_default(),
+                    event
+                        .action_run_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_default()
+                )
+                .to_lowercase()
+                .contains(&needle)
+        })
         .filter(|event| query.issue_id.is_none_or(|id| event.issue_id == Some(id)))
         .filter(|event| query.job_id.is_none_or(|id| event.job_id == Some(id)))
         .collect();

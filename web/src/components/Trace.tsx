@@ -4,8 +4,11 @@ import { api, streamEvents } from "../api";
 import { useT } from "../i18n";
 import { cn } from "../lib/cn";
 import { loadOperator } from "../lib/prefs";
+import { recordsReturnHash, traceHash } from "../lib/routes";
 import type { ActionRun, EventRecord, Job, SessionBundle, TraceStep, Transcript, TranscriptEntry, TurnRecord } from "../types";
 import { Page } from "./Shell";
+import { JobTimes } from "./JobTimes";
+import { EventLinks } from "./EventLinks";
 import { StatusBadge } from "./status";
 import { Alert, Badge, Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui";
 
@@ -130,7 +133,7 @@ function TrustBadge({ trust }: { trust: string }) {
 
 /** One entry of the transcript, with its paired output when it is a tool call. */
 function EntryCard({ row, maxDuration, truncated }: { row: Row; maxDuration: number; truncated: Set<number> }) {
-  const { t, time } = useT();
+  const { t, dateTime } = useT();
   const item = row.entry.item;
   const kind = item.type;
   const isError = item.type === "tool_output" ? item.is_error : row.output ? (row.output.entry.item as { is_error?: boolean }).is_error : false;
@@ -150,9 +153,9 @@ function EntryCard({ row, maxDuration, truncated }: { row: Row; maxDuration: num
   const width = maxDuration > 0 ? Math.max(6, Math.round(100 * Math.sqrt(row.duration / maxDuration))) : 6;
   const cut = truncated.has(row.index) || (row.output ? truncated.has(row.output.index) : false);
   return (
-    <div className="grid grid-cols-[4.5rem_1fr] gap-3">
+    <div className="grid grid-cols-1 lg:grid-cols-[12rem_minmax(0,1fr)] gap-3">
       <div className="pt-2 text-right">
-        <div className="font-mono text-[11px] tabular-nums text-muted-foreground">{time(row.entry.at)}</div>
+        <div className="font-mono text-[11px] tabular-nums text-muted-foreground">{dateTime(row.entry.at)}</div>
         <div className="mt-1.5 ml-auto h-1.5 rounded-full bg-primary/40" style={{ width: `${width}%` }} title={fmtDuration(row.duration)} />
         <div className="mt-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">{fmtDuration(row.duration)}</div>
       </div>
@@ -190,7 +193,7 @@ function TurnDivider({ turn }: { turn: TurnRecord }) {
   const latency = ms(turn.finished_at) - ms(turn.started_at);
   const tokens = turn.usage.input_tokens + turn.usage.output_tokens;
   return (
-    <div className="flex items-center gap-2 pl-[5.25rem] text-[11px] text-muted-foreground">
+    <div className="flex items-center gap-2 lg:pl-[12.75rem] text-[11px] text-muted-foreground">
       <span className="font-medium text-foreground">{t("trace.turn", { n: turn.turn })}</span>
       <span>· {fmtDuration(latency)}</span>
       {turn.usage.requests_without_usage === 0 && <span>· {t("trace.tokens", { n: tokens.toLocaleString() })}</span>}
@@ -308,7 +311,6 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
   const { t, status: label, dateTime } = useT();
   const [bundle, setBundle] = useState<SessionBundle | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [picked, setPicked] = useState<string | undefined>(jobId);
   const [steps, setSteps] = useState<Record<string, TraceStep[]>>({});
   const [liveEvents, setLiveEvents] = useState<EventRecord[]>([]);
   const [connected, setConnected] = useState(false);
@@ -363,7 +365,8 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
     if (hasLive && !connected) void load();
   }, [tick, hasLive, connected, load]);
 
-  const selected = useMemo(() => jobs.find((job) => job.job_id === picked) ?? jobs[jobs.length - 1], [jobs, picked]);
+  // The URL is the source of truth. Never substitute a different Job for an explicit ID.
+  const selected = useMemo(() => jobId ? jobs.find((job) => job.job_id === jobId) : jobs[jobs.length - 1], [jobs, jobId]);
   const artifacts = useMemo(() => new Map((bundle?.artifacts ?? []).map((a) => [a.artifact.artifact_id, a])), [bundle]);
   const events = useMemo(() => {
     const seen = new Set<number>();
@@ -442,15 +445,15 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
             className="h-8 max-w-full rounded-md border border-input bg-background px-2 text-xs"
             value={selected?.job_id ?? ""}
             onChange={(event) => {
-              setPicked(event.target.value);
-              window.history.replaceState(null, "", `#trace/${issueId}/${event.target.value}`);
+              window.location.hash = traceHash(issueId, event.target.value);
             }}
           >
+            {!selected && <option value="" disabled>{t("trace.choosePass")}</option>}
             {jobs.map((job, i) => <option key={job.job_id} value={job.job_id}>
               {t("trace.pass", { n: i + 1 })} · {dateTime(job.created_at)} · {label(job.status)} · {t(`trace.relation.${relationOf(job).kind}` as "trace.relation.initial")}
             </option>)}
           </select>}
-          <a href="#records" className="inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs font-medium hover:bg-accent hover:text-accent-foreground [&_svg]:size-4">
+          <a href={recordsReturnHash()} className="inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs font-medium hover:bg-accent hover:text-accent-foreground [&_svg]:size-4">
             <ArrowLeft />
             {t("trace.back")}
           </a>
@@ -467,12 +470,19 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
         </Alert>
       )}
 
+      {jobId && !selected && <Alert icon={AlertTriangle}>
+        <p>{t("trace.jobNotFound", { id: jobId })}</p>
+        <a href={traceHash(issueId)} className="text-primary underline">{t("trace.latestPass")}</a>
+      </Alert>}
+      {!jobId && jobs.length === 0 && <p className="text-sm text-muted-foreground">{t("records.noJob")}</p>}
+
       {selected && (
         <div className="grid gap-4">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">{t("trace.result")}</CardTitle>
-              <CardDescription>{t("trace.pass", { n: jobs.findIndex((job) => job.job_id === selected.job_id) + 1 })} · {t("feedback.passStarted", { time: dateTime(selected.created_at) })}</CardDescription>
+              <CardDescription>{t("trace.pass", { n: jobs.findIndex((job) => job.job_id === selected.job_id) + 1 })}</CardDescription>
+              <JobTimes job={selected} />
             </CardHeader>
             <CardContent className="grid gap-2 text-sm">
               {!selected.result && <p className="text-muted-foreground">{t("trace.result.none")}</p>}
@@ -507,6 +517,7 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
                   {selected.feedback.map((f) => (
                     <div key={f.feedback_id} className="rounded-md border border-primary/30 bg-primary/5 p-2 text-xs">
                       <span className="font-medium">{f.reviewer}</span>
+                      <time dateTime={f.recorded_at} className="ml-2 text-muted-foreground">{dateTime(f.recorded_at)}</time>
                       {f.comment && <> · “{f.comment}”</>}
                       <div className="text-muted-foreground">{f.origin.kind.replace(/_/g, " ")}</div>
                     </div>
@@ -543,7 +554,7 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
                   <div key={e.sequence} className={cn("grid grid-cols-[10rem_7rem_1fr] gap-2 border-b border-dashed px-4 py-1.5 last:border-b-0", e.job_id === selected.job_id && "bg-primary/5")} title={e.kind}>
                     <span className="tabular-nums text-muted-foreground">{dateTime(e.occurred_at)}</span>
                     <span className={cn("truncate", actorTone(e.actor))}>{e.actor}</span>
-                    <span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{e.summary}</span>
+                    <div><span className="whitespace-pre-wrap [overflow-wrap:anywhere]">{e.summary}</span><EventLinks event={e} actions={bundle.action_runs} /></div>
                   </div>
                 ))}
               </div>

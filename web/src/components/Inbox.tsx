@@ -50,7 +50,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState<Revision | null>(null);
-  const { t, status: label, time, dateTime } = useT();
+  const { t, status: label, dateTime } = useT();
 
   useEffect(() => {
     api.inbox().then((next) => setInbox({ ...EMPTY, ...next, waiting_issues: next.waiting_issues ?? [], blocked_actions: next.blocked_actions ?? [] })).catch((e) => setError((e as Error).message));
@@ -135,7 +135,8 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
         <Alert tone="info" icon={CheckCircle2}>
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
-              <p className="font-medium">{t("inbox.revision.title", { id: `${revision.job.job_id.slice(0, 8)}…`, status: label(revision.job.status) })}</p>
+              <a className="font-medium text-primary hover:underline" href={traceHash(revision.job.issue_id, revision.job.job_id)}>{t("inbox.revision.title", { id: `…${revision.job.job_id.slice(-8)}`, status: label(revision.job.status) })}</a>
+              <div className="mt-1 text-xs text-muted-foreground"><time dateTime={revision.job.created_at}>{t("feedback.passStarted", { time: dateTime(revision.job.created_at) })}</time></div>
               {revision.job.result && <p className="mt-0.5 text-muted-foreground">{revision.job.result.summary}</p>}
               {revision.actions.length > 0 && (
                 <ul className="mt-1 font-mono text-xs">
@@ -171,7 +172,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
             {inbox.queued_actions.map((a) => (
               <ItemCard key={a.action_run_id} accent="amber">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-sm font-medium">{a.runbook_id}</span>
+                  <a className="font-mono text-sm font-medium text-primary hover:underline" href={traceHash(a.issue_id, a.originating_job_id)} title={t("records.trace.title")}>{a.runbook_id}</a>
                   <span className="font-mono text-xs text-muted-foreground">on {a.target_ids.join(", ")}</span>
                   <Badge variant="warning">{t("queue.badge")}</Badge>
                   {a.approved_by && <span className="text-xs text-muted-foreground">{t("approval.by", { who: a.approved_by })}</span>}
@@ -246,10 +247,10 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
             inbox.permission_requests.map((a) => (
               <ItemCard key={a.action_run_id} accent="amber">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-sm font-medium">{a.runbook_id}</span>
+                  <a className="font-mono text-sm font-medium text-primary hover:underline" href={traceHash(a.issue_id, a.originating_job_id)} title={t("records.trace.title")}>{a.runbook_id}</a>
                   <span className="font-mono text-xs text-muted-foreground">on {a.target_ids.join(", ")}</span>
                   <Badge variant="warning">{t("badge.needsApproval")}</Badge>
-                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{time(a.created_at)}</span>
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{dateTime(a.created_at)}</span>
                 </div>
                 <Kv
                   rows={[
@@ -278,10 +279,10 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
             inbox.permission_denied.map((a) => (
               <ItemCard key={a.action_run_id} accent="red">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-sm font-medium">{a.runbook_id}</span>
+                  <a className="font-mono text-sm font-medium text-primary hover:underline" href={traceHash(a.issue_id, a.originating_job_id)} title={t("records.trace.title")}>{a.runbook_id}</a>
                   <span className="font-mono text-xs text-muted-foreground">on {a.target_ids.join(", ")}</span>
                   <Badge variant="danger">{t("badge.deniedBy", { who: a.denial?.source === "human" ? a.denial.decided_by ?? t("who.human") : t("who.rule") })}</Badge>
-                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{a.denial && time(a.denial.decided_at)}</span>
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{a.denial && dateTime(a.denial.decided_at)}</span>
                 </div>
                 <Kv
                   rows={[
@@ -300,7 +301,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-sm font-medium">{t("records.job", { id: `${j.job_id.slice(0, 8)}…` })}</span>
                   <Badge variant="danger">{t("badge.jobFailed")}</Badge>
-                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{time(j.created_at)}</span>
+                  <span className="ml-auto text-xs text-muted-foreground tabular-nums">{dateTime(j.created_at)}</span>
                 </div>
                 <p className="mt-2 text-sm">{j.result?.summary ?? t("noResult")}</p>
                 {j.result?.artifact_ids.map((id) => (
@@ -315,7 +316,7 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
             inbox.failed_actions.map((a) => (
               <ItemCard key={a.action_run_id} accent="muted">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-sm font-medium">{a.runbook_id}</span>
+                  <a className="font-mono text-sm font-medium text-primary hover:underline" href={traceHash(a.issue_id, a.originating_job_id)} title={t("records.trace.title")}>{a.runbook_id}</a>
                   <span className="font-mono text-xs text-muted-foreground">on {a.target_ids.join(", ")}</span>
                   <StatusBadge value={a.status} />
                   <EvidenceBadge evidence={a.verification_evidence} />
@@ -370,6 +371,8 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-xs uppercase tracking-wide text-muted-foreground">
+                    <th className="px-3 py-2 font-medium">{t("history.actionTime")}</th>
+                    <th className="px-3 py-2 font-medium">{t("history.actionContext")}</th>
                     <th className="px-3 py-2 font-medium">{t("col.runbook")}</th>
                     <th className="px-3 py-2 font-medium">{t("col.targets")}</th>
                     <th className="px-3 py-2 font-medium">{t("col.status")}</th>
@@ -381,7 +384,15 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
                 <tbody className="divide-y">
                   {history.map((a) => (
                     <tr key={a.action_run_id} className="align-top transition-colors hover:bg-accent/30">
-                      <td className="whitespace-nowrap px-3 py-2 font-mono text-xs font-medium">{a.runbook_id}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground">
+                        <time dateTime={a.created_at}>{dateTime(a.created_at)}</time>
+                        {a.completed_at && <div>{t("history.endedAt", { time: dateTime(a.completed_at) })}</div>}
+                      </td>
+                      <td className="min-w-48 px-3 py-2 text-xs">
+                        <a className="text-primary hover:underline" href={traceHash(a.issue_id, a.originating_job_id)}>{issues.find((issue) => issue.issue_id === a.issue_id)?.title ?? a.issue_id}</a>
+                        <div className="mt-1 font-mono text-muted-foreground" title={a.action_run_id}>{t("events.action", { id: a.action_run_id.slice(-8) })}</div>
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-xs font-medium"><a className="text-primary hover:underline" href={traceHash(a.issue_id, a.originating_job_id)}>{a.runbook_id}</a></td>
                       <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{a.target_ids.join(", ")}</td>
                       <td className="whitespace-nowrap px-3 py-2">
                         <StatusBadge value={a.status} />

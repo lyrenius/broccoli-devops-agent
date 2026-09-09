@@ -102,7 +102,7 @@ export function UsageCard({ usage }: { usage: UsageTotals | null }) {
 
 /** The passes in flight, each with the button that stops it. */
 export function RunningCard({ running, onChanged }: { running: RunningPass[]; onChanged: () => void }) {
-  const { t } = useT();
+  const { t, dateTime } = useT();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -138,7 +138,7 @@ export function RunningCard({ running, onChanged }: { running: RunningPass[]; on
         {running.map((pass) => (
           <div key={pass.job_id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
             <span className="font-mono text-xs font-medium">{t("running.job", { id: `${pass.job_id.slice(0, 8)}…` })}</span>
-            <span className="font-mono text-xs text-muted-foreground">{t("running.since", { time: pass.started_at.slice(11, 19) })}</span>
+            <span className="font-mono text-xs text-muted-foreground">{t("running.since", { time: dateTime(pass.started_at) })}</span>
             <a className="ml-auto inline-flex h-8 items-center gap-1 rounded-md border border-input bg-background px-3 text-xs font-medium shadow-xs hover:bg-accent hover:text-accent-foreground [&_svg]:size-4" href={traceHash(pass.issue_id, pass.job_id)} title={t("records.trace.title")}>
               <Waypoints />
               {t("running.trace")}
@@ -165,7 +165,7 @@ export function LiveProgress({ active }: { active: boolean }) {
   const [lines, setLines] = useState<EventRecord[]>([]);
   const [live, setLive] = useState(false);
   const list = useRef<HTMLDivElement>(null);
-  const { t } = useT();
+  const { t, dateTime } = useT();
 
   useEffect(() => {
     if (!active) return;
@@ -211,7 +211,7 @@ export function LiveProgress({ active }: { active: boolean }) {
         {lines.length === 0 && <p className="text-muted-foreground">{t("progress.waiting")}</p>}
         {lines.map((line) => (
           <div key={line.sequence} className="flex gap-2 py-0.5">
-            <span className="shrink-0 tabular-nums text-muted-foreground">{line.occurred_at.slice(11, 19)}</span>
+            <span className="shrink-0 tabular-nums text-muted-foreground">{dateTime(line.occurred_at)}</span>
             <span className="whitespace-pre-wrap break-words">{line.summary}</span>
           </div>
         ))}

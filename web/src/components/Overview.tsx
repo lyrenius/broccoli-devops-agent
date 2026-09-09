@@ -98,13 +98,14 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
         <StatTile label={t("stat.healthy")} value={snapshot ? `${healthy} / ${total}` : "—"} icon={Server} tone={snapshot && healthy < total ? "warn" : "default"} />
         <StatTile
           label={t("stat.inbox")}
+          href="#inbox"
           value={status?.inbox.total ?? "—"}
           icon={InboxIcon}
           tone={status && status.inbox.total > 0 ? "alert" : "default"}
           hint={status ? t("stat.inboxHint", { waiting: (status.inbox.waiting_issues ?? 0) + (status.inbox.blocked_actions ?? 0), requests: status.inbox.permission_requests, denied: status.inbox.permission_denied, failed: status.inbox.failed_jobs + status.inbox.failed_actions }) : undefined}
         />
-        <StatTile label={t("stat.openIssues")} value={liveIssues} icon={ListChecks} hint={t("stat.total", { count: issues.length })} />
-        <StatTile label={t("stat.events")} value={status?.counts.events ?? "—"} icon={Activity} hint={status ? t("stat.eventsHint", { jobs: status.counts.jobs, actions: status.counts.actions }) : undefined} />
+        <StatTile href="#records?filter=live" label={t("stat.openIssues")} value={liveIssues} icon={ListChecks} hint={t("stat.total", { count: issues.length })} />
+        <StatTile href="#events" label={t("stat.events")} value={status?.counts.events ?? "—"} icon={Activity} hint={status ? t("stat.eventsHint", { jobs: status.counts.jobs, actions: status.counts.actions }) : undefined} />
         <SpendTile usage={status?.usage} />
       </div>
 
@@ -120,6 +121,7 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
           <CardContent className="space-y-2 text-sm">
             <p>{review.summary}</p>
             {review.candidate_count !== undefined && <p className="text-muted-foreground">{t("review.count", { count: review.candidate_count, issues: review.issue_ids.length })}</p>}
+            {status?.mode !== "running" && issues.some((issue) => issue.status === "open" && review.issue_ids.includes(issue.issue_id)) && <p className="text-muted-foreground">{t("review.waitingForResume")}</p>}
             {review.error && <p className="text-amber-700 dark:text-amber-400">{review.error}</p>}
             <div className="flex flex-wrap gap-3">
               {review.issue_ids.map((id) => <a key={id} className="text-primary underline" href={`#trace/${id}`}>{t("review.issue", { id: id.slice(-8) })}</a>)}
