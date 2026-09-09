@@ -23,17 +23,21 @@ export function money(usage: UsageTotals): string | null {
 export function SpendTile({ usage }: { usage: UsageTotals | undefined }) {
   const { t } = useT();
   const budget = usage?.budget ?? null;
+  const noCalls = usage?.passes === 0;
+  const showCost = usage && !noCalls && usage.cost !== null;
   return (
     <StatTile
-      label={t("stat.spend")}
-      value={usage ? (money(usage) ?? tokens(usage.total_tokens)) : "—"}
+      label={t(showCost ? "stat.spend" : "usage.title")}
+      value={usage ? (showCost ? money(usage)! : `${tokens(usage.total_tokens)} tokens`) : "—"}
       icon={Coins}
       tone={budget?.exceeded ? "alert" : budget && budget.used_fraction >= 0.8 ? "warn" : "default"}
       hint={
         usage
-          ? usage.cost === null
-            ? t("stat.spendNoPricing")
-            : t("stat.spendHint", { passes: usage.passes, tokens: tokens(usage.total_tokens) })
+          ? noCalls
+            ? t("usage.none")
+            : usage.cost === null
+              ? t("stat.spendNoPricing", { requests: usage.requests })
+              : t("stat.spendHint", { passes: usage.passes, tokens: tokens(usage.total_tokens) })
           : undefined
       }
     />
