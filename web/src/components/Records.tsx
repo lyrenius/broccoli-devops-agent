@@ -1,4 +1,4 @@
-import { AlertTriangle, Archive, CheckCircle2, Download, ListChecks, MessageSquareQuote, Upload, Waypoints, XCircle } from "lucide-react";
+import { AlertTriangle, Archive, CheckCircle2, ChevronDown, ChevronRight, Download, ListChecks, MessageSquareQuote, Upload, Waypoints, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useT } from "../i18n";
@@ -38,6 +38,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
   const [comments, setComments] = useState<Record<string, string>>({});
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [importing, setImporting] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const { t, status: label, dateTime } = useT();
@@ -135,13 +136,19 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
       {issues.length === 0 && <EmptyState icon={ListChecks} title={t("records.empty.title")} hint={t("records.empty.hint")} />}
       {issues.length > 0 && visible.length === 0 && <EmptyState icon={ListChecks} title={t("records.none.filtered")} />}
       {visible.map((issue) => {
-        const related = jobs.filter((j) => j.issue_id === issue.issue_id);
+        const related = jobs.filter((j) => j.issue_id === issue.issue_id).sort((a, b) => a.created_at.localeCompare(b.created_at) || a.job_id.localeCompare(b.job_id));
+        const latest = related[related.length - 1];
+        const open = expanded[issue.issue_id] ?? false;
         const archived = issue.provenance ?? null;
         const live = !archived && LIVE.has(issue.status);
         return (
           <Card key={issue.issue_id}>
             <CardHeader>
               <div className="flex flex-wrap items-center gap-2">
+                <Button variant="ghost" size="sm" aria-expanded={open} aria-controls={`jobs-${issue.issue_id}`} aria-label={t(open ? "records.collapse" : "records.expand", { n: related.length })} onClick={() => setExpanded((current) => ({ ...current, [issue.issue_id]: !open }))}>
+                  {open ? <ChevronDown /> : <ChevronRight />}
+                  {t(open ? "records.collapse" : "records.expand", { n: related.length })}
+                </Button>
                 <CardTitle className="text-base">{issue.title}</CardTitle>
                 <Badge variant="secondary">{label(issue.priority)}</Badge>
                 <StatusBadge value={issue.status} />
@@ -163,13 +170,22 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                 <span className="ml-auto text-xs text-muted-foreground">{dateTime(issue.created_at)}</span>
               </div>
               <CardDescription>{issue.description}</CardDescription>
+              {latest && <div className="mt-2 grid gap-1 rounded-md bg-muted/30 p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <span>{t("records.latest")}</span>
+                  <StatusBadge value={latest.status} />
+                  {latest.result && <Badge variant="outline">{label(latest.result.outcome)}</Badge>}
+                  <time dateTime={latest.created_at}>{dateTime(latest.created_at)}</time>
+                </div>
+                <p className={open ? "whitespace-pre-wrap" : "line-clamp-3 whitespace-pre-wrap"}>{latest.result?.summary ?? t("outcome.noResult")}</p>
+              </div>}
               {issue.closure && (
                 <div className="mt-2 rounded-md border bg-muted/30 p-3 text-sm">
                   <p className="text-xs text-muted-foreground">{t("records.closedBy", { who: issue.closure.closed_by, at: dateTime(issue.closure.closed_at) })}</p>
                   {issue.closure.comment && <p className="mt-1 whitespace-pre-wrap"><MessageSquareQuote className="mr-1 inline h-3.5 w-3.5" />{issue.closure.comment}</p>}
                 </div>
               )}
-              <div className="mt-2 flex flex-wrap items-center gap-2">
+              {open && <div className="mt-2 flex flex-wrap items-center gap-2">
                 <LinkButton href={traceHash(issue.issue_id)} title={t("records.trace.title")}>
                   <Waypoints />
                   {t("records.trace")}
@@ -191,9 +207,9 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                     </Button>
                   </>
                 )}
-              </div>
+              </div>}
             </CardHeader>
-            <CardContent>
+            {open && <CardContent id={`jobs-${issue.issue_id}`}>
               {waiting.filter((item) => item.issue.issue_id === issue.issue_id).map((item) => <div className="mb-4" key={item.job.job_id}><IssueFeedback item={item} onChanged={onChanged} /></div>)}
               {related.length === 0 && <p className="text-sm text-muted-foreground">{t("records.noJob")}</p>}
               {related.length > 0 && (
@@ -284,7 +300,7 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
                   ))}
                 </ul>
               )}
-            </CardContent>
+            </CardContent>}
           </Card>
         );
       })}
