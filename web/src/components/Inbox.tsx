@@ -8,7 +8,7 @@ import type { ActionRun, Inbox as InboxData, Job, Revision, Status } from "../ty
 import { Page } from "./Shell";
 import { IssueFeedback } from "./IssueFeedback";
 import { EvidenceBadge, StatusBadge } from "./status";
-import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, Kv, Segmented, StatTile, Textarea } from "./ui";
+import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, Input, Kv, Segmented, StatTile, Textarea } from "./ui";
 
 /** Mirrors the runner's inbox membership rule, so History shows exactly what the inbox does not. */
 function inInbox(a: ActionRun): boolean {
@@ -184,6 +184,14 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
               <p className="mt-2 text-sm">{item.job.result?.summary ?? item.issue.description}</p>
               {(item.job.result?.unresolved_questions.length ?? 0) > 0 && <ul className="mt-2 list-inside list-disc text-sm text-muted-foreground">{item.job.result!.unresolved_questions.map((question, index) => <li key={index}>{question}</li>)}</ul>}
               <IssueFeedback key={item.job.job_id} item={item} onChanged={onChanged} onRevision={setRevision} />
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
+                <Input className="h-8 min-w-48 flex-1 text-xs" aria-label={t("records.closingComment")} placeholder={t("records.closingComment")} value={comment(item.issue.issue_id)} onChange={(e) => setComment(item.issue.issue_id, e.target.value)} />
+                <Button size="sm" variant="outline" disabled={busy === item.issue.issue_id} onClick={() => run(item.issue.issue_id, async () => {
+                  await api.closeIssue(item.issue.issue_id, "resolved", by(), comment(item.issue.issue_id));
+                  setInbox((current) => ({ ...current, waiting_issues: current.waiting_issues.filter((entry) => entry.issue.issue_id !== item.issue.issue_id) }));
+                  return undefined;
+                })} title={t("btn.resolve.title")}><CheckCircle2 />{t("btn.resolve")}</Button>
+              </div>
             </ItemCard>
           ))}
 
