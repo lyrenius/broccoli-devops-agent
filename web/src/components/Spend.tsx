@@ -9,7 +9,7 @@ import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, C
 
 /** One unit throughout the console: one Mtok is one million tokens. */
 export function tokens(n: number): string {
-  return `${(n / 1_000_000).toLocaleString("en-US", { minimumFractionDigits: 3, maximumFractionDigits: 6 })} Mtoks`;
+  return `${(n / 1_000_000).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Mtoks`;
 }
 
 /** Cumulative model usage and proximity to the configured budget. */
