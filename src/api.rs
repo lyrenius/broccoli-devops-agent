@@ -207,6 +207,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
         // The Collector's cadence, so a console can say how fresh the picture is meant to be.
         "snapshot_interval_secs": state.runner.settings().read(|live| live.snapshot_interval.as_secs()),
         "recovery": state.recovery,
+        "snapshot_review": state.runner.latest_snapshot_review().await?,
         // What is happening right now, and what it has cost: both are live, so a console can
         // show a pass in flight and its running bill without polling a second route.
         "running": state.runner.running_passes().await,

@@ -57,7 +57,7 @@ cargo run --example live_demo -- data-live
 cd web && pnpm dev
 ```
 
-File a report from the console, open its Trace, approve the held queue purge in the inbox, then press **Export** to save the whole session as one JSON file.
+The initial periodic Snapshot is reviewed and starts automatic investigations. You can also file a report from the console, open its Trace, approve the held queue purge in the inbox, then press **Export** to save the whole session as one JSON file.
 
 ### 3. Point it at your deployment, with a real model
 
@@ -241,6 +241,14 @@ cargo run -- events --tail 20
 
 State lives under `./data/` (override with `--data`): one JSON document per Snapshot, Issue, Job, and Artifact record, artifact bodies under `data/artifact-bodies/`, and an append-only `data/events.jsonl`. Human reports default to the human-reserved top priority; pass `--priority low|normal|high|critical` to file lower.
 
+## Snapshot review and automatic intake
+
+Every manual or periodic capture is saved first, then reviewed once by the Snapshot Judge. With a configured model backend, the Judge uses the same relay as the Operate Team, over a separate sanitized, hash-bound Judge View. Deterministic health, coverage-gap, and active-alert checks always run; the model adds correlations through a reporting-only tool. Missing observations are reported as visibility problems, not as proof of an outage. The review transcript and token usage are recorded, and review spending counts toward the existing deployment budget. A failed model review falls back to rule findings; a failed review never discards the saved Snapshot.
+
+The Scheduler validates findings and merges repeated findings with the same key into an open Issue. While `serve` is running, a separate intake worker dispatches new automatic Issues in priority order through the existing Operate/pass/authority pipeline. Frozen Issues remain queued across restarts and start after resume, using fresh evidence. Repeated evidence does not launch another initial Job for an Issue already being handled. A review of evidence captured before an incident was closed cannot reopen it; a fresh recurrence can create a new Issue.
+
+Only manual and periodic captures trigger this review. Human-report, feedback, probe-request, action-verification, and dispatch-time captures do not recursively start reviews. The web Overview shows review progress, warnings, related Issues, and links to the exact input/transcript; the TUI shows its latest state. The standalone `snapshot` command captures, reviews, and queues findings; run `serve` to process that queue. Existing runbook permissions and dry-run settings apply to every automatic investigation.
+
 ## Actions and the inbox
 
 When a Job proposes operations, `report` runs each one through the approved authority matrix ([docs/action-authority.md](./docs/action-authority.md), encoded in `src/policy.rs`): `auto` rows execute through the Agents Platform and are verified against an after-Snapshot immediately, `approve` rows wait in the **Permission Request** inbox, `deny` rows are cancelled with the rule's rationale kept on the ActionRun and wait in the **Permission Denied** inbox. A human rejection lands in the same denied inbox with the human's comment. Jobs that fail, and actions whose execution or verification fails, wait in the **Failed** inbox. A denied or failed item is reviewed in one of two ways: *acknowledge* it, or *send it back upstream* — the agent then runs a revising Job over a fresh Snapshot with the denial reason, the failure summary, and your comments in front of it, and its new proposals go through the matrix again ([docs/architecture.md §4.10](./docs/architecture.md)).
@@ -330,7 +338,7 @@ export BROCCOLI_PROBE_LOGIN="$(bash -c 'source testbed/lib.sh; echo "$ADMIN_USER
 2. `src/ports.rs`: learn the boundaries around the Collector, Snapshot Judge, Agent Team (callback sink and cancellation), Agents Platform, Scheduler Policy, Reporter, and Store.
 3. `src/scheduler.rs`: see how the AI-integrated Top Scheduler accepts human reports, requests Snapshot captures, triages candidates through the policy model with deterministic fallbacks, creates and supersedes Jobs, handles callbacks, gates ActionRuns, and manages freeze/recovery.
 4. `src/topology.rs` and `src/collector.rs`: the static deployment map and the probe-driven Collector behind `CollectorPort`.
-5. `src/view.rs`: the redacting Snapshot View Builder and content-hashed artifact store.
+5. `src/view.rs`: the redacting Snapshot View Builder and content-hashed artifact store; `src/judge.rs` implements Snapshot review.
 6. `src/team/`: the deterministic read-only Operate Team and the harness-backed `HarnessOperateTeam` — two backends behind one `AgentTeamPort`.
 7. `crates/harness/src/`: the agent loop (`agent.rs`), tool registry (`tool.rs`), and `ModelClient` boundary (`client.rs`).
 8. `src/store/file.rs`: the file-backed Store that makes restart recovery real (`src/store/memory.rs` remains for tests).
@@ -345,11 +353,10 @@ The v0.1 slice deliberately does not implement:
 
 - Model-backed Scheduler decisions: the harness, its OpenAI-compatible client,
   and the harness-backed Operate Team are implemented and wired to the relay,
-  but the Scheduler Policy and Judger adapters are not, so every Scheduler
-  decision point still runs its conservative deterministic fallback.
+  but a model-backed Scheduler Policy adapter is not wired. Candidate intake and
+  dispatch decisions use deterministic validation and deduplication.
 - Real machine mutation out of the box: the Platform executes only the runbook commands you configure, and stays in dry-run until you opt in.
 - Cross-object transactions: each document write is atomic and every update a compare-and-set, but a crash between two records is reconciled by startup recovery rather than prevented.
-- Automatic incident intake through the Snapshot Judge and continuous autonomous troubleshooting: Snapshots are captured on a schedule, but reports are still operator-triggered.
 - Authenticated PostgreSQL, Redis, or object-storage probes: the Probe Registry reads plain TCP, plain HTTP, the plain Redis protocol, and Broccoli's admin API.
 - SQLite (the file-backed store keeps the same `StateStore` contract for a
   drop-in swap).

@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{
     ActionRun, ActionRunId, Artifact, ArtifactId, DeploymentId, EventRecord, Issue, IssueCandidate,
-    IssueId, IssuePriority, Job, JobBrief, JobId, JobResult, NamedValue, NewEvent, OperationMode,
-    PlatformOperationResult, ResourceId, Snapshot, SnapshotCause, SnapshotId, SnapshotViewRef,
-    TeamCallback, TeamKind,
+    IssueId, IssuePriority, Job, JobBrief, JobId, JobResult, ModelUsage, NamedValue, NewEvent,
+    OperationMode, PlatformOperationResult, ResourceId, Snapshot, SnapshotCause, SnapshotId,
+    SnapshotViewRef, TeamCallback, TeamKind,
 };
 use crate::error::AgentResult;
 
@@ -67,25 +67,42 @@ pub trait CollectorPort: Send + Sync {
     async fn capture_snapshot(&self, request: CaptureRequest) -> AgentResult<Snapshot>;
 }
 
-/// Snapshot Judge boundary that proposes potential problems from one Snapshot.
+/// Findings and audit data returned by one Snapshot Judge review.
 ///
 /// The Judge is hybrid: deterministic alert rules always run, and a model may additionally
 /// correlate evidence. Because model reasoning is involved, the Judge receives a sanitized Judge
-/// View built with its own redaction profile rather than the canonical Snapshot, so raw untrusted
-/// text never enters model context. The View Artifact is stored, making Judge input replayable
+/// View built with its own redaction profile rather than the canonical Snapshot; external text
+/// remains explicitly untrusted and secret-shaped facts are filtered. The View Artifact is stored, making Judge input replayable
 /// exactly like Job input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotJudgement {
+    /// Rule and model findings; only the Scheduler may turn them into Issues.
+    pub candidates: Vec<IssueCandidate>,
+    /// Human-readable account of the review.
+    pub summary: String,
+    /// The model transcript, when a model ran.
+    pub artifact_ids: Vec<ArtifactId>,
+    /// What the review spent, including missing-usage counts on failed requests.
+    pub usage: Option<ModelUsage>,
+    /// A model failure or budget skip; rule findings remain usable.
+    pub model_error: Option<String>,
+}
+
+/// An analyzer over a sanitized immutable Snapshot, with no execution capabilities.
 #[async_trait]
 pub trait SnapshotJudgePort: Send + Sync {
     /// Analyzes the sanitized Judge View of one Snapshot and returns zero or more Issue Candidates.
     ///
     /// `snapshot_id` names the canonical Snapshot the View was built from so candidates reference
     /// it. A Candidate is only a proposal and cannot directly create an Issue, assign priority, or
-    /// execute an action. The Top Scheduler handles deduplication and acceptance.
+    /// execute an action. The Top Scheduler handles deduplication and acceptance. When
+    /// `model_allowed` is false, rules still run but the reviewer must not contact the relay.
     async fn inspect_snapshot(
         &self,
         snapshot_id: SnapshotId,
         judge_view: &Artifact,
-    ) -> AgentResult<Vec<IssueCandidate>>;
+        model_allowed: bool,
+    ) -> AgentResult<SnapshotJudgement>;
 }
 
 /// Boundary that converts a canonical Snapshot into a Job-visible View.

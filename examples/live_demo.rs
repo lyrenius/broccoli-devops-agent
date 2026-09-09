@@ -22,7 +22,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use broccoli_agent_harness::testing::{call, text};
 use broccoli_agent_harness::{
-    AssistantItem, HarnessResult, ModelClient, ModelRequest, ModelTurn, Usage,
+    AssistantItem, HarnessResult, Item, ModelClient, ModelRequest, ModelTurn, Usage,
 };
 use broccoli_devops_agent::api::{ApiState, serve};
 use broccoli_devops_agent::config::{AppConfig, DataConfig, TopologyConfig};
@@ -31,22 +31,50 @@ use broccoli_devops_agent::runner::{SliceRunner, TeamBackend};
 use broccoli_devops_agent::settings::LiveSettings;
 use broccoli_devops_agent::topology::DeploymentTopology;
 use serde_json::json;
-use tokio::sync::Mutex;
 
 /// Plays one fixed investigation over and over, one turn per request, slowly.
 struct CyclingModelClient {
     turns: Vec<Vec<AssistantItem>>,
-    position: Mutex<usize>,
     delay: Duration,
 }
 
 #[async_trait]
 impl ModelClient for CyclingModelClient {
-    async fn complete(&self, _request: ModelRequest<'_>) -> HarnessResult<ModelTurn> {
+    async fn complete(&self, request: ModelRequest<'_>) -> HarnessResult<ModelTurn> {
         tokio::time::sleep(self.delay).await;
-        let mut position = self.position.lock().await;
-        let items = self.turns[*position % self.turns.len()].clone();
-        *position += 1;
+        let items = if request
+            .tools
+            .iter()
+            .any(|tool| tool.name == "submit_snapshot_review")
+        {
+            vec![call(
+                "review",
+                "submit_snapshot_review",
+                json!({
+                    "summary": "The worker and Redis observations need investigation; the rule findings identify both resources.",
+                    "findings": []
+                }),
+            )]
+        } else {
+            // Derive the position from this conversation, so periodic reviews and concurrent
+            // investigations do not consume another Job's scripted turns.
+            let called = |name: &str| {
+                request
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, Item::ToolCall { tool, .. } if tool == name))
+            };
+            let position = if called("propose_action") {
+                3
+            } else if called("report_progress") {
+                2
+            } else if called("read_snapshot_view") {
+                1
+            } else {
+                0
+            };
+            self.turns[position].clone()
+        };
         Ok(ModelTurn::with_usage(
             items,
             Usage::reported(9_800, 6_000, 420),
@@ -126,7 +154,6 @@ probes = [{{ probe = "tcp.connect", target = "127.0.0.1:{}" }}]
                 }),
             )],
         ],
-        position: Mutex::new(0),
         delay: Duration::from_secs(2),
     };
     let platform = PlatformConfig {
@@ -165,8 +192,9 @@ probes = [{{ probe = "tcp.connect", target = "127.0.0.1:{}" }}]
     );
     let summary = runner.recover().await?;
     if summary.is_clean_restart() {
-        runner.scheduler().resume().await?;
+        runner.resume().await?;
     }
+    let _intake = runner.spawn_intake_dispatch();
     let _periodic = runner.spawn_periodic_capture();
 
     // A second argument picks the bind address, so the demo can sit beside a real `serve`.

@@ -59,7 +59,7 @@ enum TeamChoice {
 /// The operator commands.
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Capture a Snapshot of the deployment and display it with its coverage gaps.
+    /// Capture and review a Snapshot; queue detected Issues for the serving Scheduler.
     Snapshot,
     /// File a human report; dispatches an Operate Job and prints its diagnosis.
     Report {
@@ -427,9 +427,21 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = effective_config(&cli)?;
     match cli.command {
         Command::Snapshot => {
-            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
+            let runner = Arc::new(wire_runner(
+                &config,
+                select_backend(&config, TeamChoice::Auto)?,
+            )?);
             let snapshot = runner.capture(SnapshotCause::Manual).await?;
             print!("{}", runner.render_snapshot(&snapshot));
+            if let Some(review) = runner.latest_snapshot_review().await? {
+                println!("review: {} — {}", review["status"], review["summary"]);
+                if let Some(error) = review["error"].as_str() {
+                    eprintln!("review: {error}");
+                }
+            }
+            println!(
+                "Detected Issues are queued; `serve` dispatches them when the Scheduler is Running."
+            );
         }
         Command::Report {
             title,
@@ -694,6 +706,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             // The Collector's own schedule starts once recovery has settled the Store; it
             // follows the cadence the live settings name, zero included.
+            let _intake = runner.spawn_intake_dispatch();
             let _periodic = runner.spawn_periodic_capture();
             let cadence = match config.collector.snapshot_interval() {
                 Some(interval) => format!("every {} s", interval.as_secs()),

@@ -14,6 +14,7 @@ pub mod domain;
 pub mod error;
 pub mod evidence;
 pub mod i18n;
+pub mod judge;
 pub mod platform;
 pub mod policy;
 pub mod ports;

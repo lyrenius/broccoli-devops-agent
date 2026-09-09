@@ -72,6 +72,7 @@ export interface UsageTotals {
 }
 
 export interface Status {
+  snapshot_review: SnapshotReview | null;
   mode: string;
   team_backend: string;
   dry_run: boolean;
@@ -86,6 +87,18 @@ export interface Status {
   inbox: InboxCounts;
   running: RunningPass[];
   usage: UsageTotals;
+}
+
+/** Review of a manual/periodic Snapshot; independent of action-verification Snapshots. */
+export interface SnapshotReview {
+  snapshot_id: string;
+  status: "running" | "completed" | "partial" | "failed";
+  summary: string;
+  candidate_count?: number;
+  issue_ids: string[];
+  artifact_ids: string[];
+  error: string | null;
+  updated_at: string;
 }
 
 export interface Metric {

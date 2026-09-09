@@ -30,9 +30,9 @@ use async_trait::async_trait;
 use broccoli_agent_harness::{AgentConfig as HarnessBudget, ModelClient};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, Notify, broadcast, watch};
 
 use crate::collector::TopologyCollector;
 use crate::config::DEFAULT_SNAPSHOT_INTERVAL_SECS;
@@ -44,6 +44,7 @@ use crate::domain::{
 };
 use crate::error::{AgentError, AgentResult};
 pub use crate::evidence::summarize_execution_record;
+use crate::judge::HybridSnapshotJudge;
 use crate::platform::{LocalCommandPlatform, PlatformConfig};
 use crate::policy::{AuthorityPolicy, OPERATE_CAPABILITIES};
 use crate::ports::{
@@ -255,6 +256,11 @@ pub struct SliceRunner {
     store: Arc<FileStateStore>,
     scheduler: Arc<TopScheduler>,
     team: Box<dyn AgentTeamPort>,
+    judge: Arc<dyn crate::ports::SnapshotJudgePort>,
+    judge_views: Arc<RedactingViewBuilder>,
+    snapshot_review_lock: Mutex<()>,
+    intake_dispatch_lock: Mutex<()>,
+    intake_ready: Notify,
     team_label: String,
     artifacts: FileArtifactStore,
     /// Everything that may change while the control plane runs; see [`crate::settings`].
@@ -339,10 +345,21 @@ impl SliceRunner {
         let scheduler = Arc::new(
             TopScheduler::new(store.clone())
                 .with_collector(collector)
-                .with_view_builder(view_builder)
+                .with_view_builder(view_builder.clone())
                 .with_platform(platform)
                 .with_authority(authority),
         );
+        let (review_client, review_model) = match &backend {
+            TeamBackend::ReadOnly => (None, String::new()),
+            TeamBackend::Harness { client, model, .. } => (Some(client.clone()), model.clone()),
+        };
+        let judge = Arc::new(HybridSnapshotJudge::new(
+            review_client,
+            review_model,
+            artifacts.clone(),
+            store.clone(),
+            settings.clone(),
+        ));
         let (team, team_label): (Box<dyn AgentTeamPort>, String) = match backend {
             TeamBackend::ReadOnly => (
                 Box::new(ReadOnlyOperateTeam::new(artifacts)),
@@ -379,6 +396,11 @@ impl SliceRunner {
             store,
             scheduler,
             team,
+            judge,
+            judge_views: view_builder,
+            snapshot_review_lock: Mutex::new(()),
+            intake_dispatch_lock: Mutex::new(()),
+            intake_ready: Notify::new(),
             team_label,
             artifacts: artifacts_for_api,
             settings,
@@ -627,9 +649,8 @@ impl SliceRunner {
     /// Starts the Collector's periodic schedule: one Snapshot now, then one every interval the
     /// live settings name.
     ///
-    /// Observation only — it dispatches nothing, so it runs in every Scheduler mode, frozen
-    /// included, and the consoles keep a fresh picture of a deployment nobody is allowed to
-    /// touch. The only mode it sits out is `Recovering`, while the Store is being reconciled.
+    /// Every capture is reviewed and its findings enter the Issue queue. Collection and local
+    /// review continue while frozen; the separate intake dispatcher starts work only in Running. The only mode it sits out is `Recovering`, while the Store is being reconciled.
     /// A failed capture is reported on stderr and the schedule continues; a capture that takes
     /// longer than the interval delays the next one rather than piling them up. A changed
     /// cadence takes effect at once, starting with a capture; a cadence of zero pauses the
@@ -663,11 +684,270 @@ impl SliceRunner {
         })
     }
 
-    /// Captures, persists, and returns a Snapshot.
+    /// Selects another Snapshot Judge adapter, preserving the same intake and audit boundary.
+    pub fn with_snapshot_judge(mut self, judge: Arc<dyn crate::ports::SnapshotJudgePort>) -> Self {
+        self.judge = judge;
+        self
+    }
+
+    /// Captures and persists a Snapshot. Manual/periodic captures also receive one review;
+    /// internal before/after/probe captures do not recursively generate investigations.
+    /// Review errors are recorded separately and never discard a successfully stored Snapshot.
     pub async fn capture(&self, cause: SnapshotCause) -> AgentResult<Snapshot> {
-        self.scheduler
+        let snapshot = self
+            .scheduler
             .request_snapshot(self.capture_request(cause))
-            .await
+            .await?;
+        if matches!(cause, SnapshotCause::Manual | SnapshotCause::Periodic)
+            && let Err(error) = self.review_snapshot(snapshot.snapshot_id).await
+        {
+            let payload = json!({ "snapshot_id": snapshot.snapshot_id, "status": "failed",
+                "summary": tr!("Snapshot saved, but its review failed", "快照已保存，但审查失败"),
+                "error": error.to_string(), "updated_at": Utc::now(), "issue_ids": [], "artifact_ids": [] });
+            if let Err(log_error) = self
+                .store
+                .append_event(
+                    crate::domain::NewEvent::new(
+                        "snapshot-judge",
+                        "snapshot_judge.review_failed",
+                        error.to_string(),
+                    )
+                    .with_payload(payload),
+                )
+                .await
+            {
+                eprintln!(
+                    "Snapshot {} saved; review failed: {error}; recording failure also failed: {log_error}",
+                    snapshot.snapshot_id
+                );
+            }
+        }
+        Ok(snapshot)
+    }
+
+    /// Reviews a stored Snapshot once, records the exact input/output, and feeds valid findings
+    /// through Scheduler triage. Repeated reviews of the same ID return the recorded result.
+    pub async fn review_snapshot(&self, snapshot_id: SnapshotId) -> AgentResult<Value> {
+        let _review = self.snapshot_review_lock.lock().await;
+        if let Some(event) = self
+            .store
+            .list_events()
+            .await?
+            .into_iter()
+            .rev()
+            .find(|event| {
+                event.kind == "snapshot_judge.review_completed"
+                    && event.payload["snapshot_id"] == json!(snapshot_id)
+            })
+        {
+            return Ok(event.payload);
+        }
+        let snapshot = self.store.get_snapshot(snapshot_id).await?;
+        let view = self.judge_views.build_judge_view(&snapshot)?;
+        self.store.insert_artifact(view.clone()).await?;
+        let started = self.store.append_event(crate::domain::NewEvent::new(
+            "snapshot-judge", "snapshot_judge.review_started", tr!("Reviewing the captured Snapshot", "正在审查刚采集的快照"),
+        ).with_payload(json!({ "snapshot_id": snapshot_id, "status": "running", "summary": tr!("Snapshot review in progress", "快照审查进行中"),
+            "updated_at": Utc::now(), "issue_ids": [], "artifact_ids": [view.artifact_id], "error": null }))
+            .with_artifacts(vec![view.artifact_id])).await?;
+        let model_allowed = self.freeze_if_budget_spent().await?.is_none();
+        let judgement = self
+            .judge
+            .inspect_snapshot(snapshot_id, &view, model_allowed)
+            .await?;
+        if let Some(usage) = &judgement.usage {
+            let mut payload = serde_json::to_value(usage)?;
+            payload["snapshot_id"] = json!(snapshot_id);
+            payload["consumer"] = json!("snapshot_judge");
+            self.store
+                .append_event(
+                    crate::domain::NewEvent::new(
+                        "snapshot-judge",
+                        crate::usage::USAGE_EVENT_KIND,
+                        format!("Snapshot review used {} tokens", usage.total_tokens()),
+                    )
+                    .with_payload(payload),
+                )
+                .await?;
+        }
+        self.freeze_if_budget_spent().await?;
+        let count = judgement.candidates.len();
+        let mut issues = Vec::new();
+        let mut errors: Vec<String> = judgement.model_error.into_iter().collect();
+        for mut candidate in judgement.candidates {
+            if candidate.snapshot_id != snapshot_id {
+                errors.push("Judge returned a candidate for another Snapshot".into());
+                continue;
+            }
+            candidate.evidence_ids.push(started.event_id);
+            match self.scheduler.triage_candidate(candidate).await {
+                Ok(crate::scheduler::TriageOutcome::IssueCreated(issue)) => {
+                    issues.push(issue.issue_id)
+                }
+                Ok(crate::scheduler::TriageOutcome::MergedInto(id)) => issues.push(id),
+                Ok(_) => {}
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        issues.sort();
+        issues.dedup();
+        let mut artifacts = vec![view.artifact_id];
+        artifacts.extend(judgement.artifact_ids);
+        let payload = json!({ "snapshot_id": snapshot_id,
+            "status": if errors.is_empty() { "completed" } else { "partial" },
+            "summary": judgement.summary, "candidate_count": count,
+            "issue_ids": issues, "artifact_ids": artifacts,
+            "error": if errors.is_empty() { None } else { Some(errors.join("; ")) }, "updated_at": Utc::now() });
+        self.store
+            .append_event(
+                crate::domain::NewEvent::new(
+                    "snapshot-judge",
+                    "snapshot_judge.review_completed",
+                    judgement.summary,
+                )
+                .with_payload(payload.clone())
+                .with_artifacts(artifacts.clone())
+                .with_trust(crate::domain::ContentTrust::Mixed),
+            )
+            .await?;
+        // Bind shared review evidence to each resulting Issue so its Trace and session export
+        // include the Judge View and transcript. Usage remains one global billing record.
+        for issue_id in &issues {
+            self.store
+                .append_event(
+                    crate::domain::NewEvent::new(
+                        "snapshot-judge",
+                        "snapshot_judge.issue_reviewed",
+                        payload["summary"].as_str().unwrap_or_default(),
+                    )
+                    .with_issue(*issue_id)
+                    .with_payload(payload.clone())
+                    .with_artifacts(artifacts.clone())
+                    .with_trust(crate::domain::ContentTrust::Mixed),
+                )
+                .await?;
+        }
+        self.intake_ready.notify_one();
+        Ok(payload)
+    }
+
+    /// Most recent review state for the operator consoles, including a review still running.
+    pub async fn latest_snapshot_review(&self) -> AgentResult<Option<Value>> {
+        Ok(self
+            .store
+            .list_events()
+            .await?
+            .into_iter()
+            .rev()
+            .find(|event| {
+                matches!(
+                    event.kind.as_str(),
+                    "snapshot_judge.review_started"
+                        | "snapshot_judge.review_completed"
+                        | "snapshot_judge.review_failed"
+                )
+            })
+            .map(|event| event.payload))
+    }
+
+    /// Runs newly accepted automatic Issues in priority order through the existing Operate
+    /// pipeline. Frozen Issues remain Open and durable; merges never spawn a second initial Job.
+    pub async fn dispatch_pending_issues(&self) -> AgentResult<()> {
+        let _dispatch = self.intake_dispatch_lock.lock().await;
+        loop {
+            if !self.dispatch_allowed().await || self.freeze_if_budget_spent().await?.is_some() {
+                return Ok(());
+            }
+            let jobs = self.store.list_jobs().await?;
+            let mut pending: Vec<_> = self
+                .store
+                .list_issues()
+                .await?
+                .into_iter()
+                .filter(|issue| {
+                    issue.source == crate::domain::IssueSource::Judge
+                        && issue.status == crate::domain::IssueStatus::Open
+                        && !issue.is_archived()
+                        && !jobs.iter().any(|job| job.issue_id == issue.issue_id)
+                })
+                .collect();
+            pending.sort_by(|a, b| {
+                b.priority
+                    .cmp(&a.priority)
+                    .then(a.created_at.cmp(&b.created_at))
+            });
+            let Some(issue) = pending.into_iter().next() else {
+                return Ok(());
+            };
+            // An Issue may have waited through a freeze or another remediation. Bind its
+            // first Operate pass to fresh evidence, without recursively reviewing this capture.
+            let dispatched = async {
+                let snapshot = self.capture(SnapshotCause::JudgeEvaluation).await?;
+                let current = self.store.get_issue(issue.issue_id).await?;
+                if current.status.is_terminal() || current.is_archived() {
+                    return Err(AgentError::InvalidInput(
+                        "queued Issue was closed before dispatch".into(),
+                    ));
+                }
+                let mut updated = current.clone();
+                updated.update_current_snapshot(snapshot.snapshot_id);
+                self.store.update_issue_if(&current, updated).await?;
+                self.scheduler
+                    .dispatch_job(
+                        issue.issue_id,
+                        snapshot.snapshot_id,
+                        self.operate_brief(Vec::new(), self.fresh_follow_up_budget()),
+                        PROFILE_OPERATE_READONLY,
+                    )
+                    .await
+            }
+            .await;
+            let outcome = match dispatched {
+                Ok((job, view)) => match self.run_team(job, &view).await {
+                    Ok(job) => self.drive_passes(job).await.map(|_| ()),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+            if let Err(error) = outcome {
+                if matches!(error, AgentError::SchedulerFrozen { .. }) {
+                    return Ok(());
+                }
+                let current = self.store.get_issue(issue.issue_id).await?;
+                if current.status == crate::domain::IssueStatus::Open {
+                    let mut next = current.clone();
+                    next.transition_to(crate::domain::IssueStatus::WaitingForHuman)?;
+                    self.store.update_issue_if(&current, next).await?;
+                }
+                self.store
+                    .append_event(
+                        crate::domain::NewEvent::new(
+                            "top-scheduler",
+                            "scheduler.intake_failed",
+                            error.to_string(),
+                        )
+                        .with_issue(issue.issue_id),
+                    )
+                    .await?;
+            }
+        }
+    }
+
+    /// Starts the intake worker separately from the Collector, so a long investigation does
+    /// not block later captures. Open automatic Issues are picked up after startup or resume.
+    pub fn spawn_intake_dispatch(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let runner = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = runner.dispatch_pending_issues().await {
+                    eprintln!("automatic issue dispatch failed: {error}");
+                }
+                tokio::select! {
+                    () = runner.intake_ready.notified() => {},
+                    () = tokio::time::sleep(Duration::from_secs(1)) => {},
+                }
+            }
+        })
     }
 
     /// Accepts a human report, dispatches the first Operate pass over the report-time Snapshot,
@@ -1165,6 +1445,7 @@ impl SliceRunner {
     pub async fn resume(&self) -> AgentResult<()> {
         let _drain = self.queue_lock.lock().await;
         self.scheduler.resume().await?;
+        self.intake_ready.notify_one();
         let archived = self.scheduler.archived_issue_ids().await?;
         let queued: Vec<_> = self
             .store
@@ -1416,9 +1697,52 @@ impl SliceRunner {
     /// Recovers control state after a restart, verifying interrupted actions against a fresh
     /// Snapshot; see `TopScheduler::recover_with`.
     pub async fn recover(&self) -> AgentResult<RecoverySummary> {
-        self.scheduler
+        let _reviews = self.snapshot_review_lock.lock().await;
+        let summary = self
+            .scheduler
             .recover_with(Some(self.capture_request(SnapshotCause::AfterAction)))
-            .await
+            .await?;
+        // Reviews have no Job to recover. End any old in-flight marker explicitly so a
+        // controller with periodic collection disabled does not display a permanent spinner.
+        let mut unfinished = HashMap::new();
+        for event in self.store.list_events().await? {
+            let Ok(id) = serde_json::from_value::<SnapshotId>(event.payload["snapshot_id"].clone())
+            else {
+                continue;
+            };
+            match event.kind.as_str() {
+                "snapshot_judge.review_started" => {
+                    unfinished.insert(id, (event.sequence, event.payload));
+                }
+                "snapshot_judge.review_completed" | "snapshot_judge.review_failed" => {
+                    unfinished.remove(&id);
+                }
+                _ => {}
+            }
+        }
+        let mut unfinished: Vec<_> = unfinished.into_values().collect();
+        unfinished.sort_by_key(|(sequence, _)| *sequence);
+        for (_, mut payload) in unfinished {
+            let reason = tr!(
+                "Snapshot review was interrupted by a controller restart; the saved Snapshot is retained. Capture again to review current evidence.",
+                "快照审查被控制器重启中断，已保存的快照仍保留；再次采集可审查当前证据。"
+            );
+            payload["status"] = json!("failed");
+            payload["summary"] = json!(reason);
+            payload["error"] = json!(reason);
+            payload["updated_at"] = json!(Utc::now());
+            self.store
+                .append_event(
+                    crate::domain::NewEvent::new(
+                        "snapshot-judge",
+                        "snapshot_judge.review_failed",
+                        reason,
+                    )
+                    .with_payload(payload),
+                )
+                .await?;
+        }
+        Ok(summary)
     }
 
     /// Dispatches the revising Job for upstream feedback over a fresh Snapshot, with the whole

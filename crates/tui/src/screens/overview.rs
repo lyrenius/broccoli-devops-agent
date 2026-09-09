@@ -99,6 +99,21 @@ fn intro_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         });
     }
     doc.note(&subtitle);
+    if let Some(review) = app
+        .status
+        .as_ref()
+        .and_then(|status| status.snapshot_review.as_ref())
+    {
+        doc.note(&format!(
+            "Snapshot review {} · {}: {}",
+            short(&review.snapshot_id),
+            label(&review.status),
+            review.summary
+        ));
+        if let Some(error) = &review.error {
+            doc.alert(Color::Yellow, error);
+        }
+    }
     if let Some(status) = &app.status
         && let Some(recovery) = &status.recovery
         && status.mode != "running"

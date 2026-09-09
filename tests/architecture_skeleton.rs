@@ -673,9 +673,9 @@ async fn fully_frozen_blocks_new_action_runs() {
     ));
 }
 
-/// Without a policy model, candidate triage records the candidate and defers to a human.
+/// Without a policy model, deterministic intake accepts a validated candidate into the queue.
 #[tokio::test]
-async fn triage_without_policy_defers_to_human() {
+async fn triage_without_policy_accepts_a_valid_candidate() {
     let store = Arc::new(InMemoryStateStore::new());
     let scheduler = TopScheduler::new(store.clone());
     let snapshot = sample_snapshot();
@@ -690,7 +690,7 @@ async fn triage_without_policy_defers_to_human() {
         "redis.latency",
     );
     let outcome = scheduler.triage_candidate(candidate).await.unwrap();
-    assert_eq!(outcome, TriageOutcome::DeferredToHuman);
+    assert!(matches!(outcome, TriageOutcome::IssueCreated(_)));
 
     let kinds: Vec<_> = store
         .list_events()
@@ -704,7 +704,7 @@ async fn triage_without_policy_defers_to_human() {
             .iter()
             .any(|kind| kind == "snapshot_judge.issue_candidate")
     );
-    assert!(kinds.iter().any(|kind| kind == "scheduler.triage_deferred"));
+    assert!(kinds.iter().any(|kind| kind == "scheduler.issue_created"));
 }
 
 /// A policy model's triage proposal is validated and clamped by the harness.

@@ -597,3 +597,16 @@ fn queued_actions_are_visible_without_asking_for_another_decision() {
     press(&mut app, KeyCode::Char('h'));
     assert!(!render(&mut app).contains("approved by alice"));
 }
+
+#[test]
+fn overview_shows_snapshot_review_and_its_warning() {
+    let (mut app, _rx) = populated();
+    app.status.as_mut().unwrap().snapshot_review = Some(serde_json::from_value(json!({
+        "snapshot_id": ISSUE, "status": "partial", "summary": "worker incident queued", "error": "model offline; rule checks completed"
+    })).unwrap());
+    app.set_screen(Screen::Overview);
+    let page = render(&mut app);
+    assert!(page.contains("Snapshot review"), "{page}");
+    assert!(page.contains("worker incident queued"), "{page}");
+    assert!(page.contains("rule checks completed"), "{page}");
+}

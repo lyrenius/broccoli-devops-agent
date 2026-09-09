@@ -6,7 +6,7 @@ import type { Issue, Snapshot, Status } from "../types";
 import { Page } from "./Shell";
 import { RunningCard, SpendTile, UsageCard } from "./Spend";
 import { StatusBadge } from "./status";
-import { Alert, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, StatTile } from "./ui";
+import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, StatTile } from "./ui";
 
 const LIVE = new Set(["open", "investigating", "waiting_for_human", "mitigating", "verifying"]);
 
@@ -52,6 +52,7 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
   const stale = snapshot ? Date.now() - new Date(snapshot.created_at).getTime() > staleAfter : false;
   const cadence = (secs: number) => (secs % 60 === 0 ? t("overview.cadence.minutes", { n: secs / 60 }) : t("overview.cadence.seconds", { n: secs }));
   const frozenAfterRecovery = status?.recovery && status.mode !== "running";
+  const review = status?.snapshot_review;
 
   return (
     <Page
@@ -66,7 +67,7 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
       actions={
         <Button onClick={capture} disabled={busy}>
           <Camera />
-          {busy ? t("overview.capturing") : t("overview.capture")}
+          {busy ? t(review?.status === "running" ? "review.running" : "overview.capturing") : t("overview.capture")}
         </Button>
       }
     >
@@ -106,6 +107,27 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
         <StatTile label={t("stat.events")} value={status?.counts.events ?? "—"} icon={Activity} hint={status ? t("stat.eventsHint", { jobs: status.counts.jobs, actions: status.counts.actions }) : undefined} />
         <SpendTile usage={status?.usage} />
       </div>
+
+      {review && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ListChecks className="h-4 w-4" />{t("review.title")}
+              <Badge variant={review.status === "completed" ? "success" : review.status === "failed" ? "danger" : "warning"}>{t(`review.${review.status}`)}</Badge>
+            </CardTitle>
+            <CardDescription>{t("review.snapshot", { id: review.snapshot_id.slice(-8), age: age(review.updated_at) })}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            <p>{review.summary}</p>
+            {review.candidate_count !== undefined && <p className="text-muted-foreground">{t("review.count", { count: review.candidate_count, issues: review.issue_ids.length })}</p>}
+            {review.error && <p className="text-amber-700 dark:text-amber-400">{review.error}</p>}
+            <div className="flex flex-wrap gap-3">
+              {review.issue_ids.map((id) => <a key={id} className="text-primary underline" href={`#trace/${id}`}>{t("review.issue", { id: id.slice(-8) })}</a>)}
+              {review.artifact_ids.map((id, index) => <a key={id} className="text-primary underline" href={`/api/artifacts/${id}/body`} target="_blank" rel="noreferrer">{t(index === 0 ? "review.input" : "review.transcript")}</a>)}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* What is happening right now and what it has cost: the two live facts a Snapshot cannot show. */}
       <div className="grid gap-6 lg:grid-cols-2">

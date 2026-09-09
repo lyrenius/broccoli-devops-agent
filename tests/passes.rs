@@ -622,7 +622,7 @@ async fn stalled_probe_request_waits_for_a_human_and_can_be_sent_back() {
     // A stalled Job cannot come from the harness Team (it is not offered the tool when the
     // budget is zero), so stage one through the Scheduler as any other Team could produce it.
     let scheduler = runner.scheduler();
-    let snapshot = runner.capture(SnapshotCause::Manual).await.unwrap();
+    let snapshot = runner.capture(SnapshotCause::HumanReport).await.unwrap();
     let issue = scheduler
         .accept_human_report(
             HumanReport::new("op", "Worker odd", "check it"),

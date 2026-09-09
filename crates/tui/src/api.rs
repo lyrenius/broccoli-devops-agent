@@ -26,6 +26,8 @@ pub struct Status {
     pub snapshot_interval_secs: u64,
     /// Startup recovery summary, when the server recovered at startup.
     pub recovery: Option<RecoverySummary>,
+    /// Most recent automatic/manual Snapshot review, including an in-flight review.
+    pub snapshot_review: Option<SnapshotReview>,
     /// Object counts.
     pub counts: Counts,
     /// Inbox counts.
@@ -202,6 +204,20 @@ pub struct Snapshot {
     pub resources: Vec<ResourceState>,
     /// What could not be observed.
     pub coverage_gaps: Vec<CoverageGap>,
+}
+
+/// Progress and outcome of a Snapshot Judge review.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SnapshotReview {
+    /// Reviewed Snapshot ID.
+    pub snapshot_id: String,
+    /// Running, completed, partial, or failed.
+    pub status: String,
+    /// Review summary.
+    pub summary: String,
+    /// Model or triage warning, when present.
+    pub error: Option<String>,
 }
 
 /// One resource inside a Snapshot.

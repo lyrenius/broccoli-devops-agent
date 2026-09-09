@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::domain::{
     ActionProposal, ActionRun, ActionRunId, ActionStatus, ApprovalState, Artifact, ArtifactKind,
@@ -135,7 +135,7 @@ pub enum TriageOutcome {
     MergedInto(IssueId),
     /// The candidate was discarded as noise or an unneeded duplicate.
     Rejected,
-    /// No policy model is wired; the candidate was recorded and awaits human triage.
+    /// Legacy deferred outcome, retained for callers with their own triage policy.
     DeferredToHuman,
 }
 
@@ -152,6 +152,7 @@ pub struct TopScheduler {
     policy: Option<Arc<dyn SchedulerPolicyPort>>,
     authority: AuthorityPolicy,
     mode: RwLock<SchedulerMode>,
+    triage_lock: Mutex<()>,
 }
 
 impl TopScheduler {
@@ -169,6 +170,7 @@ impl TopScheduler {
             policy: None,
             authority: AuthorityPolicy::default(),
             mode: RwLock::new(SchedulerMode::Running),
+            triage_lock: Mutex::new(()),
         }
     }
 
@@ -316,37 +318,82 @@ impl TopScheduler {
             .await
     }
 
-    /// Triages one Issue Candidate: record it, consult policy, and apply the validated decision.
-    ///
-    /// The policy model proposes accept/merge/reject; the harness clamps any proposed priority
-    /// below `HumanTop`, verifies that a merge target exists and is still open, and records the
-    /// consultation for replay. Without a policy model the candidate is recorded and deferred to a
-    /// human — the conservative fallback, never automatic acceptance.
+    /// Records a candidate and deterministically merges repeated findings into an open Issue.
+    /// A wired policy may advise acceptance/rejection; without one, validated findings enter
+    /// the queue at a model-safe priority. Intake continues while execution is frozen.
     pub async fn triage_candidate(&self, candidate: IssueCandidate) -> AgentResult<TriageOutcome> {
+        let _triage = self.triage_lock.lock().await;
+        let snapshot = self.store.get_snapshot(candidate.snapshot_id).await?;
+        if candidate.title.trim().is_empty()
+            || candidate.summary.trim().is_empty()
+            || candidate.deduplication_key.trim().is_empty()
+            || candidate.affected_resource_ids.iter().any(|id| {
+                !snapshot
+                    .resources
+                    .iter()
+                    .any(|resource| &resource.resource_id == id)
+            })
+        {
+            return Err(AgentError::InvalidInput("candidate requires a title, summary, stable key, and resources present in its Snapshot".into()));
+        }
         let candidate_event = self.record_issue_candidate(candidate.clone()).await?;
-
-        let Some(policy) = &self.policy else {
-            self.store
-                .append_event(NewEvent::new(
-                    "top-scheduler",
-                    "scheduler.triage_deferred",
-                    tr!(
-                        "No policy model is wired; the candidate awaits human triage",
-                        "未接入策略模型；候选问题等待人工分诊"
-                    ),
-                ))
-                .await?;
-            return Ok(TriageOutcome::DeferredToHuman);
-        };
-
+        // A review may finish after an operator or another pass closes the incident. Evidence
+        // captured before that decision must not reopen it; a later Snapshot can report recurrence.
+        if self.store.list_issues().await?.iter().any(|issue| {
+            !issue.is_archived()
+                && issue.status.is_terminal()
+                && issue.deduplication_key.as_deref() == Some(candidate.deduplication_key.as_str())
+                && issue.updated_at >= snapshot.created_at
+        }) {
+            self.store.append_event(NewEvent::new("top-scheduler", "scheduler.candidate_rejected",
+                "The finding predates closure of the matching incident; waiting for fresh evidence")
+                .with_payload(json!({ "candidate_id": candidate.candidate_id, "snapshot_id": candidate.snapshot_id }))).await?;
+            return Ok(TriageOutcome::Rejected);
+        }
         let request = TriageRequest {
             candidate: candidate.clone(),
             open_issues: self.live_unfinished().await?.0,
         };
-        let decision = policy.triage_candidate(&request).await?;
-        self.record_policy_consultation("triage_candidate", &request, &decision, None, None)
-            .await?;
-
+        let duplicate = request.open_issues.iter().find(|issue| {
+            issue.deduplication_key.as_deref() == Some(candidate.deduplication_key.as_str())
+        });
+        let decision = if let Some(issue) = duplicate {
+            TriageDecision::MergeInto {
+                issue_id: issue.issue_id,
+            }
+        } else if let Some(policy) = &self.policy {
+            match policy.triage_candidate(&request).await {
+                Ok(decision) => {
+                    self.record_policy_consultation(
+                        "triage_candidate",
+                        &request,
+                        &decision,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    decision
+                }
+                Err(error) => {
+                    self.store
+                        .append_event(NewEvent::new(
+                            "top-scheduler",
+                            "scheduler.triage_fallback",
+                            format!(
+                                "Policy unavailable; using deterministic candidate intake: {error}"
+                            ),
+                        ))
+                        .await?;
+                    TriageDecision::Accept {
+                        priority: candidate.proposed_priority.model_safe(),
+                    }
+                }
+            }
+        } else {
+            TriageDecision::Accept {
+                priority: candidate.proposed_priority.model_safe(),
+            }
+        };
         match decision {
             TriageDecision::Accept { priority } => {
                 let mut issue = Issue::from_candidate(candidate, candidate_event.event_id);
@@ -356,27 +403,45 @@ impl TopScheduler {
                 Ok(TriageOutcome::IssueCreated(Box::new(issue)))
             }
             TriageDecision::MergeInto { issue_id } => {
-                let mut issue = self.store.get_issue(issue_id).await?;
-                if issue.status.is_terminal() {
+                if !request
+                    .open_issues
+                    .iter()
+                    .any(|issue| issue.issue_id == issue_id)
+                {
                     return Err(AgentError::InvalidInput(format!(
-                        "policy proposed merging into terminal Issue `{issue_id}`"
+                        "policy proposed merging into an Issue outside the active queue: `{issue_id}`"
                     )));
                 }
-                issue.evidence_ids.extend(candidate.evidence_ids);
-                issue.update_current_snapshot(candidate.snapshot_id);
-                self.store.update_issue(issue.clone()).await?;
+                let issue = self.store.get_issue(issue_id).await?;
+                if issue.status.is_terminal() || issue.is_archived() {
+                    return Err(AgentError::InvalidInput(format!(
+                        "cannot merge into closed or archived Issue `{issue_id}`"
+                    )));
+                }
+                let mut next = issue.clone();
+                next.evidence_ids.push(candidate_event.event_id);
+                next.evidence_ids
+                    .extend(candidate.evidence_ids.iter().copied());
+                next.evidence_ids.sort();
+                next.evidence_ids.dedup();
+                next.priority = next.priority.max(candidate.proposed_priority.model_safe());
+                let current = self.store.get_snapshot(issue.current_snapshot_id).await?;
+                if snapshot.created_at >= current.created_at {
+                    next.update_current_snapshot(candidate.snapshot_id);
+                }
+                self.store.update_issue_if(&issue, next).await?;
                 self.store
                     .append_event(
                         NewEvent::new(
                             "top-scheduler",
                             "scheduler.candidate_merged",
                             tr!(
-                                "The Scheduler merged a candidate into an existing Issue",
-                                "调度器将候选问题并入了已有 Issue"
+                                "The Scheduler merged repeated evidence into an existing Issue",
+                                "调度器将重复发现的证据并入已有 Issue"
                             ),
                         )
                         .with_issue(issue_id)
-                        .with_payload(json!({ "candidate_id": candidate.candidate_id })),
+                        .with_payload(serde_json::to_value(&candidate)?),
                     )
                     .await?;
                 Ok(TriageOutcome::MergedInto(issue_id))

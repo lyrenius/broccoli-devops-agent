@@ -21,6 +21,9 @@ use crate::ports::{SnapshotViewBuildRequest, SnapshotViewBuildResult, SnapshotVi
 /// The redaction profile v0.1 implements.
 pub const PROFILE_OPERATE_READONLY: &str = "operate-readonly-v1";
 
+/// Dedicated profile for automatic anomaly review, independent of any existing Issue.
+pub const PROFILE_SNAPSHOT_JUDGE: &str = "snapshot-judge-v1";
+
 /// Fact-name fragments that are never allowed into a View.
 const SECRET_MARKERS: [&str; 5] = ["password", "secret", "token", "credential", "api_key"];
 
@@ -116,12 +119,57 @@ impl RedactingViewBuilder {
     pub fn new(artifacts: FileArtifactStore) -> Self {
         Self { artifacts }
     }
+
+    /// Stores the exact, sanitized input of a Snapshot Judge review. Free text remains fenced
+    /// as untrusted data; secret-shaped facts use the same filtering as Operate Views.
+    pub fn build_judge_view(&self, snapshot: &Snapshot) -> AgentResult<Artifact> {
+        let view = json!({
+            "view_profile": PROFILE_SNAPSHOT_JUDGE,
+            "snapshot_id": snapshot.snapshot_id,
+            "created_at": snapshot.created_at,
+            "operation_mode": snapshot.operation_mode,
+            "resources": sanitized_resources(snapshot),
+            "dependencies": snapshot.dependencies,
+            "coverage_gaps": snapshot.coverage_gaps,
+            "active_alerts": snapshot.active_alerts,
+            "untrusted_data": { "recent_changes": snapshot.recent_changes },
+        });
+        self.artifacts.write(
+            ArtifactKind::SnapshotView,
+            &serde_json::to_vec_pretty(&view)?,
+        )
+    }
 }
 
 /// Returns whether a fact name looks like it carries a secret.
 fn is_secret_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     SECRET_MARKERS.iter().any(|marker| lower.contains(marker))
+}
+
+fn sanitized_resources(snapshot: &Snapshot) -> Vec<serde_json::Value> {
+    snapshot
+        .resources
+        .iter()
+        .map(|resource| {
+            // Probe detail can echo remote text, so it travels under `untrusted_data`,
+            // clearly fenced away from structured facts a prompt may treat as instructions.
+            let (untrusted, facts): (Vec<_>, Vec<_>) = resource
+                .facts
+                .iter()
+                .filter(|fact| !is_secret_name(&fact.name))
+                .partition(|fact| fact.name.starts_with("probe."));
+            json!({
+                "resource_id": resource.resource_id,
+                "kind": resource.kind,
+                "health": resource.health,
+                "observed_at": resource.observed_at,
+                "facts": facts,
+                "metrics": resource.metrics,
+                "untrusted_data": untrusted,
+            })
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -142,28 +190,7 @@ impl SnapshotViewBuilderPort for RedactingViewBuilder {
             )));
         }
 
-        let resources: Vec<_> = snapshot
-            .resources
-            .iter()
-            .map(|resource| {
-                // Probe detail can echo remote text, so it travels under `untrusted_data`,
-                // clearly fenced away from structured facts a prompt may treat as instructions.
-                let (untrusted, facts): (Vec<_>, Vec<_>) = resource
-                    .facts
-                    .iter()
-                    .filter(|fact| !is_secret_name(&fact.name))
-                    .partition(|fact| fact.name.starts_with("probe."));
-                json!({
-                    "resource_id": resource.resource_id,
-                    "kind": resource.kind,
-                    "health": resource.health,
-                    "observed_at": resource.observed_at,
-                    "facts": facts,
-                    "metrics": resource.metrics,
-                    "untrusted_data": untrusted,
-                })
-            })
-            .collect();
+        let resources = sanitized_resources(snapshot);
 
         // The report's title and description are human-relayed text — often quoting contestants —
         // so they are fenced exactly like probe output. Feedback is the operators' own words to

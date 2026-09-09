@@ -232,6 +232,19 @@ bundles stored as files referenced by content hash.
 
 ### 4.3 Snapshot Judge
 
+Implemented by `HybridSnapshotJudge` in `src/judge.rs`. Manual and periodic captures
+are reviewed after persistence; internal verification/probe captures do not recurse.
+The Judge has only `submit_snapshot_review`, so it cannot execute or dispatch work.
+Rule findings survive model failures, and the model's usage counts against the
+existing spend ceiling. Review input and transcripts are attached to the resulting
+Issues for Trace/session export. Without a Scheduler Policy model, validated
+candidates now use deterministic acceptance and stable-key deduplication.
+
+The serving runner drains newly accepted automatic Issues in priority order,
+independently of collection. Frozen Issues remain queued until resume. Each initial
+Operate pass captures fresh evidence; repeated findings merge without duplicating
+a Job, and evidence older than an incident's closure cannot reopen it.
+
 The Snapshot Judge is hybrid (decided; formerly OD-3): deterministic alert
 rules always run, and an LLM additionally correlates evidence across components
 and proposes issue candidates the rules cannot express.
@@ -1176,7 +1189,6 @@ the fallback path is the first one exercised in practice.
 
 The next slices are:
 
-- Hybrid Snapshot Judge and automatic Issue candidates.
 - A Scheduler Policy model behind `advise_next_step`, so the deterministic
   chain rules above become the harness around a model's judgment.
 - Human questions from a Team (`NeedsHuman`) as an inbox interaction.
@@ -1225,7 +1237,7 @@ sanitized Judge View, never the canonical Snapshot. See §4.3.
 - Periodic frequency: **decided** — `[collector] snapshot_interval_secs`,
   default 120, first capture at startup, runs in every mode but `Recovering`,
   zero disables. Periodic Snapshots are stored and shown; feeding them to the
-  Snapshot Judge for automatic intake is still open.
+  Snapshot Judge for automatic intake is implemented in `src/judge.rs`.
 - Event-triggered Snapshot rules.
 - Raw log retention and artifact size limits.
 - How long post-contest replay data is retained.

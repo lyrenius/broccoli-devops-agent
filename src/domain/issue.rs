@@ -231,6 +231,9 @@ pub struct Issue {
     pub source: IssueSource,
     /// Human Report or Judge Event ID that created the Issue.
     pub source_event_id: EventId,
+    /// Stable key for repeated Snapshot Judge findings; human reports have no automatic key.
+    #[serde(default)]
+    pub deduplication_key: Option<String>,
     /// Issue title.
     pub title: String,
     /// Problem description for the Issue.
@@ -280,6 +283,7 @@ impl Issue {
             issue_id: Uuid::now_v7(),
             source: IssueSource::Human,
             source_event_id,
+            deduplication_key: None,
             title: report.title,
             description: report.description,
             priority: report.priority.unwrap_or(IssuePriority::HumanTop),
@@ -305,6 +309,7 @@ impl Issue {
             issue_id: Uuid::now_v7(),
             source: IssueSource::Judge,
             source_event_id,
+            deduplication_key: Some(candidate.deduplication_key),
             title: candidate.title,
             description: candidate.summary,
             priority: candidate.proposed_priority.model_safe(),
