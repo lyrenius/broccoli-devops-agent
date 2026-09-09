@@ -1,21 +1,32 @@
 import { AlertTriangle, Ban, CheckCircle2, ClipboardList, Inbox as InboxIcon, MessageSquareQuote, ShieldQuestion, XCircle } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useT } from "../i18n";
+import type { Key } from "../i18n/en";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
-import type { ActionRun, Inbox as InboxData, Job, Revision, Status } from "../types";
+import type { ActionRun, EventRecord, Inbox as InboxData, Issue, Job, Revision, Status } from "../types";
 import { Page } from "./Shell";
 import { IssueFeedback } from "./IssueFeedback";
 import { EvidenceBadge, StatusBadge } from "./status";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, EmptyState, Input, Kv, Segmented, StatTile, Textarea } from "./ui";
 
-/** Mirrors the runner's inbox membership rule, so History shows exactly what the inbox does not. */
+/** Completed or reviewed actions retained alongside the human decision log. */
 function inInbox(a: ActionRun): boolean {
   if (a.status === "waiting_for_approval" || a.status === "ready") return true;
   if (a.review !== null) return false;
   return a.denial !== null || a.status === "failed" || a.status === "verification_failed";
 }
+
+const HISTORY_LABELS: Record<string, Key> = {
+  "human.issue_reported": "history.human.issue_reported",
+  "human.issue_closed": "history.human.issue_closed",
+  "human.issue_feedback": "history.human.issue_feedback",
+  "human.action_approved": "history.human.action_approved",
+  "human.action_rejected": "history.human.action_rejected",
+  "human.review_recorded": "history.human.review_recorded",
+  "human.pass_cancelled": "history.human.pass_cancelled",
+};
 
 const EMPTY: InboxData = { waiting_issues: [], queued_actions: [], permission_requests: [], permission_denied: [], failed_jobs: [], failed_actions: [] };
 type Filter = "all" | "waiting" | "requests" | "denied" | "failed";
@@ -28,6 +39,11 @@ function ItemCard({ children, accent }: { children: React.ReactNode; accent: "am
 export function Inbox({ tick, status, onChanged }: { tick: number; status: Status | null; onChanged: () => void }) {
   const [inbox, setInbox] = useState<InboxData>(EMPTY);
   const [history, setHistory] = useState<ActionRun[]>([]);
+  const [decisions, setDecisions] = useState<EventRecord[]>([]);
+  const [issues, setIssues] = useState<Issue[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLimit, setHistoryLimit] = useState(50);
+  const historyCursor = useRef(0);
   const [filter, setFilter] = useState<Filter>("all");
   const [comments, setComments] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -37,10 +53,25 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
 
   useEffect(() => {
     api.inbox().then((next) => setInbox({ ...EMPTY, ...next, waiting_issues: next.waiting_issues ?? [] })).catch((e) => setError((e as Error).message));
-    api
-      .actions()
-      .then((all) => setHistory(all.filter((a) => !inInbox(a)).reverse()))
-      .catch(() => undefined);
+  }, [tick]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // No tail limit: old human decisions must survive arbitrarily many model/probe events.
+    Promise.all([api.events(undefined, { after: historyCursor.current }), api.issues(), api.actions()])
+      .then(([events, allIssues, allActions]) => {
+        if (cancelled) return;
+        historyCursor.current = events.reduce((last, event) => Math.max(last, event.sequence), historyCursor.current);
+        setDecisions((previous) => {
+          const all = new Map(previous.map((event) => [event.sequence, event]));
+          for (const event of events) if (event.kind.startsWith("human.") && event.issue_id) all.set(event.sequence, event);
+          return [...all.values()].sort((a, b) => b.sequence - a.sequence);
+        });
+        setIssues(allIssues);
+        setHistory(allActions.filter((action) => !inInbox(action)).reverse());
+        setHistoryError(null);
+      }).catch((e) => { if (!cancelled) setHistoryError((e as Error).message); });
+    return () => { cancelled = true; };
   }, [tick]);
 
   const comment = (id: string) => comments[id] ?? "";
@@ -294,8 +325,30 @@ export function Inbox({ tick, status, onChanged }: { tick: number; status: Statu
           </CardTitle>
           <CardDescription>{t("history.desc")}</CardDescription>
         </CardHeader>
-        <CardContent>
-          {history.length === 0 && <p className="text-sm text-muted-foreground">{t("history.none")}</p>}
+        <CardContent className="grid gap-4">
+          {historyError && <Alert icon={AlertTriangle}>{historyError}</Alert>}
+          {decisions.length === 0 && history.length === 0 && !historyError && <p className="text-sm text-muted-foreground">{t("history.none")}</p>}
+          {decisions.length > 0 && <section className="grid gap-2">
+            <h3 className="text-sm font-medium">{t("history.decisions")}</h3>
+            <ol className="divide-y rounded-lg border">
+              {decisions.slice(0, historyLimit).map((event) => {
+                const issue = issues.find((item) => item.issue_id === event.issue_id);
+                const payload = event.payload as { comment?: unknown } | undefined;
+                const reviewComment = event.kind === "human.review_recorded" && typeof payload?.comment === "string" ? payload.comment : null;
+                return <li key={event.sequence} className="grid gap-1 p-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline">{HISTORY_LABELS[event.kind] ? t(HISTORY_LABELS[event.kind]) : event.kind}</Badge>
+                    <a className="text-primary hover:underline" href={traceHash(event.issue_id!, event.job_id ?? undefined)}>{issue?.title ?? event.issue_id}</a>
+                    <time dateTime={event.occurred_at} className="ml-auto text-xs text-muted-foreground">{dateTime(event.occurred_at)}</time>
+                  </div>
+                  <p className="whitespace-pre-wrap break-words">{event.summary}</p>
+                  {reviewComment && <p className="whitespace-pre-wrap break-words text-muted-foreground">{reviewComment}</p>}
+                </li>;
+              })}
+            </ol>
+            {decisions.length > historyLimit && <Button variant="outline" size="sm" onClick={() => setHistoryLimit((limit) => limit + 50)}>{t("history.more")}</Button>}
+          </section>}
+          {history.length > 0 && <h3 className="text-sm font-medium">{t("history.actions")}</h3>}
           {history.length > 0 && (
             <div className="overflow-x-auto rounded-lg border">
               <table className="w-full text-sm">

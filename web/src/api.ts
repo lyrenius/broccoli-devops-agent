@@ -46,8 +46,9 @@ export const api = {
   usage: () => request<UsageTotals>("/api/usage"),
   /** Asks a running pass to stop; the Team still delivers a final result and keeps its transcript. */
   cancelJob: (id: string, by: string) => post<{ job_id: string }>(`/api/jobs/${id}/cancel`, { by }),
-  events: (limit: number, filter?: { issue_id?: string; job_id?: string; after?: number }) => {
-    const query = new URLSearchParams({ limit: String(limit) });
+  events: (limit: number | undefined, filter?: { issue_id?: string; job_id?: string; after?: number }) => {
+    const query = new URLSearchParams();
+    if (limit !== undefined) query.set("limit", String(limit));
     if (filter?.issue_id) query.set("issue_id", filter.issue_id);
     if (filter?.job_id) query.set("job_id", filter.job_id);
     if (filter?.after !== undefined) query.set("after", String(filter.after));
