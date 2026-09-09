@@ -108,7 +108,7 @@ export const en = {
   "queue.desc": "Approval is recorded. These actions wait while execution is frozen and run when the Scheduler resumes; no second approval is needed.",
   "queue.badge": "queued for execution",
   "evidence.observation": "observation only",
-  "inbox.subtitle": "Everything that waits for a human, in three categories. Items leave only through a recorded decision made in your name.",
+  "inbox.subtitle": "Investigations and decisions waiting for human input. Feedback and decisions are recorded under your name.",
   "inbox.dryRunBadge": "Platform dry-run: approved actions are rendered, not executed",
   "inbox.liveBadge": "Platform LIVE",
   "inbox.revision.title": "Revision ran: job {id} is {status}",

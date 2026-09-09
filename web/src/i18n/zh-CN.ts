@@ -110,7 +110,7 @@ export const zhCN: Record<Key, string> = {
   "queue.desc": "权限已确认。操作在全冻结期间排队，调度器恢复后执行，无需再次批准。",
   "queue.badge": "排队待执行",
   "evidence.observation": "仅完成观测",
-  "inbox.subtitle": "所有等待人工处理的事项，分为三类。事项只有在以你的名义做出决定后才会离开收件箱。",
+  "inbox.subtitle": "等待人工补充、审批或处理异常的事项。每次反馈与决定都会留下记录。",
   "inbox.dryRunBadge": "执行平台处于演练模式：批准的操作只会渲染记录，不会真正执行",
   "inbox.liveBadge": "执行平台实机执行",
   "inbox.revision.title": "修订已运行：任务 {id} 当前状态为 {status}",
