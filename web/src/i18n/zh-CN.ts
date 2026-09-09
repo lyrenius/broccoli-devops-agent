@@ -96,6 +96,7 @@ export const zhCN: Record<Key, string> = {
   "gaps.none": "无——所有资源均已观测。",
 
   "inbox.title": "收件箱",
+  "evidence.observation": "仅完成观测",
   "inbox.subtitle": "所有等待人工处理的事项，分为三类。事项只有在以你的名义做出决定后才会离开收件箱。",
   "inbox.dryRunBadge": "执行平台处于演练模式：批准的操作只会渲染记录，不会真正执行",
   "inbox.liveBadge": "执行平台实机执行",

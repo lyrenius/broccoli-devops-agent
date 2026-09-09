@@ -71,10 +71,12 @@ pub enum VerificationEvidence {
     /// The Platform rendered the commands but did not run them; nothing about the machines
     /// changed, so a passing check is not evidence of remediation.
     DryRun,
+    /// A read-only operation completed; it observed the deployment without remediating it.
+    Observation,
     /// The postcondition holds, but it already held before the action, so the check cannot tell
     /// the action's effect from the prior state.
     Weak,
-    /// The postcondition holds and was observed to change, or the operation is observe-only.
+    /// The postcondition holds and was observed to change.
     Strong,
 }
 

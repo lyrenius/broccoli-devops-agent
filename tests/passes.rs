@@ -706,3 +706,86 @@ async fn stalled_probe_request_waits_for_a_human_and_can_be_sent_back() {
         .collect();
     assert!(kinds.iter().any(|k| k == "scheduler.pass_budget_exhausted"));
 }
+
+/// Observation is a completed Job/action, even on an unhealthy resource, never remediation.
+#[tokio::test(flavor = "multi_thread")]
+async fn observations_do_not_resolve_issues_or_support_solved_claims() {
+    for healthy in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = if healthy {
+            listener.local_addr().unwrap().port()
+        } else {
+            closed_port()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let Harness { runner, .. } = harness(
+            dir.path(),
+            port,
+            false,
+            PassPolicy::default(),
+            vec![
+                vec![propose("c1", "service.status", "worker-1")],
+                vec![submit(
+                    "c2",
+                    "observation complete",
+                    "diagnosis_only",
+                    false,
+                )],
+            ],
+        );
+        let (issue, job) = runner
+            .handle_report(HumanReport::new("op", "Worker incident", "investigate"))
+            .await
+            .unwrap();
+        let passes = runner.drive_passes(job).await.unwrap();
+        assert_eq!(passes[0].job.status, JobStatus::Completed);
+        let action = &passes[0].actions[0];
+        assert_eq!(action.status, ActionStatus::Succeeded);
+        assert_eq!(
+            action.verification_evidence,
+            Some(VerificationEvidence::Observation)
+        );
+        assert_eq!(
+            runner
+                .store()
+                .get_issue(issue.issue_id)
+                .await
+                .unwrap()
+                .status,
+            IssueStatus::WaitingForHuman
+        );
+        // Old sessions used Strong for read-only actions; those must not become remediation.
+        let mut legacy = action.clone();
+        legacy.verification_evidence = Some(VerificationEvidence::Strong);
+        runner.store().update_action_run(legacy).await.unwrap();
+        let (next, _) = runner
+            .scheduler()
+            .dispatch_job(
+                issue.issue_id,
+                action.after_snapshot_id.unwrap(),
+                JobBrief::new(TeamKind::Operate, vec![], vec!["worker-1".into()]),
+                PROFILE_OPERATE_READONLY,
+            )
+            .await
+            .unwrap();
+        let next = runner
+            .scheduler()
+            .handle_callback(
+                TeamCallback::new(issue.issue_id, next.job_id, "looks solved")
+                    .with_final_result(JobResult::new(JobOutcome::Solved, "looks solved")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.status, JobStatus::Completed);
+        assert_eq!(next.result.unwrap().outcome, JobOutcome::DiagnosisOnly);
+        assert_eq!(
+            runner
+                .store()
+                .get_issue(issue.issue_id)
+                .await
+                .unwrap()
+                .status,
+            IssueStatus::WaitingForHuman
+        );
+    }
+}

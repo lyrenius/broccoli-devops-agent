@@ -656,7 +656,7 @@ pub struct ActionRun {
     pub dry_run: bool,
     /// Verification conclusion, when reached.
     pub verification_summary: Option<String>,
-    /// How much the verification proves: `dry_run`, `weak`, or `strong`.
+    /// How much the verification proves: `dry_run`, `observation`, `weak`, or `strong`.
     pub verification_evidence: Option<String>,
     /// When it was created.
     pub created_at: String,

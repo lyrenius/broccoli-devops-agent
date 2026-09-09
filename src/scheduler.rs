@@ -738,13 +738,9 @@ impl TopScheduler {
             .into_iter()
             .filter(|action| action.issue_id == job.issue_id)
             .collect();
-        let remediated = actions.iter().any(|action| {
-            action.status == ActionStatus::Succeeded
-                && matches!(
-                    action.verification_evidence,
-                    Some(VerificationEvidence::Weak | VerificationEvidence::Strong)
-                )
-        });
+        let remediated = actions
+            .iter()
+            .any(|action| is_remediation(action, &self.authority));
         if !remediated {
             return Ok(Err(tr!(
                 "no action on this Issue has succeeded with real evidence, so nothing was \
@@ -1447,7 +1443,7 @@ impl TopScheduler {
                     action,
                     Some(after.snapshot_id),
                     true,
-                    Some(VerificationEvidence::Strong),
+                    Some(VerificationEvidence::Observation),
                     summary,
                 )
                 .await;
@@ -1596,7 +1592,7 @@ impl TopScheduler {
     /// means `Mitigating`, one awaiting verification means `Verifying`; anything in an inbox —
     /// a permission request, an unreviewed denial or failure, a Job waiting on a human — means
     /// `WaitingForHuman`. With nothing outstanding, the latest pass decides: a `Solved` result,
-    /// or an action of the latest Job that succeeded with real (not dry-run) evidence, resolves
+    /// or a mutating action of the latest Job that succeeded with real evidence, resolves
     /// the Issue; otherwise it waits for a human to close it or send it on. Acknowledging an
     /// inbox item therefore never resolves an Issue by itself. Terminal Issues are left alone.
     pub async fn reconcile_issue(&self, issue_id: IssueId) -> AgentResult<Issue> {
@@ -1618,7 +1614,7 @@ impl TopScheduler {
             .into_iter()
             .filter(|action| action.issue_id == issue_id)
             .collect();
-        let Some((next, reason)) = derive_issue_status(&jobs, &actions) else {
+        let Some((next, reason)) = derive_issue_status(&jobs, &actions, &self.authority) else {
             return Ok(issue);
         };
         if next == issue.status || !issue.can_transition_to(next) {
@@ -2310,7 +2306,25 @@ impl InspectionPort for TopScheduler {
     }
 }
 
-fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStatus, String)> {
+/// Older records may label observations Strong, so also require a mutating runbook here.
+fn is_remediation(action: &ActionRun, authority: &AuthorityPolicy) -> bool {
+    action.status == ActionStatus::Succeeded
+        && !action.dry_run
+        && matches!(
+            action.verification_evidence,
+            Some(VerificationEvidence::Weak | VerificationEvidence::Strong)
+        )
+        && authority
+            .registry()
+            .classify(&action.runbook_id, &action.arguments)
+            .is_some_and(|class| class.is_mutating())
+}
+
+fn derive_issue_status(
+    jobs: &[Job],
+    actions: &[ActionRun],
+    authority: &AuthorityPolicy,
+) -> Option<(IssueStatus, String)> {
     if jobs.is_empty() && actions.is_empty() {
         return None;
     }
@@ -2377,9 +2391,7 @@ fn derive_issue_status(jobs: &[Job], actions: &[ActionRun]) -> Option<(IssueStat
         ));
     }
     let remediated = actions.iter().any(|action| {
-        action.originating_job_id == latest_job.job_id
-            && action.status == ActionStatus::Succeeded
-            && action.verification_evidence != Some(VerificationEvidence::DryRun)
+        action.originating_job_id == latest_job.job_id && is_remediation(action, authority)
     });
     if remediated {
         return Some((

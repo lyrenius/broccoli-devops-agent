@@ -862,7 +862,7 @@ struct ActionRun {
     review: Option<HumanReview>,      // a denied or failed action leaves the inbox through this
     execution_summary: Option<String>,        // the Platform's own account
     dry_run: bool,                            // rendered, not executed
-    verification_evidence: Option<VerificationEvidence>, // dry_run | weak | strong
+    verification_evidence: Option<VerificationEvidence>, // dry_run | observation | weak | strong
     before_snapshot_id: SnapshotId,
     after_snapshot_id: Option<SnapshotId>,
     idempotency_key: String,

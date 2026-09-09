@@ -44,7 +44,7 @@ export function StatusBadge({ value, className }: { value: string; className?: s
   );
 }
 
-export function EvidenceBadge({ evidence }: { evidence: "dry_run" | "weak" | "strong" | null }) {
+export function EvidenceBadge({ evidence }: { evidence: "dry_run" | "observation" | "weak" | "strong" | null }) {
   const { t } = useT();
   if (!evidence) return null;
   const variant = evidence === "strong" ? "success" : evidence === "weak" ? "warning" : "outline";

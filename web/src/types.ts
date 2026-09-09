@@ -236,7 +236,7 @@ export interface ActionRun {
   execution_summary: string | null;
   dry_run: boolean;
   verification_summary: string | null;
-  verification_evidence: "dry_run" | "weak" | "strong" | null;
+  verification_evidence: "dry_run" | "observation" | "weak" | "strong" | null;
   created_at: string;
 }
 

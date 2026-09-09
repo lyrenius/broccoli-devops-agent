@@ -94,6 +94,7 @@ export const en = {
   "gaps.none": "None — every resource was observed.",
 
   "inbox.title": "Inbox",
+  "evidence.observation": "observation only",
   "inbox.subtitle": "Everything that waits for a human, in three categories. Items leave only through a recorded decision made in your name.",
   "inbox.dryRunBadge": "Platform dry-run: approved actions are rendered, not executed",
   "inbox.liveBadge": "Platform LIVE",
