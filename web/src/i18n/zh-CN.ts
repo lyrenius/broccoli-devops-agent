@@ -225,7 +225,9 @@ export const zhCN: Record<Key, string> = {
   "records.filter.live": "未关闭",
   "records.filter.closed": "已关闭",
   "records.filter.archived": "归档",
-  "records.search": "搜索标题、描述或 ID",
+  "records.clearSearch": "清除搜索",
+  "records.searchResults": "当前筛选中匹配 {n} 个问题；默认展开各轮任务详情。",
+  "records.search": "搜索问题、Job、结论、评论…",
   "records.none.filtered": "没有匹配的问题。",
   "running.trace": "追踪",
 

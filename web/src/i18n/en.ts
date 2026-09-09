@@ -223,7 +223,9 @@ export const en = {
   "records.filter.live": "Open",
   "records.filter.closed": "Closed",
   "records.filter.archived": "Archives",
-  "records.search": "Search title, description, or ID",
+  "records.clearSearch": "Clear search",
+  "records.searchResults": "{n} matching issue(s) in this filter; matching issues expand to show job details.",
+  "records.search": "Search issues, jobs, conclusions, comments…",
   "records.none.filtered": "Nothing matches.",
   "running.trace": "Trace",
 

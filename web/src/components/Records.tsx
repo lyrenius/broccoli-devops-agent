@@ -1,4 +1,4 @@
-import { AlertTriangle, Archive, CheckCircle2, ChevronDown, ChevronRight, Download, ListChecks, MessageSquareQuote, Upload, Waypoints, XCircle } from "lucide-react";
+import { AlertTriangle, Archive, CheckCircle2, ChevronDown, ChevronRight, Download, ListChecks, MessageSquareQuote, Search, Upload, Waypoints, XCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useT } from "../i18n";
@@ -88,7 +88,18 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
     if (filter === "live" && (archived || !LIVE.has(issue.status))) return false;
     if (filter === "closed" && (archived || LIVE.has(issue.status))) return false;
     if (!needle) return true;
-    return issue.title.toLowerCase().includes(needle) || issue.description.toLowerCase().includes(needle) || issue.issue_id.startsWith(needle);
+    const related = jobs.filter((job) => job.issue_id === issue.issue_id);
+    const text = [issue.title, issue.description, issue.issue_id, issue.status, label(issue.status),
+      issue.closure?.comment, issue.closure?.closed_by, ...issue.affected_resource_ids,
+      ...related.flatMap((job) => [job.job_id, job.status, label(job.status), job.team_kind,
+        job.result?.summary, job.result?.outcome, job.result ? label(job.result.outcome) : "",
+        ...(job.result?.unresolved_questions ?? []),
+        ...(job.result?.proposed_actions ?? []).flatMap((action) => [action.runbook_id, action.reason, ...action.target_ids]),
+        job.review?.comment, job.review?.reviewer,
+        ...job.feedback.flatMap((feedback) => [feedback.comment, feedback.reviewer]),
+      ]),
+    ].filter(Boolean).join("\n").toLocaleLowerCase();
+    return needle.split(/\s+/).every((term) => text.includes(term));
   });
   const counts = {
     all: issues.length,
@@ -114,7 +125,11 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
               { id: "archived", label: t("records.filter.archived"), count: counts.archived },
             ]}
           />
-          <Input className="h-8 w-56 text-xs" placeholder={t("records.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+          <div className="flex items-center gap-2">
+            <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <Input type="search" className="h-8 w-72 max-w-full text-xs" aria-label={t("records.search")} placeholder={t("records.search")} value={query} onChange={(e) => setQuery(e.target.value)} />
+            {query && <Button size="sm" variant="ghost" onClick={() => setQuery("")}>{t("records.clearSearch")}</Button>}
+          </div>
           <input ref={fileInput} type="file" accept="application/json,.json" className="hidden" onChange={(e) => e.target.files?.[0] && void importFile(e.target.files[0])} />
           <Button size="sm" variant="outline" disabled={importing} onClick={() => fileInput.current?.click()} title={t("records.import.title")}>
             <Upload />
@@ -133,19 +148,21 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
           <p>{notice}</p>
         </Alert>
       )}
+      {needle && <p role="status" className="text-sm text-muted-foreground">{t("records.searchResults", { n: visible.length })}</p>}
       {issues.length === 0 && <EmptyState icon={ListChecks} title={t("records.empty.title")} hint={t("records.empty.hint")} />}
       {issues.length > 0 && visible.length === 0 && <EmptyState icon={ListChecks} title={t("records.none.filtered")} />}
       {visible.map((issue) => {
         const related = jobs.filter((j) => j.issue_id === issue.issue_id).sort((a, b) => a.created_at.localeCompare(b.created_at) || a.job_id.localeCompare(b.job_id));
         const latest = related[related.length - 1];
-        const open = expanded[issue.issue_id] ?? false;
+        const expansionKey = `${issue.issue_id}:${needle}`;
+        const open = expanded[expansionKey] ?? Boolean(needle);
         const archived = issue.provenance ?? null;
         const live = !archived && LIVE.has(issue.status);
         return (
           <Card key={issue.issue_id}>
             <CardHeader>
               <div className="flex flex-wrap items-center gap-2">
-                <Button variant="ghost" size="sm" aria-expanded={open} aria-controls={`jobs-${issue.issue_id}`} aria-label={t(open ? "records.collapse" : "records.expand", { n: related.length })} onClick={() => setExpanded((current) => ({ ...current, [issue.issue_id]: !open }))}>
+                <Button variant="ghost" size="sm" aria-expanded={open} aria-controls={`jobs-${issue.issue_id}`} aria-label={t(open ? "records.collapse" : "records.expand", { n: related.length })} onClick={() => setExpanded((current) => ({ ...current, [expansionKey]: !open }))}>
                   {open ? <ChevronDown /> : <ChevronRight />}
                   {t(open ? "records.collapse" : "records.expand", { n: related.length })}
                 </Button>
