@@ -1,0 +1,13 @@
+{
+  "git_commit": "9469c6370ffbeee991af6c31051d1c81c3931b11",
+  "built_from_clean_git_archive": true,
+  "deployed_at": "2026-09-11T15:37:08.854155+00:00",
+  "binary_sha256": "c560d84fcb3b2d1a82bdace1ab35291d1f079ca39cf2c613d8c41c2740aff1e7",
+  "frontend_sha256": {
+    "index.html": "63a8336c5e91cea08f238b19a9dfbce59a414ba11f893117737fb3a08b69c337",
+    "assets/index-7mKOiMan.css": "36dd70cfdd856d305261002b3cb3a65364931d3175657f09560ce5c117a85c8b",
+    "assets/index-CfG6Vbjx.js": "26ffd731c91ee3236fc825c281a1c6a88b0250595774158a7e0f2e08e5b87448"
+  },
+  "backend_git_commit": "88062cbaeee3c8f74f38c9566bd001e1fe155d9b",
+  "frontend_git_commit": "9469c6370ffbeee991af6c31051d1c81c3931b11"
+}

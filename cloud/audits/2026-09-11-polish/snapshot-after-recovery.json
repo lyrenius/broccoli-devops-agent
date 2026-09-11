@@ -1,0 +1,356 @@
+{
+  "snapshot_id": "01a09110-1ba8-73f1-9ef7-27a6650bc098",
+  "parent_snapshot_id": null,
+  "deployment_id": "943fdb4a-ad3b-4537-89a3-aa970c3face3",
+  "topology_revision": "cloud-5nodes-1",
+  "created_at": "2026-09-11T15:22:27.112382318Z",
+  "cause": "manual",
+  "operation_mode": "rehearsal",
+  "resources": [
+    {
+      "resource_id": "postgres-main",
+      "node_id": "broccoli-devops-1",
+      "kind": "postgre_sql",
+      "health": "healthy",
+      "observed_at": "2026-09-11T15:22:27.115648115Z",
+      "facts": [
+        {
+          "name": "probe.tcp.connect",
+          "value": "connected to 10.0.22.32:5432"
+        }
+      ],
+      "metrics": [
+        {
+          "name": "probe.tcp.connect.latency",
+          "value": 3.24961,
+          "unit": "ms",
+          "window_secs": 0
+        }
+      ],
+      "evidence_ids": [
+        "01a09110-1bab-7d92-b3bb-650fa70e5681"
+      ]
+    },
+    {
+      "resource_id": "redis-mq",
+      "node_id": "broccoli-devops-1",
+      "kind": "redis",
+      "health": "healthy",
+      "observed_at": "2026-09-11T15:22:27.148775243Z",
+      "facts": [
+        {
+          "name": "probe.tcp.connect",
+          "value": "connected to 10.0.22.32:6379"
+        },
+        {
+          "name": "probe.broccoli.queue",
+          "value": "queue operation_tasks depth 0 (operation_tasks=0)"
+        }
+      ],
+      "metrics": [
+        {
+          "name": "probe.tcp.connect.latency",
+          "value": 1.5999700000000001,
+          "unit": "ms",
+          "window_secs": 0
+        },
+        {
+          "name": "probe.broccoli.queue.latency",
+          "value": 27.222731,
+          "unit": "ms",
+          "window_secs": 0
+        },
+        {
+          "name": "queue.depth",
+          "value": 0.0,
+          "unit": "messages",
+          "window_secs": 0
+        },
+        {
+          "name": "broccoli.submissions_in_progress",
+          "value": 0.0,
+          "unit": "submissions",
+          "window_secs": 0
+        },
+        {
+          "name": "broccoli.dlq_unresolved",
+          "value": 0.0,
+          "unit": "messages",
+          "window_secs": 0
+        }
+      ],
+      "evidence_ids": [
+        "01a09110-1bcc-7c93-9a50-40569247d6b3"
+      ]
+    },
+    {
+      "resource_id": "seaweedfs-storage",
+      "node_id": "broccoli-devops-1",
+      "kind": "object_storage",
+      "health": "healthy",
+      "observed_at": "2026-09-11T15:22:27.157199130Z",
+      "facts": [
+        {
+          "name": "probe.http.status",
+          "value": "HTTP 200"
+        },
+        {
+          "name": "probe.tcp.connect",
+          "value": "connected to 10.0.22.32:8333"
+        }
+      ],
+      "metrics": [
+        {
+          "name": "probe.http.status.latency",
+          "value": 3.420736,
+          "unit": "ms",
+          "window_secs": 0
+        },
+        {
+          "name": "probe.tcp.connect.latency",
+          "value": 0.90273,
+          "unit": "ms",
+          "window_secs": 0
+        }
+      ],
+      "evidence_ids": [
+        "01a09110-1bd5-7693-9670-ffc97f6e8e16"
+      ]
+    },
+    {
+      "resource_id": "broccoli-server",
+      "node_id": "broccoli-devops-2",
+      "kind": "broccoli_server",
+      "health": "healthy",
+      "observed_at": "2026-09-11T15:22:27.177676387Z",
+      "facts": [
+        {
+          "name": "probe.http.status",
+          "value": "HTTP 200"
+        }
+      ],
+      "metrics": [
+        {
+          "name": "probe.http.status.latency",
+          "value": 17.900748,
+          "unit": "ms",
+          "window_secs": 0
+        }
+      ],
+      "evidence_ids": [
+        "01a09110-1be9-7723-a151-fb5a0f36528d"
+      ]
+    },
+    {
+      "resource_id": "web-frontend",
+      "node_id": "broccoli-devops-2",
+      "kind": "frontend",
+      "health": "healthy",
+      "observed_at": "2026-09-11T15:22:27.184026484Z",
+      "facts": [
+        {
+          "name": "probe.http.status",
+          "value": "HTTP 200"
+        }
+      ],
+      "metrics": [
+        {
+          "name": "probe.http.status.latency",
+          "value": 3.633857,
+          "unit": "ms",
+          "window_secs": 0
+        }
+      ],
+      "evidence_ids": [
+        "01a09110-1bf0-78c1-b8fb-7c331cc56b87"
+      ]
+    },
+    {
+      "resource_id": "worker-1",
+      "node_id": "broccoli-devops-3",
+      "kind": "worker",
+      "health": "healthy",
+      "observed_at": "2026-09-11T15:22:27.194689065Z",
+      "facts": [
+        {
+          "name": "probe.broccoli.worker",
+          "value": "heartbeat 4 s ago, 0 in flight, version 0.1.0, isolate on 9ac2b89a6299"
+        },
+        {
+          "name": "probe.broccoli.worker.version",
+          "value": "0.1.0"
+        },
+        {
+          "name": "probe.broccoli.worker.hostname",
+          "value": "9ac2b89a6299"
+        },
+        {
+          "name": "probe.broccoli.worker.sandbox_backend",
+          "value": "isolate"
+        },
+        {
+          "name": "probe.broccoli.worker.os",
+          "value": "linux"
+        },
+        {
+          "name": "probe.broccoli.worker.arch",
+          "value": "x86_64"
+        }
+      ],
+      "metrics": [
+        {
+          "name": "probe.broccoli.worker.latency",
+          "value": 6.795111,
+          "unit": "ms",
+          "window_secs": 0
+        },
+        {
+          "name": "worker.in_flight",
+          "value": 0.0,
+          "unit": "tasks",
+          "window_secs": 0
+        },
+        {
+          "name": "worker.heartbeat_age",
+          "value": 4.0,
+          "unit": "s",
+          "window_secs": 0
+        }
+      ],
+      "evidence_ids": [
+        "01a09110-1bfa-7fe3-9bca-c86e5fff1747"
+      ]
+    },
+    {
+      "resource_id": "worker-2",
+      "node_id": "broccoli-devops-4",
+      "kind": "worker",
+      "health": "healthy",
+      "observed_at": "2026-09-11T15:22:27.205539941Z",
+      "facts": [
+        {
+          "name": "probe.broccoli.worker",
+          "value": "heartbeat 0 s ago, 0 in flight, version 0.1.0, isolate on 7cbc7e087f3f"
+        },
+        {
+          "name": "probe.broccoli.worker.version",
+          "value": "0.1.0"
+        },
+        {
+          "name": "probe.broccoli.worker.hostname",
+          "value": "7cbc7e087f3f"
+        },
+        {
+          "name": "probe.broccoli.worker.sandbox_backend",
+          "value": "isolate"
+        },
+        {
+          "name": "probe.broccoli.worker.os",
+          "value": "linux"
+        },
+        {
+          "name": "probe.broccoli.worker.arch",
+          "value": "x86_64"
+        }
+      ],
+      "metrics": [
+        {
+          "name": "probe.broccoli.worker.latency",
+          "value": 7.818589000000001,
+          "unit": "ms",
+          "window_secs": 0
+        },
+        {
+          "name": "worker.in_flight",
+          "value": 0.0,
+          "unit": "tasks",
+          "window_secs": 0
+        },
+        {
+          "name": "worker.heartbeat_age",
+          "value": 0.0,
+          "unit": "s",
+          "window_secs": 0
+        }
+      ],
+      "evidence_ids": [
+        "01a09110-1c05-7b82-852d-51244b45b92e"
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "from_resource_id": "broccoli-server",
+      "to_resource_id": "postgres-main",
+      "relation": "sql",
+      "critical": true
+    },
+    {
+      "from_resource_id": "broccoli-server",
+      "to_resource_id": "redis-mq",
+      "relation": "redis_mq",
+      "critical": true
+    },
+    {
+      "from_resource_id": "broccoli-server",
+      "to_resource_id": "seaweedfs-storage",
+      "relation": "s3_blob",
+      "critical": true
+    },
+    {
+      "from_resource_id": "web-frontend",
+      "to_resource_id": "broccoli-server",
+      "relation": "rest_api",
+      "critical": true
+    },
+    {
+      "from_resource_id": "worker-1",
+      "to_resource_id": "redis-mq",
+      "relation": "redis_mq",
+      "critical": true
+    },
+    {
+      "from_resource_id": "worker-1",
+      "to_resource_id": "postgres-main",
+      "relation": "sql",
+      "critical": true
+    },
+    {
+      "from_resource_id": "worker-1",
+      "to_resource_id": "seaweedfs-storage",
+      "relation": "s3_blob",
+      "critical": true
+    },
+    {
+      "from_resource_id": "worker-2",
+      "to_resource_id": "redis-mq",
+      "relation": "redis_mq",
+      "critical": true
+    },
+    {
+      "from_resource_id": "worker-2",
+      "to_resource_id": "postgres-main",
+      "relation": "sql",
+      "critical": true
+    },
+    {
+      "from_resource_id": "worker-2",
+      "to_resource_id": "seaweedfs-storage",
+      "relation": "s3_blob",
+      "critical": true
+    }
+  ],
+  "active_alerts": [],
+  "recent_changes": [],
+  "coverage_gaps": [],
+  "revisions": [],
+  "evidence_ids": [
+    "01a09110-1bab-7d92-b3bb-650fa70e5681",
+    "01a09110-1bcc-7c93-9a50-40569247d6b3",
+    "01a09110-1bd5-7693-9670-ffc97f6e8e16",
+    "01a09110-1be9-7723-a151-fb5a0f36528d",
+    "01a09110-1bf0-78c1-b8fb-7c331cc56b87",
+    "01a09110-1bfa-7fe3-9bca-c86e5fff1747",
+    "01a09110-1c05-7b82-852d-51244b45b92e"
+  ]
+}

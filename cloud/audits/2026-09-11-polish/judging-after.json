@@ -1,0 +1,35 @@
+{
+  "phase": "polish-88062cb-after-recovery",
+  "problem_id": 11,
+  "results": [
+    {
+      "case": "cpp-ac",
+      "submission_id": 31,
+      "status": "Judged",
+      "verdict": "Accepted",
+      "expected": "Accepted",
+      "seconds": 1.073,
+      "pass": true
+    },
+    {
+      "case": "python-ac",
+      "submission_id": 32,
+      "status": "Judged",
+      "verdict": "Accepted",
+      "expected": "Accepted",
+      "seconds": 1.068,
+      "pass": true
+    },
+    {
+      "case": "cpp-wa",
+      "submission_id": 33,
+      "status": "Judged",
+      "verdict": "WrongAnswer",
+      "expected": "WrongAnswer",
+      "seconds": 1.066,
+      "pass": true
+    }
+  ],
+  "pass": true,
+  "at": "2026-09-11T15:26:25.378534+00:00"
+}

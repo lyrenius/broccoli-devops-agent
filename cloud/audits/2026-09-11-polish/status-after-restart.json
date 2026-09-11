@@ -1,0 +1,78 @@
+{
+  "mode": "running",
+  "team_backend": "harness (gpt-5.6-luna via https://api.thuics.icu/v1)",
+  "dry_run": false,
+  "deployment": {
+    "id": "943fdb4a-ad3b-4537-89a3-aa970c3face3",
+    "name": "broccoli-cloud",
+    "topology_revision": "cloud-5nodes-1",
+    "operation_mode": "rehearsal"
+  },
+  "uptime_secs": 42,
+  "language": "en",
+  "snapshot_interval_secs": 0,
+  "recovery": {
+    "previous_mode": "running",
+    "pending_recovery_review": false,
+    "issue_ids": [],
+    "job_ids": [],
+    "action_run_ids": [],
+    "interrupted_job_ids": [],
+    "interrupted_action_ids": [],
+    "verified_action_ids": [],
+    "reconstructed_review_job_ids": [],
+    "final_mode": "dispatch_frozen"
+  },
+  "snapshot_review": {
+    "snapshot_id": "01a09110-1ba8-73f1-9ef7-27a6650bc098",
+    "status": "completed",
+    "summary": "Snapshot evidence shows all listed resources healthy, critical dependencies reachable, queue depth and DLQ unresolved count at zero, workers heartbeating with no in-flight tasks, no active alerts, and no coverage gaps. No actionable issue is supported.",
+    "candidate_count": 0,
+    "issue_ids": [],
+    "artifact_ids": [
+      "01a09110-1c3c-76f3-b03f-791c26f7c7e8",
+      "01a09110-2dc8-72a0-87bd-3377171c8efa"
+    ],
+    "error": null,
+    "updated_at": "2026-09-11T15:22:31.802422443Z"
+  },
+  "running": [],
+  "usage": {
+    "passes": 117,
+    "input_tokens": 1986627,
+    "cached_input_tokens": 78848,
+    "output_tokens": 56261,
+    "total_tokens": 2042888,
+    "requests": 365,
+    "requests_without_usage": 0,
+    "cost": null,
+    "currency": null,
+    "by_model": [
+      {
+        "model": "gpt-5.6-luna",
+        "passes": 117,
+        "input_tokens": 1986627,
+        "cached_input_tokens": 78848,
+        "output_tokens": 56261,
+        "cost": null
+      }
+    ],
+    "budget": null
+  },
+  "counts": {
+    "issues": 35,
+    "jobs": 89,
+    "actions": 42,
+    "events": 4651
+  },
+  "inbox": {
+    "waiting_issues": 0,
+    "blocked_actions": 0,
+    "queued_actions": 0,
+    "permission_requests": 0,
+    "permission_denied": 0,
+    "failed_jobs": 0,
+    "failed_actions": 0,
+    "total": 0
+  }
+}

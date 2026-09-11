@@ -1,0 +1,354 @@
+{
+  "issue": {
+    "issue_id": "01a0910e-cf8b-7eb0-9cf6-58f5df89190d",
+    "source": "human",
+    "source_event_id": "01a0910e-cf88-7863-9482-add3c5201b4e",
+    "deduplication_key": null,
+    "title": "[Polish acceptance] worker-1 missing heartbeat",
+    "description": "A controlled rehearsal stopped worker-1 after a healthy baseline. Diagnose the current state using the configured read-only inspections; recover worker-1 using its configured start runbook if the evidence confirms it is stopped. Verify the result with a fresh snapshot. Do not alter other resources. An independent 180-second recovery timer is armed.",
+    "priority": "human_top",
+    "status": "resolved",
+    "opened_snapshot_id": "01a0910e-ce9f-7fd2-8560-9b0ef3bd054d",
+    "current_snapshot_id": "01a0910e-ce9f-7fd2-8560-9b0ef3bd054d",
+    "affected_resource_ids": [],
+    "evidence_ids": [],
+    "development_workspace": null,
+    "created_at": "2026-09-11T15:21:02.091128960Z",
+    "updated_at": "2026-09-11T15:21:43.157446423Z"
+  },
+  "job": {
+    "job_id": "01a0910e-cfcb-7c53-863d-1ef017c9a825",
+    "issue_id": "01a0910e-cf8b-7eb0-9cf6-58f5df89190d",
+    "snapshot_view": {
+      "snapshot_id": "01a0910e-ce9f-7fd2-8560-9b0ef3bd054d",
+      "artifact_id": "01a0910e-cf91-7370-b2d3-915138d15413",
+      "redaction_profile": "operate-readonly-v1",
+      "content_sha256": "32d781d639dc391d72f7dac302b02e030a796e3e6a04ad8c621493c712b0c8bc"
+    },
+    "supersedes_job_id": null,
+    "team_kind": "operate",
+    "status": "completed",
+    "allowed_capabilities": [
+      "observe",
+      "operate.restart",
+      "operate.queue",
+      "operate.config",
+      "operate.firewall",
+      "operate.deploy",
+      "operate.database",
+      "operate.storage",
+      "operate.machine"
+    ],
+    "allowed_target_ids": [
+      "postgres-main",
+      "redis-mq",
+      "seaweedfs-storage",
+      "broccoli-server",
+      "web-frontend",
+      "worker-1",
+      "worker-2"
+    ],
+    "feedback": [],
+    "revises_job_id": null,
+    "continues_job_id": null,
+    "earlier_passes": [],
+    "follow_up_budget": 3,
+    "review": null,
+    "result": {
+      "outcome": "diagnosis_only",
+      "summary": "Diagnosis: worker-1 was stopped, confirmed by service.status as State=exited with ExitCode 143 and status Exited about 10 seconds ago. Its dependencies (Redis, PostgreSQL, and storage) and peer/application services are healthy. Recent logs show normal task completion before termination. Proposed the configured worker.start remediation for worker-1 with broccoli.worker verification; a fresh snapshot is needed to confirm recovery.",
+      "evidence_ids": [],
+      "artifact_ids": [
+        "01a0910f-2eff-7e01-afbd-ba6008855cfd"
+      ],
+      "requested_probes": [],
+      "options": [],
+      "proposed_actions": [
+        {
+          "runbook_id": "worker.start",
+          "target_ids": [
+            "worker-1"
+          ],
+          "arguments": [],
+          "reason": "service.status confirms worker-1 is stopped (State=exited, ExitCode=143, stopped 10 seconds ago). Its dependencies are healthy, and the report explicitly calls for recovery with the configured start runbook. No other resource will be changed.",
+          "expected_effect": "worker-1 starts and becomes ready, publishing a fresh heartbeat.",
+          "verification_probe_ids": [
+            "broccoli.worker"
+          ]
+        }
+      ],
+      "unresolved_questions": [
+        "Whether worker-1 start completed successfully and its heartbeat is fresh in the next snapshot."
+      ],
+      "follow_up_requested": true
+    },
+    "usage": {
+      "model": "gpt-5.6-luna",
+      "input_tokens": 31238,
+      "cached_input_tokens": 0,
+      "output_tokens": 545,
+      "requests": 5,
+      "requests_without_usage": 0
+    },
+    "created_at": "2026-09-11T15:21:02.155138140Z",
+    "started_at": "2026-09-11T15:21:02.155142803Z",
+    "completed_at": "2026-09-11T15:21:26.535850576Z"
+  },
+  "actions": [
+    {
+      "action_run_id": "01a0910f-2f64-7023-973a-956dc595d1a6",
+      "issue_id": "01a0910e-cf8b-7eb0-9cf6-58f5df89190d",
+      "originating_job_id": "01a0910e-cfcb-7c53-863d-1ef017c9a825",
+      "requested_by_team": "operate",
+      "executed_by": "agents-platform",
+      "runbook_id": "worker.start",
+      "target_ids": [
+        "worker-1"
+      ],
+      "arguments": [],
+      "reason": "service.status confirms worker-1 is stopped (State=exited, ExitCode=143, stopped 10 seconds ago). Its dependencies are healthy, and the report explicitly calls for recovery with the configured start runbook. No other resource will be changed.",
+      "expected_effect": "worker-1 starts and becomes ready, publishing a fresh heartbeat.",
+      "status": "succeeded",
+      "approval": "not_required",
+      "approved_by": null,
+      "denial": null,
+      "human_intervention": null,
+      "review": null,
+      "before_snapshot_id": "01a0910f-2f11-7880-9bfc-8f4938809b16",
+      "after_snapshot_id": "01a0910f-5153-7f81-ac8e-ba54be341238",
+      "idempotency_key": "d0d0d2f0cbf058cef4e3e818",
+      "platform_operation_id": "01a0910f-5143-76e0-b634-a31804c6dd61",
+      "execution_artifact_id": "01a0910f-513c-7b82-a49b-86602f43ddff",
+      "execution_summary": "executed 1 command(s) for `worker.start`: all exited 0",
+      "dry_run": false,
+      "verification_probe_ids": [
+        "broccoli.worker"
+      ],
+      "verification_summary": "expected effect observed: `worker-1` is Healthy (was not before the action)",
+      "verification_evidence": "strong",
+      "created_at": "2026-09-11T15:21:26.628816907Z",
+      "started_at": "2026-09-11T15:21:26.648479042Z",
+      "completed_at": "2026-09-11T15:21:35.395704186Z"
+    }
+  ],
+  "passes": [
+    {
+      "job": {
+        "job_id": "01a0910e-cfcb-7c53-863d-1ef017c9a825",
+        "issue_id": "01a0910e-cf8b-7eb0-9cf6-58f5df89190d",
+        "snapshot_view": {
+          "snapshot_id": "01a0910e-ce9f-7fd2-8560-9b0ef3bd054d",
+          "artifact_id": "01a0910e-cf91-7370-b2d3-915138d15413",
+          "redaction_profile": "operate-readonly-v1",
+          "content_sha256": "32d781d639dc391d72f7dac302b02e030a796e3e6a04ad8c621493c712b0c8bc"
+        },
+        "supersedes_job_id": null,
+        "team_kind": "operate",
+        "status": "completed",
+        "allowed_capabilities": [
+          "observe",
+          "operate.restart",
+          "operate.queue",
+          "operate.config",
+          "operate.firewall",
+          "operate.deploy",
+          "operate.database",
+          "operate.storage",
+          "operate.machine"
+        ],
+        "allowed_target_ids": [
+          "postgres-main",
+          "redis-mq",
+          "seaweedfs-storage",
+          "broccoli-server",
+          "web-frontend",
+          "worker-1",
+          "worker-2"
+        ],
+        "feedback": [],
+        "revises_job_id": null,
+        "continues_job_id": null,
+        "earlier_passes": [],
+        "follow_up_budget": 3,
+        "review": null,
+        "result": {
+          "outcome": "diagnosis_only",
+          "summary": "Diagnosis: worker-1 was stopped, confirmed by service.status as State=exited with ExitCode 143 and status Exited about 10 seconds ago. Its dependencies (Redis, PostgreSQL, and storage) and peer/application services are healthy. Recent logs show normal task completion before termination. Proposed the configured worker.start remediation for worker-1 with broccoli.worker verification; a fresh snapshot is needed to confirm recovery.",
+          "evidence_ids": [],
+          "artifact_ids": [
+            "01a0910f-2eff-7e01-afbd-ba6008855cfd"
+          ],
+          "requested_probes": [],
+          "options": [],
+          "proposed_actions": [
+            {
+              "runbook_id": "worker.start",
+              "target_ids": [
+                "worker-1"
+              ],
+              "arguments": [],
+              "reason": "service.status confirms worker-1 is stopped (State=exited, ExitCode=143, stopped 10 seconds ago). Its dependencies are healthy, and the report explicitly calls for recovery with the configured start runbook. No other resource will be changed.",
+              "expected_effect": "worker-1 starts and becomes ready, publishing a fresh heartbeat.",
+              "verification_probe_ids": [
+                "broccoli.worker"
+              ]
+            }
+          ],
+          "unresolved_questions": [
+            "Whether worker-1 start completed successfully and its heartbeat is fresh in the next snapshot."
+          ],
+          "follow_up_requested": true
+        },
+        "usage": {
+          "model": "gpt-5.6-luna",
+          "input_tokens": 31238,
+          "cached_input_tokens": 0,
+          "output_tokens": 545,
+          "requests": 5,
+          "requests_without_usage": 0
+        },
+        "created_at": "2026-09-11T15:21:02.155138140Z",
+        "started_at": "2026-09-11T15:21:02.155142803Z",
+        "completed_at": "2026-09-11T15:21:26.535850576Z"
+      },
+      "actions": [
+        {
+          "action_run_id": "01a0910f-2f64-7023-973a-956dc595d1a6",
+          "issue_id": "01a0910e-cf8b-7eb0-9cf6-58f5df89190d",
+          "originating_job_id": "01a0910e-cfcb-7c53-863d-1ef017c9a825",
+          "requested_by_team": "operate",
+          "executed_by": "agents-platform",
+          "runbook_id": "worker.start",
+          "target_ids": [
+            "worker-1"
+          ],
+          "arguments": [],
+          "reason": "service.status confirms worker-1 is stopped (State=exited, ExitCode=143, stopped 10 seconds ago). Its dependencies are healthy, and the report explicitly calls for recovery with the configured start runbook. No other resource will be changed.",
+          "expected_effect": "worker-1 starts and becomes ready, publishing a fresh heartbeat.",
+          "status": "succeeded",
+          "approval": "not_required",
+          "approved_by": null,
+          "denial": null,
+          "human_intervention": null,
+          "review": null,
+          "before_snapshot_id": "01a0910f-2f11-7880-9bfc-8f4938809b16",
+          "after_snapshot_id": "01a0910f-5153-7f81-ac8e-ba54be341238",
+          "idempotency_key": "d0d0d2f0cbf058cef4e3e818",
+          "platform_operation_id": "01a0910f-5143-76e0-b634-a31804c6dd61",
+          "execution_artifact_id": "01a0910f-513c-7b82-a49b-86602f43ddff",
+          "execution_summary": "executed 1 command(s) for `worker.start`: all exited 0",
+          "dry_run": false,
+          "verification_probe_ids": [
+            "broccoli.worker"
+          ],
+          "verification_summary": "expected effect observed: `worker-1` is Healthy (was not before the action)",
+          "verification_evidence": "strong",
+          "created_at": "2026-09-11T15:21:26.628816907Z",
+          "started_at": "2026-09-11T15:21:26.648479042Z",
+          "completed_at": "2026-09-11T15:21:35.395704186Z"
+        }
+      ],
+      "stop": "continued"
+    },
+    {
+      "job": {
+        "job_id": "01a0910f-51b6-7630-9ce2-8938404a99c8",
+        "issue_id": "01a0910e-cf8b-7eb0-9cf6-58f5df89190d",
+        "snapshot_view": {
+          "snapshot_id": "01a0910f-5153-7f81-ac8e-ba54be341238",
+          "artifact_id": "01a0910f-51b3-7130-a069-db4e4e12092b",
+          "redaction_profile": "operate-readonly-v1",
+          "content_sha256": "93052691833bb5e4d609f152a30da8db619627ccbf9fb3366bb67bcf727a2422"
+        },
+        "supersedes_job_id": null,
+        "team_kind": "operate",
+        "status": "completed",
+        "allowed_capabilities": [
+          "observe",
+          "operate.restart",
+          "operate.queue",
+          "operate.config",
+          "operate.firewall",
+          "operate.deploy",
+          "operate.database",
+          "operate.storage",
+          "operate.machine"
+        ],
+        "allowed_target_ids": [
+          "postgres-main",
+          "redis-mq",
+          "seaweedfs-storage",
+          "broccoli-server",
+          "web-frontend",
+          "worker-1",
+          "worker-2"
+        ],
+        "feedback": [],
+        "revises_job_id": null,
+        "continues_job_id": "01a0910e-cfcb-7c53-863d-1ef017c9a825",
+        "earlier_passes": [
+          {
+            "job_id": "01a0910e-cfcb-7c53-863d-1ef017c9a825",
+            "supersedes_job_id": null,
+            "revises_job_id": null,
+            "continues_job_id": null,
+            "outcome": "diagnosis_only",
+            "summary": "Diagnosis: worker-1 was stopped, confirmed by service.status as State=exited with ExitCode 143 and status Exited about 10 seconds ago. Its dependencies (Redis, PostgreSQL, and storage) and peer/application services are healthy. Recent logs show normal task completion before termination. Proposed the configured worker.start remediation for worker-1 with broccoli.worker verification; a fresh snapshot is needed to confirm recovery.",
+            "unresolved_questions": [
+              "Whether worker-1 start completed successfully and its heartbeat is fresh in the next snapshot."
+            ],
+            "requested_probes": [],
+            "actions": [
+              {
+                "action_run_id": "01a0910f-2f64-7023-973a-956dc595d1a6",
+                "runbook_id": "worker.start",
+                "target_ids": [
+                  "worker-1"
+                ],
+                "arguments": [],
+                "status": "succeeded",
+                "approval": "not_required",
+                "dry_run": false,
+                "denial_reason": null,
+                "human_intervention": null,
+                "execution_summary": "executed 1 command(s) for `worker.start`: all exited 0",
+                "verification_summary": "expected effect observed: `worker-1` is Healthy (was not before the action)",
+                "verification_evidence": "strong",
+                "evidence": "target worker-1: exit code 0; stderr tail:\n Container broccoli-worker-1  Starting\n Container broccoli-worker-1  Started; stdout tail:\nworker readiness confirmed"
+              }
+            ],
+            "created_at": "2026-09-11T15:21:02.155138140Z"
+          }
+        ],
+        "follow_up_budget": 2,
+        "review": null,
+        "result": {
+          "outcome": "solved",
+          "summary": "Solved. The prior inspection confirmed worker-1 was stopped (exited with code 143), while its dependencies and peer services were healthy. The configured worker.start action succeeded, and this fresh snapshot verifies worker-1 is Healthy with a heartbeat 2 seconds ago, zero in-flight tasks, and normal worker metadata. No other resources were altered; all other services remain healthy.",
+          "evidence_ids": [],
+          "artifact_ids": [
+            "01a0910f-6fe6-7d01-9fdc-64df52c52ab4"
+          ],
+          "requested_probes": [],
+          "options": [],
+          "proposed_actions": [],
+          "unresolved_questions": [],
+          "follow_up_requested": false
+        },
+        "usage": {
+          "model": "gpt-5.6-luna",
+          "input_tokens": 7552,
+          "cached_input_tokens": 0,
+          "output_tokens": 167,
+          "requests": 2,
+          "requests_without_usage": 0
+        },
+        "created_at": "2026-09-11T15:21:35.414529564Z",
+        "started_at": "2026-09-11T15:21:35.414530840Z",
+        "completed_at": "2026-09-11T15:21:43.150067422Z"
+      },
+      "actions": [],
+      "stop": "done"
+    }
+  ]
+}

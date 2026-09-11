@@ -1,0 +1,75 @@
+{
+  "request_error": "Remote end closed connection without response",
+  "closure": {
+    "issue_id": "01a09110-d09b-77f0-9e70-6feab5dbbb2f",
+    "source": "human",
+    "source_event_id": "01a09110-d099-7660-a5d4-73a7082d5b5c",
+    "deduplication_key": null,
+    "title": "[Polish acceptance] cancellation and isolation",
+    "description": "Read-only acceptance: inspect the current status and recent logs of both workers, then inspect redis.info and postgres.check. Do not propose or execute any operations. Explain the observations in detail.",
+    "priority": "human_top",
+    "status": "cancelled",
+    "opened_snapshot_id": "01a09110-cf5e-74d2-b680-62ad0872c91b",
+    "current_snapshot_id": "01a09110-cf5e-74d2-b680-62ad0872c91b",
+    "affected_resource_ids": [],
+    "evidence_ids": [],
+    "development_workspace": null,
+    "created_at": "2026-09-11T15:23:13.435788400Z",
+    "updated_at": "2026-09-11T15:24:46.408721040Z",
+    "closure": {
+      "outcome": "cancelled",
+      "closed_by": "polish-acceptance",
+      "comment": "Acceptance complete: explicit cancellation must stop further work.",
+      "closed_at": "2026-09-11T15:24:46.415620142Z"
+    }
+  },
+  "clear_seconds": 0.9676215409999713,
+  "running_after_close": [],
+  "jobs_after_close": [
+    {
+      "job_id": "01a09110-d0a4-7222-89dd-d534d5051d69",
+      "issue_id": "01a09110-d09b-77f0-9e70-6feab5dbbb2f",
+      "snapshot_view": {
+        "snapshot_id": "01a09110-cf5e-74d2-b680-62ad0872c91b",
+        "artifact_id": "01a09110-d0a1-72a1-bfd9-4daf06240666",
+        "redaction_profile": "operate-readonly-v1",
+        "content_sha256": "b789fb1f361bc14c1ec88af99a5514977aa8f870993129304dc5969ef07c49a7"
+      },
+      "supersedes_job_id": null,
+      "team_kind": "operate",
+      "status": "cancelled",
+      "allowed_capabilities": [
+        "observe",
+        "operate.restart",
+        "operate.queue",
+        "operate.config",
+        "operate.firewall",
+        "operate.deploy",
+        "operate.database",
+        "operate.storage",
+        "operate.machine"
+      ],
+      "allowed_target_ids": [
+        "postgres-main",
+        "redis-mq",
+        "seaweedfs-storage",
+        "broccoli-server",
+        "web-frontend",
+        "worker-1",
+        "worker-2"
+      ],
+      "feedback": [],
+      "revises_job_id": null,
+      "continues_job_id": null,
+      "earlier_passes": [],
+      "follow_up_budget": 3,
+      "review": null,
+      "result": null,
+      "usage": null,
+      "created_at": "2026-09-11T15:23:13.444478253Z",
+      "started_at": "2026-09-11T15:23:13.444479556Z",
+      "completed_at": "2026-09-11T15:23:44.281410250Z"
+    }
+  ],
+  "actions_after_close": []
+}

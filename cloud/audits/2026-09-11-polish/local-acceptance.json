@@ -1,0 +1,31 @@
+{
+  "settings_persisted_across_restart": true,
+  "import_succeeded": true,
+  "import_result": {
+    "issue_id": "01a08ff6-e794-71d2-ae83-fbda03068a18",
+    "title": "[Polish acceptance] export-import",
+    "source_deployment": "Local acceptance fixture",
+    "exported_at": "2026-09-11T10:15:18.210707Z",
+    "exported_by": "qa-polish",
+    "jobs": 1,
+    "action_runs": 0,
+    "snapshots": 1,
+    "artifacts": 1,
+    "events": 6
+  },
+  "archived_issue_id": "01a08ff6-e794-71d2-ae83-fbda03068a18",
+  "archive_excluded_from_inbox": true,
+  "archive_feedback_rejected": true,
+  "jobs_preserved": 1,
+  "artifacts_preserved": 1,
+  "ui_settings_save_and_refresh": true,
+  "ui_automatic_passes_after_refresh": 2,
+  "real_vps_session_ui_import": {
+    "success": true,
+    "jobs": 2,
+    "actions": 1,
+    "events": 55,
+    "artifacts": 7,
+    "read_only_archive": true
+  }
+}
