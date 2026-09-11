@@ -4,6 +4,7 @@ import { api, streamEvents } from "../api";
 import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
+import { ReportProgressScope, type ReportProgressRequest } from "../lib/report-progress";
 import type { EventRecord, RunningPass, UsageTotals } from "../types";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Kv, StatTile } from "./ui";
 
@@ -167,36 +168,28 @@ export function RunningCard({ running, onChanged }: { running: RunningPass[]; on
  * feed rather than inventing a second channel: each Team callback is one line, newest last. It
  * is the answer to "is it stuck, or is it working?" during a pass that takes minutes.
  */
-export function LiveProgress({ active }: { active: boolean }) {
+export function LiveProgress({ active, request }: { active: boolean; request: ReportProgressRequest | null }) {
   const [lines, setLines] = useState<EventRecord[]>([]);
   const [live, setLive] = useState(false);
+  const [target, setTarget] = useState<{ issueId: string; jobId?: string } | null>(null);
   const list = useRef<HTMLDivElement>(null);
   const { t, dateTime } = useT();
 
   useEffect(() => {
-    if (!active) return;
-    setLines([]);
-    let stop: (() => void) | null = null;
+    setLines([]); setTarget(null); setLive(false);
+    if (!active || !request) return;
     let cancelled = false;
-    // Start from the current tail so only this request's steps are shown.
-    api
-      .events(1)
-      .then((tail) => {
-        if (cancelled) return;
-        stop = streamEvents(tail.length ? tail[tail.length - 1].sequence : 0, (event) => {
-          if (event.kind === "team.callback" || event.kind === "model.usage") {
-            setLines((all) => [...all.slice(-99), event]);
-          }
-        });
-        setLive(true);
-      })
-      .catch(() => setLive(false));
-    return () => {
-      cancelled = true;
-      stop?.();
-      setLive(false);
-    };
-  }, [active]);
+    const scope = new ReportProgressScope(request.reportId);
+    const stop = streamEvents(request.after, (event) => {
+      if (cancelled) return;
+      if (scope.accept(event)) setLines((all) => [...all.slice(-99), event]);
+      if (scope.issueId) {
+        const issueId = scope.issueId, jobId = scope.jobId ?? undefined;
+        setTarget((current) => current?.issueId === issueId && current?.jobId === jobId ? current : { issueId, jobId });
+      }
+    }, (connected) => { if (!cancelled) setLive(connected); });
+    return () => { cancelled = true; stop(); };
+  }, [active, request]);
 
   useEffect(() => {
     const node = list.current;
@@ -210,8 +203,9 @@ export function LiveProgress({ active }: { active: boolean }) {
         <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{t("progress.title")}</span>
         <Badge variant={live ? "success" : "outline"}>
           <Radio className="h-3 w-3" />
-          {t("progress.live")}
+          {live ? t("progress.live") : t("events.disconnected")}
         </Badge>
+        {target && <a className="ml-auto text-xs text-primary hover:underline" href={traceHash(target.issueId, target.jobId)}>{t("records.trace")}</a>}
       </div>
       <div ref={list} className="max-h-48 overflow-y-auto rounded-md border bg-muted/30 p-2 font-mono text-xs">
         {lines.length === 0 && <p className="text-muted-foreground">{t("progress.waiting")}</p>}

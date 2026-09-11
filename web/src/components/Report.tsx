@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
+import type { ReportProgressRequest } from "../lib/report-progress";
 import type { ActionRun, Issue, Job, PassOutcome } from "../types";
 import { Page } from "./Shell";
 import { LiveProgress } from "./Spend";
@@ -32,6 +33,7 @@ export function Report({ onChanged }: { onChanged: () => void }) {
     try { sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch { /* Private browsing may disable storage. */ }
   }, [draft]);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<ReportProgressRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<{ issue: Issue; job: Job; actions: ActionRun[]; passes: PassOutcome[] } | null>(null);
   const { t, status: label, dateTime } = useT();
@@ -40,8 +42,14 @@ export function Report({ onChanged }: { onChanged: () => void }) {
     event.preventDefault();
     setBusy(true);
     setError(null);
+    setResult(null);
+    setProgress(null);
     try {
-      setResult(await api.report({ title, description, reporter, priority: priority || undefined }));
+      // Capture the cursor before sending: admission and first callbacks may beat the UI effect.
+      const tail = await api.events(1);
+      const reportId = crypto.randomUUID();
+      setProgress({ reportId, after: tail.at(-1)?.sequence ?? 0 });
+      setResult(await api.report({ title, description, reporter, priority: priority || undefined, report_id: reportId }));
       setDraft((current) => current.title === title && current.description === description && current.reporter === reporter && current.priority === priority ? { ...current, title: "", description: "", priority: "" } : current);
       onChanged();
     } catch (e) {
@@ -88,7 +96,7 @@ export function Report({ onChanged }: { onChanged: () => void }) {
                 </Button>
               </div>
               {/* A model-backed report blocks for minutes; the steps stream in while it runs. */}
-              <LiveProgress active={busy} />
+              <LiveProgress active={busy} request={progress} />
               {error && (
                 <Alert icon={AlertTriangle}>
                   <p>{error}</p>

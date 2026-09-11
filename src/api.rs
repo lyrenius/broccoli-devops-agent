@@ -406,6 +406,8 @@ struct ReportRequest {
     reporter: Option<String>,
     #[serde(default)]
     priority: Option<IssuePriority>,
+    /// Optional client-generated identity for correlating progress before the response returns.
+    report_id: Option<Uuid>,
 }
 
 async fn report(
@@ -424,6 +426,9 @@ async fn report(
         request.description,
     );
     report.priority = request.priority;
+    if let Some(id) = request.report_id {
+        report.report_id = id;
+    }
     let (issue, job) = state.runner.handle_report(report).await?;
     let passes = state.runner.drive_passes(job).await?;
     let issue = state.runner.store().get_issue(issue.issue_id).await?;

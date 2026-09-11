@@ -386,7 +386,22 @@ impl TopScheduler {
         report: HumanReport,
         snapshot_id: SnapshotId,
     ) -> AgentResult<Issue> {
+        let _intake = self.triage_lock.lock().await;
         self.store.get_snapshot(snapshot_id).await?;
+        let report_id = report.report_id.to_string();
+        if self.store.list_events().await?.iter().any(|event| {
+            event.kind == "human.issue_reported"
+                && event
+                    .payload
+                    .get("report_id")
+                    .and_then(|value| value.as_str())
+                    == Some(report_id.as_str())
+        }) {
+            return Err(AgentError::Duplicate {
+                entity: "HumanReport",
+                id: report_id,
+            });
+        }
 
         let report_payload = serde_json::to_value(&report)?;
         let report_event = self

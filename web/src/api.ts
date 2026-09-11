@@ -71,7 +71,7 @@ export const api = {
   /** Loads a session file as a read-only archive. */
   importSession: (bundle: SessionBundle, by: string) => post<ImportSummary>(`/api/sessions/import?by=${encodeURIComponent(by)}`, bundle),
   transition: (name: "freeze-dispatch" | "freeze-all" | "resume") => post<{ mode: string }>(`/api/scheduler/${name}`),
-  report: (body: { title: string; description: string; reporter: string; priority?: string }) =>
+  report: (body: { title: string; description: string; reporter: string; priority?: string; report_id?: string }) =>
     post<{ issue: Issue; job: Job; actions: ActionRun[]; passes: PassOutcome[] }>("/api/reports", body),
 };
 
