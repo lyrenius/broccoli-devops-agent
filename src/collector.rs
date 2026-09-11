@@ -20,7 +20,7 @@
 //! resource with no runnable probes is `Unknown` with an explicit coverage gap — the design
 //! treats "we cannot see it" as a first-class fact, never as healthy.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -430,22 +430,27 @@ impl TopologyCollector {
                     .worker_id
                     .clone()
                     .unwrap_or_else(|| resource_id.to_string());
-                let document = match self.broccoli_get(url, BROCCOLI_WORKERS_PATH, spec).await {
-                    Ok(document) => document,
-                    Err(error) => {
-                        return Ok(ProbeOutcome::new(
-                            &spec.probe,
-                            false,
-                            elapsed(),
-                            format!("workers API: {error}"),
-                        ));
-                    }
-                };
-                let Some(worker) = document["workers"].as_array().and_then(|workers| {
-                    workers
-                        .iter()
-                        .find(|worker| worker["id"].as_str() == Some(worker_id.as_str()))
-                }) else {
+                let document = self
+                    .broccoli_get(url, BROCCOLI_WORKERS_PATH, spec)
+                    .await
+                    .map_err(|error| format!("workers API unavailable: {error}"))?;
+                let workers = document["workers"].as_array().ok_or_else(|| {
+                    "workers API: response has no valid `workers` array".to_string()
+                })?;
+                let mut ids = HashSet::new();
+                if workers.iter().any(|worker| {
+                    worker["id"]
+                        .as_str()
+                        .is_none_or(|id| id.trim().is_empty() || !ids.insert(id))
+                }) {
+                    return Err(
+                        "workers API: worker IDs are missing, invalid or duplicated".to_string()
+                    );
+                }
+                let Some(worker) = workers
+                    .iter()
+                    .find(|worker| worker["id"].as_str() == Some(worker_id.as_str()))
+                else {
                     return Ok(ProbeOutcome::new(
                         &spec.probe,
                         false,
@@ -453,11 +458,21 @@ impl TopologyCollector {
                         format!("no heartbeat from `{worker_id}` in the last 15 s"),
                     ));
                 };
-                let stale = worker["stale"].as_bool().unwrap_or(true);
+                let stale = worker["stale"].as_bool().ok_or_else(|| {
+                    "workers API: heartbeat has no valid `stale` flag".to_string()
+                })?;
                 let age = worker["seconds_since_last_seen"]
                     .as_f64()
-                    .unwrap_or(f64::NAN);
-                let in_flight = worker["in_flight"].as_f64().unwrap_or(0.0);
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .ok_or_else(|| {
+                        "workers API: heartbeat age is missing or invalid".to_string()
+                    })?;
+                let in_flight = worker["in_flight"]
+                    .as_f64()
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .ok_or_else(|| {
+                        "workers API: in-flight count is missing or invalid".to_string()
+                    })?;
                 let text = |key: &str| worker[key].as_str().unwrap_or("?").to_string();
                 let mut outcome = ProbeOutcome::new(
                     &spec.probe,
@@ -501,18 +516,23 @@ impl TopologyCollector {
                 let queue = spec.queue.as_deref().ok_or_else(|| {
                     "broccoli.queue requires `queue = \"<queue name>\"`".to_string()
                 })?;
-                let document = match self.broccoli_get(url, BROCCOLI_OVERVIEW_PATH, spec).await {
-                    Ok(document) => document,
-                    Err(error) => {
-                        return Ok(ProbeOutcome::new(
-                            &spec.probe,
-                            false,
-                            elapsed(),
-                            format!("overview API: {error}"),
-                        ));
-                    }
-                };
-                let queues = document["queues"].as_array().cloned().unwrap_or_default();
+                let document = self
+                    .broccoli_get(url, BROCCOLI_OVERVIEW_PATH, spec)
+                    .await
+                    .map_err(|error| format!("queue data source unavailable: {error}"))?;
+                let queues = document["queues"].as_array().ok_or_else(|| {
+                    "overview API: response has no valid `queues` array".to_string()
+                })?;
+                let mut names = HashSet::new();
+                if queues.iter().any(|entry| {
+                    entry["name"]
+                        .as_str()
+                        .is_none_or(|name| name.trim().is_empty() || !names.insert(name))
+                }) {
+                    return Err(
+                        "overview API: queue names are missing, invalid or duplicated".to_string(),
+                    );
+                }
                 let Some(entry) = queues
                     .iter()
                     .find(|entry| entry["name"].as_str() == Some(queue))
@@ -521,17 +541,15 @@ impl TopologyCollector {
                         .iter()
                         .filter_map(|entry| entry["name"].as_str())
                         .collect();
-                    return Ok(ProbeOutcome::new(
-                        &spec.probe,
-                        false,
-                        elapsed(),
-                        format!(
-                            "queue `{queue}` is not in the overview (known: {})",
-                            known.join(", ")
-                        ),
+                    return Err(format!(
+                        "queue `{queue}` is not in the overview (known: {})",
+                        known.join(", ")
                     ));
                 };
-                let depth = entry["depth"].as_f64().unwrap_or(0.0);
+                let depth = entry["depth"]
+                    .as_f64()
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .ok_or_else(|| "overview API: queue depth is missing or invalid".to_string())?;
                 let breakdown = entry["breakdown"]
                     .as_object()
                     .map(|map| {
@@ -602,6 +620,10 @@ impl TopologyCollector {
             (ok, total) if ok == total => {
                 if outcomes.iter().any(|o| o.degraded) {
                     HealthState::Degraded
+                } else if !gaps.is_empty() {
+                    // A successful socket probe cannot certify the resource's missing
+                    // application-level observations (for example an inaccessible queue API).
+                    HealthState::Unknown
                 } else {
                     HealthState::Healthy
                 }

@@ -1216,12 +1216,14 @@ async fn broccoli_probes_read_heartbeats_and_queues() {
         .iter()
         .find(|r| r.resource_id == "worker-1")
         .unwrap();
-    assert_eq!(worker.health, HealthState::Down);
+    assert_eq!(worker.health, HealthState::Unknown);
     assert!(
-        worker
-            .facts
+        snapshot
+            .coverage_gaps
             .iter()
-            .any(|f| f.name == "probe.broccoli.worker" && f.value.contains(DEFAULT_LOGIN_ENV))
+            .any(|gap| gap.resource_id == "worker-1"
+                && gap.probe_id == "broccoli.worker"
+                && gap.reason.contains(DEFAULT_LOGIN_ENV))
     );
 
     let collector = TopologyCollector::new(topology.clone(), store)
