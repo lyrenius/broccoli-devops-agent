@@ -27,7 +27,7 @@ Operation modes are the ones already in the domain model:
 
 | # | Operation class | Runbook examples | rehearsal | contest_locked | post_contest |
 |---|---|---|---|---|---|
-| 1 | **Observe** (probes, log reads, status queries) | `tcp.connect`, `http.status`, `service.status`, `log.tail` | auto | auto | auto |
+| 1 | **Observe** (probes, log reads, status queries) | `tcp.connect`, `http.status`, `service.status`, `log.tail`, `redis.ping`, `redis.info`, `storage.check`, `infra.resources`, `app.health` | auto | auto | auto |
 | 2 | **Restart a judge worker** | `worker.restart` (graceful, drains current task) | auto | auto | auto |
 | 3 | **Scale judge workers** (start an idle configured worker) | `worker.start` | auto | approve | auto |
 | 4 | **Restart the API server** | `server.restart` (rolling if replicas > 1) | auto | approve | auto |
@@ -43,16 +43,30 @@ Operation modes are the ones already in the domain model:
 | 14 | **Deploy a plugin / WASM module** | `wasm.install` | approve | deny | approve |
 | 15 | **Deploy a release Bundle** | `bundle.install` | approve | deny | approve |
 | 16 | **Roll back to the previous Bundle / WASM** | `bundle.rollback`, `wasm.rollback` | auto | approve | auto |
-| 17 | **Database: read-only diagnostic query** | `db.query_readonly` (allowlisted statements) | auto | auto | auto |
+| 17 | **Database: read-only diagnostic query** | `db.query_readonly` (allowlisted statements), `postgres.check`, `postgres.locks` (fixed read-only queries) | auto | auto | auto |
 | 18 | **Database: maintenance** (VACUUM, REINDEX, ANALYZE) | `db.maintain` | auto | approve | auto |
 | 19 | **Database: schema migration** | `db.migrate` | approve | deny | approve |
 | 20 | **Database: any write to contest data** | — | deny | deny | approve |
 | 21 | **Redis: flush or delete keys** | `redis.flush`, `redis.del` | approve | deny | approve |
 | 22 | **Storage (CephFS/object store): delete or overwrite objects** | `storage.delete` | approve | deny | approve |
-| 23 | **Storage: remount / restart storage daemon** | `storage.remount`, `ceph.restart_daemon` | approve | approve | approve |
+| 23 | **Storage: remount / start / restart storage daemon** | `storage.remount`, `ceph.restart_daemon`, `storage.start`, `storage.restart` | approve | approve | approve |
 | 24 | **Reboot a machine** | `machine.reboot` | approve | approve | approve |
 | 25 | **Free-form shell command** | — | deny | deny | deny |
 | 26 | **Change the operation mode itself** | `mode.set` | human-only | human-only | human-only |
+| 27 | **Start or gracefully restart Redis with its configured persistence** | `redis.start`, `redis.restart` | auto | approve | auto |
+| 28 | **Start or gracefully restart PostgreSQL with its configured data** | `postgres.start`, `postgres.restart` | auto | approve | auto |
+
+Row 27 was added for the 2026-09-09 recovery demo. It targets Redis resources only,
+uses the restart capability, and is a mutating operation requiring after-Snapshot
+verification. It does not authorize flushing queues, deleting keys, or changing
+Redis persistence settings. `redis.ping` authenticates and checks command response;
+it can report a timeout even while TCP connectivity succeeds.
+
+The expanded diagnostics bind to their resource kinds as well as the Job scope:
+Redis diagnostics target Redis, PostgreSQL queries target PostgreSQL, storage checks
+target object storage, `infra.resources` targets the infrastructure resources, and
+`app.health` targets the server or frontend. Fixed operational runbooks reject custom
+query/path/endpoint arguments. The Platform independently repeats the same checks.
 
 ## Rules that apply on top of the matrix
 

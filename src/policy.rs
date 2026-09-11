@@ -50,7 +50,7 @@ impl Authority {
     }
 }
 
-/// The 26 operation classes of the authority matrix.
+/// Operation classes of the authority matrix. Existing row numbers stay stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationClass {
@@ -106,6 +106,10 @@ pub enum OperationClass {
     Shell,
     /// Row 26: change the operation mode itself.
     ModeChange,
+    /// Row 27: graceful restart of Redis, preserving its configured persistence.
+    RedisRestart,
+    /// Row 28: start or gracefully restart the configured PostgreSQL service.
+    PostgresRestart,
 }
 
 impl OperationClass {
@@ -138,6 +142,8 @@ impl OperationClass {
             Self::MachineReboot => 24,
             Self::Shell => 25,
             Self::ModeChange => 26,
+            Self::RedisRestart => 27,
+            Self::PostgresRestart => 28,
         }
     }
 
@@ -162,7 +168,9 @@ impl OperationClass {
             Self::ServerRestart => Some(&[BroccoliServer]),
             Self::FrontendRestart => Some(&[Frontend, Gateway]),
             Self::StationRestart => Some(&[PrinterStation, BalloonStation, Printer]),
-            Self::DlqRequeue | Self::QueuePurge | Self::RedisDestructive => Some(&[Redis]),
+            Self::DlqRequeue | Self::QueuePurge | Self::RedisDestructive | Self::RedisRestart => {
+                Some(&[Redis])
+            }
             Self::ConfigTunable | Self::ConfigContest | Self::ConfigSecurity => Some(&[
                 BroccoliServer,
                 Worker,
@@ -174,9 +182,11 @@ impl OperationClass {
             Self::WasmDeploy | Self::BundleDeploy | Self::Rollback => {
                 Some(&[BroccoliServer, Frontend, Worker])
             }
-            Self::DbReadonly | Self::DbMaintain | Self::DbMigrate | Self::DbWrite => {
-                Some(&[PostgreSql])
-            }
+            Self::DbReadonly
+            | Self::DbMaintain
+            | Self::DbMigrate
+            | Self::DbWrite
+            | Self::PostgresRestart => Some(&[PostgreSql]),
             Self::StorageDestructive | Self::StorageDaemon => Some(&[ObjectStorage]),
         }
     }
@@ -192,12 +202,17 @@ impl OperationClass {
             | Self::WorkerStart
             | Self::ServerRestart
             | Self::FrontendRestart
+            | Self::RedisRestart
             | Self::StationRestart => CAP_RESTART,
             Self::DlqRequeue | Self::QueuePurge | Self::RedisDestructive => CAP_QUEUE,
             Self::ConfigTunable | Self::ConfigContest | Self::ConfigSecurity => CAP_CONFIG,
             Self::FirewallAllowKnown | Self::FirewallDeny => CAP_FIREWALL,
             Self::WasmDeploy | Self::BundleDeploy | Self::Rollback => CAP_DEPLOY,
-            Self::DbReadonly | Self::DbMaintain | Self::DbMigrate | Self::DbWrite => CAP_DATABASE,
+            Self::DbReadonly
+            | Self::DbMaintain
+            | Self::DbMigrate
+            | Self::DbWrite
+            | Self::PostgresRestart => CAP_DATABASE,
             Self::StorageDestructive | Self::StorageDaemon => CAP_STORAGE,
             Self::MachineReboot => CAP_MACHINE,
             Self::Shell => CAP_SHELL,
@@ -221,6 +236,10 @@ impl OperationClass {
             (Self::WorkerStart, _) => Auto,
             (Self::ServerRestart, ContestLocked) => Approve,
             (Self::ServerRestart, _) => Auto,
+            (Self::RedisRestart, ContestLocked) => Approve,
+            (Self::RedisRestart, _) => Auto,
+            (Self::PostgresRestart, ContestLocked) => Approve,
+            (Self::PostgresRestart, _) => Auto,
             (Self::FrontendRestart, ContestLocked) => Approve,
             (Self::FrontendRestart, _) => Auto,
             (Self::StationRestart, _) => Auto,
@@ -322,6 +341,19 @@ pub struct ClassificationLists {
 const FIXED_RUNBOOKS: &[(&str, OperationClass)] = &[
     ("service.status", OperationClass::Observe),
     ("log.tail", OperationClass::Observe),
+    ("redis.ping", OperationClass::Observe),
+    ("redis.restart", OperationClass::RedisRestart),
+    ("redis.start", OperationClass::RedisRestart),
+    ("redis.info", OperationClass::Observe),
+    ("postgres.check", OperationClass::DbReadonly),
+    ("postgres.locks", OperationClass::DbReadonly),
+    ("postgres.start", OperationClass::PostgresRestart),
+    ("postgres.restart", OperationClass::PostgresRestart),
+    ("storage.check", OperationClass::Observe),
+    ("storage.start", OperationClass::StorageDaemon),
+    ("storage.restart", OperationClass::StorageDaemon),
+    ("infra.resources", OperationClass::Observe),
+    ("app.health", OperationClass::Observe),
     ("worker.restart", OperationClass::WorkerRestart),
     ("worker.start", OperationClass::WorkerStart),
     ("server.restart", OperationClass::ServerRestart),
@@ -356,6 +388,56 @@ pub struct RunbookRegistry {
 }
 
 impl RunbookRegistry {
+    /// Resource bindings for diagnostics whose class alone is intentionally broad.
+    pub fn target_kinds(
+        runbook_id: &str,
+        class: OperationClass,
+    ) -> Option<&'static [ResourceKind]> {
+        use ResourceKind::*;
+        match runbook_id {
+            "redis.ping" | "redis.info" => Some(&[Redis]),
+            "storage.check" => Some(&[ObjectStorage]),
+            "infra.resources" => Some(&[PostgreSql, Redis, ObjectStorage]),
+            "app.health" => Some(&[BroccoliServer, Frontend]),
+            _ => class.target_kinds(),
+        }
+    }
+
+    /// Operator-facing semantics used in the model's configured runbook catalog.
+    pub fn description(id: &str) -> &'static str {
+        match id {
+            "redis.ping" => "Redis TCP, authentication and PING response; Redis targets only",
+            "redis.info" => {
+                "Redis memory, persistence, replication and client counters; no key contents"
+            }
+            "redis.start" => "Start a stopped Redis service with its existing data/configuration",
+            "redis.restart" => "Gracefully restart Redis with its existing AOF persistence",
+            "postgres.check" => "Fixed read-only SQL health and connection/transaction counts",
+            "postgres.locks" => {
+                "Fixed read-only query listing blocked PIDs and blocker PIDs, no SQL text"
+            }
+            "postgres.start" => {
+                "Start a stopped PostgreSQL service and wait for authenticated SQL readiness"
+            }
+            "postgres.restart" => "Gracefully restart PostgreSQL with its existing persistent data",
+            "storage.check" => {
+                "Check SeaweedFS master and S3 gateway response; does not prove object read/write"
+            }
+            "storage.start" => "Start the configured object-storage service and wait for endpoints",
+            "storage.restart" => "Restart the configured object-storage service; approval required",
+            "infra.resources" => {
+                "Infrastructure-host CPU load, memory and disk space; Redis/PostgreSQL/storage targets only"
+            }
+            "app.health" => {
+                "Actual backend /healthz body or frontend HTTP status, including DB/MQ dependency status"
+            }
+            "worker.start" => "Start a stopped worker and wait for container readiness",
+            "worker.restart" => "Restart an unhealthy worker and wait for container readiness",
+            "service.status" => "Actual configured container status",
+            "log.tail" => "Recent redacted service logs",
+            _ => "Configured operator runbook",
+        }
+    }
     /// Builds the registry over the operator's classification lists.
     pub fn new(lists: ClassificationLists) -> Self {
         Self {
@@ -387,6 +469,27 @@ impl RunbookRegistry {
 
     /// Checks required arguments are present, non-empty, and free of shell metacharacters.
     pub fn validate_arguments(runbook_id: &str, arguments: &[NamedValue]) -> Result<(), String> {
+        if matches!(
+            runbook_id,
+            "redis.info"
+                | "redis.ping"
+                | "redis.restart"
+                | "redis.start"
+                | "postgres.check"
+                | "postgres.locks"
+                | "postgres.start"
+                | "postgres.restart"
+                | "storage.check"
+                | "storage.start"
+                | "storage.restart"
+                | "infra.resources"
+                | "app.health"
+        ) && !arguments.is_empty()
+        {
+            return Err(format!(
+                "runbook `{runbook_id}` accepts no custom arguments; its query, path and endpoint are fixed"
+            ));
+        }
         for required in Self::required_arguments(runbook_id) {
             let present = arguments
                 .iter()
@@ -624,7 +727,7 @@ impl AuthorityPolicy {
                     format!("目标 `{target}` 不在资源目录中")
                 )));
             };
-            if let Some(kinds) = class.target_kinds()
+            if let Some(kinds) = RunbookRegistry::target_kinds(runbook_id, class)
                 && !kinds.contains(kind)
             {
                 return Err(fail(tr!(

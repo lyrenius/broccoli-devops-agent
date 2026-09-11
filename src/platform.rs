@@ -362,7 +362,7 @@ impl LocalCommandPlatform {
                 json!({ "refused": "mutating runbook as inspection", "runbook_id": runbook_id }),
             ));
         }
-        if let Some(kinds) = class.target_kinds() {
+        if let Some(kinds) = RunbookRegistry::target_kinds(runbook_id, class) {
             for target in target_ids {
                 let kind = self.resources[target];
                 if !kinds.contains(&kind) {
