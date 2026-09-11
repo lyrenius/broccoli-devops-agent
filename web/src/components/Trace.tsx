@@ -5,6 +5,7 @@ import { useT } from "../i18n";
 import { cn } from "../lib/cn";
 import { loadOperator } from "../lib/prefs";
 import { recordsReturnHash, traceHash } from "../lib/routes";
+import { mergeEvents, mergeSteps } from "../lib/trace-stream";
 import type { ActionRun, EventRecord, Job, SessionBundle, TraceStep, Transcript, TranscriptEntry, TurnRecord } from "../types";
 import { Page } from "./Shell";
 import { JobTimes } from "./JobTimes";
@@ -315,63 +316,64 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
   const [liveEvents, setLiveEvents] = useState<EventRecord[]>([]);
   const [connected, setConnected] = useState(false);
   const reload = useRef<number | null>(null);
+  const loading = useRef(false);
 
   const load = useCallback(async () => {
+    if (loading.current) return;
+    loading.current = true;
     try {
-      setBundle(await api.session(issueId));
+      setBundle(await api.session(issueId, AbortSignal.timeout(15_000)));
       setError(null);
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      loading.current = false;
     }
   }, [issueId]);
 
-  // Load once, then follow the event stream: forwarded transcript entries feed the live
-  // transcript directly; anything else means a record changed, so the session is re-read.
+  useEffect(() => { void load(); }, [load]);
+  const hasBundle = bundle !== null;
+  const latestSequence = useRef(0);
+  if (bundle) latestSequence.current = bundle.events.reduce((latest, event) => Math.max(latest, event.sequence), latestSequence.current);
+
+  // Open the stream after the initial fetch, including when that fetch succeeded on a retry.
   useEffect(() => {
-    let stop: (() => void) | null = null;
+    if (!hasBundle) return;
     let cancelled = false;
-    api
-      .session(issueId)
-      .then((initial) => {
-        if (cancelled) return;
-        setBundle(initial);
-        const after = initial.events.length ? initial.events[initial.events.length - 1].sequence : 0;
-        stop = streamEvents(after, (event) => {
-          if (event.issue_id !== issueId) return;
-          if (event.kind === "team.step" && event.job_id) {
-            const step = (event.payload as { step?: TraceStep } | undefined)?.step;
-            if (step) setSteps((all) => ({ ...all, [event.job_id!]: [...(all[event.job_id!] ?? []), step] }));
-            return;
-          }
-          setLiveEvents((all) => [...all, event]);
-          if (reload.current) window.clearTimeout(reload.current);
-          reload.current = window.setTimeout(() => void load(), 400);
-        });
-        setConnected(true);
-      })
-      .catch((e: Error) => setError(e.message));
+    const stop = streamEvents(latestSequence.current, (event) => {
+      if (cancelled || event.issue_id !== issueId) return;
+      latestSequence.current = Math.max(latestSequence.current, event.sequence);
+      if (event.kind === "team.step" && event.job_id) {
+        const step = (event.payload as { step?: TraceStep } | undefined)?.step;
+        if (step) setSteps((all) => ({ ...all, [event.job_id!]: mergeSteps(all[event.job_id!] ?? [], [step]) }));
+        return;
+      }
+      setLiveEvents((all) => mergeEvents(all, [event]));
+      if (reload.current) window.clearTimeout(reload.current);
+      reload.current = window.setTimeout(() => void load(), 400);
+    }, (connected) => {
+      if (cancelled) return;
+      setConnected(connected);
+      if (connected) void load(); // Catch work completed during the disconnection.
+    });
     return () => {
-      cancelled = true;
-      stop?.();
+      cancelled = true; stop();
       if (reload.current) window.clearTimeout(reload.current);
     };
-  }, [issueId, load]);
+  }, [issueId, hasBundle, load]);
 
   const jobs = useMemo(() => (bundle ? [...bundle.jobs].sort((a, b) => a.created_at.localeCompare(b.created_at)) : []), [bundle]);
   const hasLive = jobs.some((job) => LIVE_JOB.has(job.status));
 
   // Without a stream, a running pass still refreshes with the console's own tick.
   useEffect(() => {
-    if (hasLive && !connected) void load();
-  }, [tick, hasLive, connected, load]);
+    if (!connected) void load();
+  }, [tick, connected, load]);
 
   // The URL is the source of truth. Never substitute a different Job for an explicit ID.
   const selected = useMemo(() => jobId ? jobs.find((job) => job.job_id === jobId) : jobs[jobs.length - 1], [jobs, jobId]);
   const artifacts = useMemo(() => new Map((bundle?.artifacts ?? []).map((a) => [a.artifact.artifact_id, a])), [bundle]);
-  const events = useMemo(() => {
-    const seen = new Set<number>();
-    return [...(bundle?.events ?? []), ...liveEvents].filter((e) => e.kind !== "team.step" && !seen.has(e.sequence) && seen.add(e.sequence));
-  }, [bundle, liveEvents]);
+  const events = useMemo(() => mergeEvents(bundle?.events ?? [], liveEvents).filter((event) => event.kind !== "team.step"), [bundle, liveEvents]);
 
   // The pass's transcript: a model-backed pass stores one as a DiagnosticBundle; a deterministic
   // pass has none, and a bundle whose body is missing or not JSON is "gone".
@@ -430,7 +432,7 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
             {hasLive && (
               <Badge variant={connected ? "success" : "outline"}>
                 <Radio className="h-3 w-3" />
-                {t("trace.live")}
+                {connected ? t("trace.live") : t("events.disconnected")}
               </Badge>
             )}
           </div>
@@ -566,9 +568,9 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
                 {t("trace.transcript")}
                 <span className="font-mono text-xs font-normal text-muted-foreground">{t("records.job", { id: short(selected.job_id) })}</span>
                 {LIVE_JOB.has(selected.status) ? (
-                  <Badge variant="success">
+                  <Badge variant={connected ? "success" : "outline"}>
                     <Radio className="h-3 w-3" />
-                    {t("trace.live")}
+                    {connected ? t("trace.live") : t("events.disconnected")}
                   </Badge>
                 ) : (
                   <Badge variant="outline">{t("trace.ended")}</Badge>

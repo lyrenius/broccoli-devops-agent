@@ -57,7 +57,7 @@ export const api = {
     return request<EventRecord[]>(`/api/events?${query}`);
   },
   /** The Issue with its whole pass chain — passes, actions, Snapshots, transcripts, events. */
-  session: (issueId: string) => request<SessionBundle>(`/api/issues/${issueId}/session`),
+  session: (issueId: string, signal?: AbortSignal) => request<SessionBundle>(`/api/issues/${issueId}/session`, { signal }),
   /** The same document as a file download, with the operator recorded as the exporter. */
   sessionDownloadUrl: (issueId: string, by: string) => `/api/issues/${issueId}/session?download=true&by=${encodeURIComponent(by)}`,
   /** The effective config, where it lives, and which keys may change now. */
@@ -77,11 +77,39 @@ export const api = {
 
 /** Subscribes to the live event stream after the given sequence. */
 export function streamEvents(after: number, onEvent: (event: EventRecord) => void, onConnection?: (connected: boolean) => void): () => void {
-  const source = new EventSource(`/api/events/stream?after=${after}`);
-  source.addEventListener("open", () => onConnection?.(true));
-  source.addEventListener("error", () => onConnection?.(false));
-  source.addEventListener("log", (message) => {
-    onEvent(JSON.parse((message as MessageEvent<string>).data) as EventRecord);
-  });
-  return () => source.close();
+  let closed = false;
+  let cursor = after;
+  let failures = 0;
+  let source: EventSource;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  const connect = () => {
+    if (closed) return;
+    const current = new EventSource(`/api/events/stream?after=${cursor}`);
+    source = current;
+    current.addEventListener("open", () => {
+      if (closed || source !== current) return;
+      failures = 0;
+      onConnection?.(true);
+    });
+    current.addEventListener("error", () => {
+      if (closed || source !== current) return;
+      onConnection?.(false);
+      // Some HTTP failures close EventSource permanently rather than scheduling native retry.
+      if (current.readyState === EventSource.CLOSED && retry === undefined) {
+        retry = setTimeout(() => { retry = undefined; connect(); }, Math.min(1000 * 2 ** failures++, 10_000));
+      }
+    });
+    current.addEventListener("log", (message) => {
+      if (closed || source !== current) return;
+      const event = JSON.parse((message as MessageEvent<string>).data) as EventRecord;
+      cursor = Math.max(cursor, event.sequence);
+      onEvent(event);
+    });
+  };
+  connect();
+  return () => {
+    closed = true;
+    if (retry !== undefined) clearTimeout(retry);
+    source.close();
+  };
 }
