@@ -161,13 +161,39 @@ async fn closing_one_issue_does_not_cancel_another_issue() {
             .await
     });
     entered(&model, 1).await;
-    let first_id = runner.running_passes().await[0].issue_id;
+    let first_progress = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let pass = runner.running_passes().await[0].clone();
+            if pass
+                .last_progress
+                .as_ref()
+                .is_some_and(|text| !text.is_empty())
+            {
+                break pass;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(first_progress.last_progress_at.unwrap() >= first_progress.started_at);
+    let first_id = first_progress.issue_id;
     let two = runner.clone();
     let second = tokio::spawn(async move {
         two.handle_report(HumanReport::new("op", "two", "two"))
             .await
     });
     entered(&model, 2).await;
+    let passes = runner.running_passes().await;
+    let unchanged = passes
+        .iter()
+        .find(|pass| pass.issue_id == first_id)
+        .unwrap();
+    assert_eq!(
+        unchanged.last_progress_at, first_progress.last_progress_at,
+        "another Job's callbacks must not update this Job"
+    );
+    assert_eq!(unchanged.last_progress, first_progress.last_progress);
     runner
         .close_issue(first_id, IssueClosure::Resolved, "op", None)
         .await

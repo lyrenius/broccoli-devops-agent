@@ -32,6 +32,8 @@ export interface RunningPass {
   job_id: string;
   issue_id: string;
   started_at: string;
+  last_progress_at?: string | null;
+  last_progress?: string | null;
 }
 
 /** How the totals stand against the configured spend ceiling. */

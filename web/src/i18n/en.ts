@@ -65,6 +65,9 @@ export const en = {
   "usage.gap": "{count} request(s) reported no usage, so the real figures are higher than these.",
   "usage.budget": "Budget: {percent}% used",
   "usage.budgetExceeded": "The spend ceiling is reached, so dispatch is frozen. Raise [budget] in the agent config, then resume.",
+  "running.elapsed": "Elapsed: {seconds}s",
+  "running.lastProgress": "Last progress: {age}",
+  "running.quiet": "No new progress for over two minutes. Inspect the trace or interrupt if this wait is unexpected.",
   "running.title": "Running now",
   "running.desc": "Passes in flight. Interrupting one stops it at its next step; its transcript is kept and the Job lands in the Failed inbox.",
   "running.none": "Nothing is running.",
@@ -409,7 +412,7 @@ export const en = {
   "btn.filing": "Running the Operate Team…",
   "outcome.title": "Outcome",
   "outcome.desc.done": "The Team's diagnosis and what happened to its proposals.",
-  "outcome.desc.pending": "The diagnosis appears here. A model-backed run takes up to a minute.",
+  "outcome.desc.pending": "The diagnosis appears here. Duration depends on model requests, retries and tools; follow the progress below.",
   "outcome.noResult": "no result",
 } as const;
 

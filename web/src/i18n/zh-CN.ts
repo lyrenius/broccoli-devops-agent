@@ -67,6 +67,9 @@ export const zhCN: Record<Key, string> = {
   "usage.gap": "有 {count} 次请求未报告用量，因此实际数字高于此处所示。",
   "usage.budget": "预算：已用 {percent}%",
   "usage.budgetExceeded": "已达花费上限，调度已冻结。请调高配置中的 [budget]，然后恢复调度。",
+  "running.elapsed": "已运行：{seconds} 秒",
+  "running.lastProgress": "最后进展：{age}",
+  "running.quiet": "超过两分钟没有新进展。可查看追踪；若等待不符合预期，可中断调查。",
   "running.title": "正在运行",
   "running.desc": "正在进行的任务轮次。中断会让它在下一个步骤边界停止；记录会保留，任务将进入失败收件箱。",
   "running.none": "当前没有正在运行的任务。",
@@ -411,7 +414,7 @@ export const zhCN: Record<Key, string> = {
   "btn.filing": "正在运行运维团队…",
   "outcome.title": "结果",
   "outcome.desc.done": "团队的诊断，以及其提议的处理结果。",
-  "outcome.desc.pending": "诊断结果会显示在这里。模型驱动的一次运行最多约一分钟。",
+  "outcome.desc.pending": "诊断结果会显示在这里。耗时取决于模型请求、重试和工具执行，请查看下方进度。",
   "outcome.noResult": "无结果",
 };
 

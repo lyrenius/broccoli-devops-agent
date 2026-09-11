@@ -69,6 +69,7 @@ use crate::view::{FileArtifactStore, PROFILE_OPERATE_READONLY, RedactingViewBuil
 struct SchedulerSink {
     scheduler: Arc<TopScheduler>,
     watchers: broadcast::Sender<TeamCallback>,
+    running: Arc<Mutex<HashMap<JobId, RunningJob>>>,
 }
 
 #[async_trait]
@@ -77,7 +78,17 @@ impl TeamCallbackSink for SchedulerSink {
     async fn deliver(&self, callback: TeamCallback) -> AgentResult<()> {
         // Nobody watching is the normal case, and never a reason to fail a callback.
         let _ = self.watchers.send(callback.clone());
-        self.scheduler.handle_callback(callback).await.map(|_| ())
+        self.scheduler.handle_callback(callback.clone()).await?;
+        if callback.step.is_none()
+            && let Some(running) = self.running.lock().await.get_mut(&callback.job_id)
+            && running
+                .last_progress_at
+                .is_none_or(|at| callback.created_at >= at)
+        {
+            running.last_progress_at = Some(callback.created_at);
+            running.last_progress = Some(callback.summary);
+        }
+        Ok(())
     }
 }
 
@@ -86,6 +97,8 @@ struct RunningJob {
     issue_id: IssueId,
     cancel: Arc<CancelHandle>,
     started_at: DateTime<Utc>,
+    last_progress_at: Option<DateTime<Utc>>,
+    last_progress: Option<String>,
 }
 
 /// A dropped HTTP handler/future must not leave a live cancellation handle in the registry.
@@ -142,6 +155,12 @@ pub struct RunningPass {
     pub issue_id: IssueId,
     /// When the Team run started.
     pub started_at: DateTime<Utc>,
+    /// Most recent accepted human-readable Team progress callback.
+    #[serde(default)]
+    pub last_progress_at: Option<DateTime<Utc>>,
+    /// The actual waiting, tool or retry description, in the configured language.
+    #[serde(default)]
+    pub last_progress: Option<String>,
 }
 
 /// Inspection gateway that routes a running Team's read-only requests through the Scheduler.
@@ -573,6 +592,8 @@ impl SliceRunner {
                 job_id: *job_id,
                 issue_id: running.issue_id,
                 started_at: running.started_at,
+                last_progress_at: running.last_progress_at,
+                last_progress: running.last_progress.clone(),
             })
             .collect();
         passes.sort_by_key(|pass| pass.started_at);
@@ -1071,6 +1092,7 @@ impl SliceRunner {
         let sink = SchedulerSink {
             scheduler: self.scheduler.clone(),
             watchers: self.watchers.clone(),
+            running: self.running.clone(),
         };
         // The handle lives in the registry for as long as the run does, which is what makes an
         // interruption reachable: a console asks for the Job by ID and the Team stops at its next
@@ -1093,6 +1115,8 @@ impl SliceRunner {
                 issue_id: job.issue_id,
                 cancel: cancel_handle,
                 started_at: Utc::now(),
+                last_progress_at: None,
+                last_progress: None,
             },
         );
         // Register before rechecking, so a concurrent close either cancels the handle or
