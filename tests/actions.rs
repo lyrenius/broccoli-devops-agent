@@ -92,6 +92,105 @@ fn diagnosis(id: &str) -> broccoli_agent_harness::AssistantItem {
     call(id, "submit_diagnosis", json!({ "summary": "diagnosed" }))
 }
 
+#[tokio::test]
+async fn unsupported_target_verification_is_rejected_before_an_action_is_queued() {
+    let worker = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let proposal = |id: &str, probe: &str| {
+        call(
+            id,
+            "propose_action",
+            json!({
+                "runbook_id": "worker.restart", "target_ids": ["worker-1"],
+                "reason": "diagnose worker", "expected_effect": "worker healthy",
+                "verification_probe_ids": [probe],
+            }),
+        )
+    };
+    let client = ScriptedModelClient::new(vec![
+        vec![call("read", "read_snapshot_view", json!({}))],
+        vec![proposal("wrong", "broccoli.queue")],
+        vec![proposal("corrected", "tcp.connect")],
+        vec![diagnosis("done")],
+    ]);
+    let runner = SliceRunner::wire(
+        topology(
+            OperationMode::Rehearsal,
+            worker.local_addr().unwrap().port(),
+            closed_port(),
+        ),
+        dir.path(),
+        TeamBackend::Harness {
+            client: std::sync::Arc::new(client),
+            budget: Default::default(),
+            model: "scripted-model".into(),
+            label: "scripted".into(),
+        },
+        platform_config(),
+    )
+    .unwrap();
+    let (_, job) = runner
+        .handle_report(HumanReport::new("op", "Worker incident", "check worker"))
+        .await
+        .unwrap();
+    let proposals = &job.result.as_ref().unwrap().proposed_actions;
+    assert_eq!(
+        proposals.len(),
+        1,
+        "the invalid first proposal must never reach execution"
+    );
+    assert_eq!(proposals[0].verification_probe_ids, vec!["tcp.connect"]);
+    assert_eq!(runner.run_proposals(&job).await.unwrap().len(), 1);
+}
+
+/// A probe valid on the first target cannot be used to verify an unobserved second target.
+#[tokio::test]
+async fn verification_probes_must_cover_all_targets_and_can_be_omitted() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut topo = topology(
+        OperationMode::Rehearsal,
+        listener.local_addr().unwrap().port(),
+        closed_port(),
+    );
+    topo.resources[1].probes.clear();
+    let proposal = json!({"runbook_id":"service.status", "target_ids":["worker-1","redis-mq"], "reason":"inspect both", "expected_effect":"observation"});
+    let mut wrong = proposal.clone();
+    wrong["verification_probe_ids"] = json!(["tcp.connect"]);
+    let client = ScriptedModelClient::new(vec![
+        vec![call("read", "read_snapshot_view", json!({}))],
+        vec![call("wrong", "propose_action", wrong)],
+        vec![call("without-custom-probe", "propose_action", proposal)],
+        vec![diagnosis("done")],
+    ]);
+    let runner = SliceRunner::wire(
+        topo,
+        dir.path(),
+        TeamBackend::Harness {
+            client: std::sync::Arc::new(client),
+            budget: Default::default(),
+            model: "scripted".into(),
+            label: "scripted".into(),
+        },
+        platform_config(),
+    )
+    .unwrap();
+    let (_, job) = runner
+        .handle_report(HumanReport::new("op", "two targets", "inspect"))
+        .await
+        .unwrap();
+    let proposals = &job.result.as_ref().unwrap().proposed_actions;
+    assert_eq!(
+        proposals.len(),
+        1,
+        "a partial verification must not be queued"
+    );
+    assert!(
+        proposals[0].verification_probe_ids.is_empty(),
+        "default target verification remains available"
+    );
+}
+
 /// Auto rows execute and verify, approve rows wait, deny rows are cancelled — and a repeated
 /// automatic action escalates to approval.
 #[tokio::test]

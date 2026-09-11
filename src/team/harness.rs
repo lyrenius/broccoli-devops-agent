@@ -662,6 +662,8 @@ impl HarnessOperateTeam {
         {
             let state = state.clone();
             let runbook_ids = runbook_ids.clone();
+            let store = self.store.clone();
+            let snapshot_id = job.base_snapshot_id();
             registry
                 .register(
                     ToolSpec {
@@ -684,6 +686,7 @@ impl HarnessOperateTeam {
                                 "expected_effect": { "type": "string" },
                                 "verification_probe_ids": {
                                     "type": "array",
+                                    "description": "Optional. Every probe must be present as a probe.<id> fact on EVERY target in this Snapshot. A probe configured on Redis cannot verify a worker. Omit this field to use target health verification.",
                                     "items": { "type": "string", "enum": PROBE_REGISTRY },
                                 },
                             },
@@ -694,6 +697,7 @@ impl HarnessOperateTeam {
                     tool_fn(move |arguments| {
                         let state = state.clone();
                         let runbook_ids = runbook_ids.clone();
+                        let store = store.clone();
                         async move {
                             let runbook_id = arguments["runbook_id"]
                                 .as_str()
@@ -719,6 +723,32 @@ impl HarnessOperateTeam {
                                 return Err(format!(
                                     "verification probe `{unknown}` is not in the Probe Registry"
                                 ));
+                            }
+                            if !verification_probe_ids.is_empty() {
+                                let snapshot = store
+                                    .get_snapshot(snapshot_id)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                for target in &target_ids {
+                                    let resource = snapshot.resources.iter()
+                                        .find(|resource| &resource.resource_id == target)
+                                        .ok_or_else(|| format!("target `{target}` is absent from this Snapshot"))?;
+                                    let available: Vec<&str> = resource.facts.iter()
+                                        .filter_map(|fact| fact.name.strip_prefix("probe."))
+                                        .filter(|id| PROBE_REGISTRY.contains(id))
+                                        .collect();
+                                    if let Some(probe) = verification_probe_ids.iter()
+                                        .find(|probe| !available.contains(&probe.as_str()))
+                                    {
+                                        return Err(format!(
+                                            "verification probe `{probe}` is not available on `{target}`. \
+                                             Available probes on this target: {}. Choose only probes \
+                                             available on every target, or omit verification_probe_ids \
+                                             to verify target health. No action has been queued.",
+                                            available.join(", ")
+                                        ));
+                                    }
+                                }
                             }
                             let proposal = ActionProposal {
                                 runbook_id,
