@@ -84,8 +84,53 @@ impl TeamCallbackSink for SchedulerSink {
 /// A Team run in flight, and the handle that stops it.
 struct RunningJob {
     issue_id: IssueId,
-    cancel: CancelHandle,
+    cancel: Arc<CancelHandle>,
     started_at: DateTime<Utc>,
+}
+
+/// A dropped HTTP handler/future must not leave a live cancellation handle in the registry.
+struct RunningJobGuard {
+    job_id: JobId,
+    issue_id: IssueId,
+    cancel: Arc<CancelHandle>,
+    running: Arc<Mutex<HashMap<JobId, RunningJob>>>,
+    scheduler: Arc<TopScheduler>,
+    finished: bool,
+}
+
+impl RunningJobGuard {
+    async fn finish(&mut self) {
+        self.running.lock().await.remove(&self.job_id);
+        self.scheduler.unregister_job_cancellation(self.job_id);
+        self.finished = true;
+    }
+}
+
+impl Drop for RunningJobGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.cancel.cancel();
+        self.scheduler.unregister_job_cancellation(self.job_id);
+        let (running, scheduler, id, issue_id) = (
+            self.running.clone(),
+            self.scheduler.clone(),
+            self.job_id,
+            self.issue_id,
+        );
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                running.lock().await.remove(&id);
+                if let Err(error) = scheduler.cancel_job_record(id, "Team execution was abandoned before completion; its request or future was dropped").await {
+                    eprintln!("Failed to record cancellation of Job {id}: {error}");
+                }
+                if let Err(error) = scheduler.reconcile_issue(issue_id).await {
+                    eprintln!("Failed to reconcile Issue {issue_id} after Job cancellation: {error}");
+                }
+            });
+        }
+    }
 }
 
 /// A pass currently running, as the consoles list it.
@@ -308,7 +353,7 @@ pub struct SliceRunner {
     /// The periodic capture cadence, for the schedule task to follow changes.
     capture_interval: watch::Sender<Duration>,
     /// Team runs in flight, by Job, with the handle that stops each one.
-    running: Mutex<HashMap<JobId, RunningJob>>,
+    running: Arc<Mutex<HashMap<JobId, RunningJob>>>,
     /// Live Team callbacks, for a caller that wants to watch a pass it is blocked on.
     watchers: broadcast::Sender<TeamCallback>,
     /// Serializes review-plus-dispatch so two reviewers of one item cannot both dispatch a
@@ -445,7 +490,7 @@ impl SliceRunner {
             artifacts: artifacts_for_api,
             settings,
             capture_interval: watch::channel(Duration::from_secs(DEFAULT_SNAPSHOT_INTERVAL_SECS)).0,
-            running: Mutex::new(HashMap::new()),
+            running: Arc::new(Mutex::new(HashMap::new())),
             watchers: broadcast::channel(256).0,
             review_lock: Mutex::new(()),
             queue_lock: Mutex::new(()),
@@ -1031,6 +1076,17 @@ impl SliceRunner {
         // interruption reachable: a console asks for the Job by ID and the Team stops at its next
         // step boundary. Held locally, as it was before, nothing could ever stop a run.
         let (cancel_handle, cancel_signal) = cancel_pair();
+        let cancel_handle = Arc::new(cancel_handle);
+        let mut guard = RunningJobGuard {
+            job_id: job.job_id,
+            issue_id: job.issue_id,
+            cancel: cancel_handle.clone(),
+            running: self.running.clone(),
+            scheduler: self.scheduler.clone(),
+            finished: false,
+        };
+        self.scheduler
+            .register_job_cancellation(job.job_id, cancel_handle.clone());
         self.running.lock().await.insert(
             job.job_id,
             RunningJob {
@@ -1039,8 +1095,31 @@ impl SliceRunner {
                 started_at: Utc::now(),
             },
         );
-        let outcome = self.team.run_job(&job, view, &sink, cancel_signal).await;
-        self.running.lock().await.remove(&job.job_id);
+        // Register before rechecking, so a concurrent close either cancels the handle or
+        // is observed here before any model/tool call starts.
+        let issue = self.store.get_issue(job.issue_id).await?;
+        let current = self.store.get_job(job.job_id).await?;
+        if issue.status.is_terminal() || current.status.is_terminal() {
+            self.scheduler
+                .cancel_job_record(
+                    job.job_id,
+                    "Issue or Job finished before Team execution started",
+                )
+                .await?;
+            guard.finish().await;
+            return self.store.get_job(job.job_id).await;
+        }
+        let mut cancellation = cancel_signal.clone();
+        let work = self.team.run_job(&job, view, &sink, cancel_signal);
+        tokio::pin!(work);
+        let outcome = tokio::select! {
+            outcome = &mut work => outcome,
+            () = cancellation.cancelled() => {
+                tokio::time::timeout(Duration::from_secs(2), &mut work).await
+                    .unwrap_or_else(|_| Err(AgentError::InvalidInput("Team did not stop within cancellation grace period".into())))
+            }
+        };
+        guard.finish().await;
         if let Err(error) = outcome {
             let current = self.store.get_job(job.job_id).await?;
             if !current.status.is_terminal() {
@@ -1082,6 +1161,23 @@ impl SliceRunner {
         let mut passes = Vec::new();
         let mut job = job;
         loop {
+            if self
+                .store
+                .get_issue(job.issue_id)
+                .await?
+                .status
+                .is_terminal()
+            {
+                self.scheduler
+                    .cancel_job_record(job.job_id, "Issue is terminal; stop the pass chain")
+                    .await?;
+                passes.push(PassOutcome {
+                    job: self.store.get_job(job.job_id).await?,
+                    actions: Vec::new(),
+                    stop: PassStop::Done,
+                });
+                break;
+            }
             let Some(result) = job.result.clone() else {
                 passes.push(PassOutcome {
                     job,
@@ -1265,6 +1361,15 @@ impl SliceRunner {
         action: &ActionRun,
     ) -> AgentResult<Option<Vec<PassOutcome>>> {
         let follow_up_guard = self.follow_up_lock.lock().await;
+        if self
+            .store
+            .get_issue(action.issue_id)
+            .await?
+            .status
+            .is_terminal()
+        {
+            return Ok(None);
+        }
         let job = self.store.get_job(action.originating_job_id).await?;
         let requested = job
             .result

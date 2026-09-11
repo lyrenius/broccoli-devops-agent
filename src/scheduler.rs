@@ -153,6 +153,10 @@ pub struct TopScheduler {
     authority: AuthorityPolicy,
     mode: RwLock<SchedulerMode>,
     triage_lock: Mutex<()>,
+    /// Serialize terminal transitions with Job/action admission, never with model execution.
+    lifecycle_lock: Mutex<()>,
+    job_cancellations:
+        std::sync::Mutex<std::collections::HashMap<JobId, Arc<crate::ports::CancelHandle>>>,
 }
 
 impl TopScheduler {
@@ -171,7 +175,132 @@ impl TopScheduler {
             authority: AuthorityPolicy::default(),
             mode: RwLock::new(SchedulerMode::Running),
             triage_lock: Mutex::new(()),
+            lifecycle_lock: Mutex::new(()),
+            job_cancellations: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    pub(crate) fn register_job_cancellation(
+        &self,
+        id: JobId,
+        cancel: Arc<crate::ports::CancelHandle>,
+    ) {
+        self.job_cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id, cancel);
+    }
+
+    pub(crate) fn unregister_job_cancellation(&self, id: JobId) {
+        self.job_cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&id);
+    }
+
+    /// Cancel persisted work without replacing a result that already finished concurrently.
+    pub(crate) async fn cancel_job_record(&self, id: JobId, reason: &str) -> AgentResult<()> {
+        if let Some(cancel) = self
+            .job_cancellations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&id)
+        {
+            cancel.cancel();
+        }
+        loop {
+            let job = self.store.get_job(id).await?;
+            if job.status.is_terminal() {
+                return Ok(());
+            }
+            let mut next = job.clone();
+            next.transition_to(JobStatus::Cancelled)?;
+            match self.store.update_job_if(&job, next).await {
+                Err(AgentError::Conflict { .. }) => continue,
+                other => other?,
+            }
+            self.store
+                .append_event(
+                    NewEvent::new("top-scheduler", "scheduler.job_cancelled", reason)
+                        .with_issue(job.issue_id)
+                        .with_job(id),
+                )
+                .await?;
+            return Ok(());
+        }
+    }
+
+    /// Stop owned Jobs and unstarted actions. Already admitted commands may finish and verify.
+    async fn cancel_issue_work(&self, issue: &Issue) -> AgentResult<()> {
+        for job in self.store.list_jobs().await? {
+            if job.issue_id == issue.issue_id {
+                self.cancel_job_record(
+                    job.job_id,
+                    &format!(
+                        "Issue is {:?}; no further Team work is needed",
+                        issue.status
+                    ),
+                )
+                .await?;
+            }
+        }
+        for action in self.store.list_action_runs().await? {
+            if action.issue_id != issue.issue_id {
+                continue;
+            }
+            loop {
+                let current = self.store.get_action_run(action.action_run_id).await?;
+                if !matches!(
+                    current.status,
+                    ActionStatus::Proposed
+                        | ActionStatus::Ready
+                        | ActionStatus::WaitingForApproval
+                        | ActionStatus::WaitingForHuman
+                ) {
+                    break;
+                }
+                let mut next = current.clone();
+                next.transition_to(ActionStatus::Cancelled)?;
+                next.execution_summary = Some(format!(
+                    "cancelled before execution because Issue is {:?}",
+                    issue.status
+                ));
+                match self.store.update_action_run_if(&current, next).await {
+                    Err(AgentError::Conflict { .. }) => continue,
+                    other => other?,
+                }
+                self.store
+                    .append_event(
+                        NewEvent::new(
+                            "top-scheduler",
+                            "scheduler.action_cancelled",
+                            format!(
+                                "Issue is {:?}; pending action cancelled without execution",
+                                issue.status
+                            ),
+                        )
+                        .with_issue(issue.issue_id)
+                        .with_action(current.action_run_id),
+                    )
+                    .await?;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_live_issue(&self, id: IssueId) -> AgentResult<()> {
+        let issue = self.store.get_issue(id).await?;
+        if issue.is_archived() {
+            return Err(archived(id));
+        }
+        if issue.status.is_terminal() {
+            return Err(AgentError::InvalidInput(format!(
+                "Issue `{id}` is {:?}; no new work may start",
+                issue.status
+            )));
+        }
+        Ok(())
     }
 
     /// Wires the Collector used for Scheduler-requested Snapshot captures.
@@ -522,7 +651,9 @@ impl TopScheduler {
         snapshot_view: SnapshotViewRef,
         brief: JobBrief,
     ) -> AgentResult<Job> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
         self.ensure_dispatch_allowed("create_job").await?;
+        self.ensure_live_issue(issue_id).await?;
         let mut issue = self.store.get_issue(issue_id).await?;
         self.validate_snapshot_view(&snapshot_view).await?;
 
@@ -532,8 +663,9 @@ impl TopScheduler {
         self.store.insert_job(job.clone()).await?;
 
         if issue.can_transition_to(IssueStatus::Investigating) {
+            let original = issue.clone();
             issue.transition_to(IssueStatus::Investigating)?;
-            self.store.update_issue(issue).await?;
+            self.store.update_issue_if(&original, issue).await?;
         }
 
         if revision {
@@ -587,13 +719,16 @@ impl TopScheduler {
         new_snapshot_view: SnapshotViewRef,
         brief: JobBrief,
     ) -> AgentResult<Job> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
         self.ensure_dispatch_allowed("supersede_job").await?;
         self.validate_snapshot_view(&new_snapshot_view).await?;
 
         let mut previous = self.store.get_job(previous_job_id).await?;
+        self.ensure_live_issue(previous.issue_id).await?;
+        let original = previous.clone();
         let mut next = previous.supersede_with(new_snapshot_view, brief)?;
         next.transition_to(crate::domain::JobStatus::Running)?;
-        self.store.update_job(previous).await?;
+        self.store.update_job_if(&original, previous).await?;
         self.store.insert_job(next.clone()).await?;
         self.record_job_event(
             &next,
@@ -662,6 +797,22 @@ impl TopScheduler {
                 "Job `{}` is already `{:?}` and accepts no further callbacks",
                 job.job_id, job.status
             )));
+        }
+        if self
+            .store
+            .get_issue(job.issue_id)
+            .await?
+            .status
+            .is_terminal()
+        {
+            self.cancel_job_record(
+                job.job_id,
+                "Issue closed before this callback; result not applied",
+            )
+            .await?;
+            return Err(AgentError::InvalidInput(
+                "Issue is terminal; callback cannot continue its work".into(),
+            ));
         }
 
         // A forwarded transcript entry is a fact about the running pass, not a message to the
@@ -1069,6 +1220,8 @@ impl TopScheduler {
         let job = self.store.get_job(originating_job_id).await?;
 
         let before = self.request_snapshot(before_capture).await?;
+        let admission = self.lifecycle_lock.lock().await;
+        self.ensure_live_issue(job.issue_id).await?;
         let action = ActionRun::from_proposal(
             job.issue_id,
             originating_job_id,
@@ -1078,6 +1231,7 @@ impl TopScheduler {
             idempotency_key,
         );
         self.store.insert_action_run(action.clone()).await?;
+        drop(admission);
         self.store
             .append_event(
                 NewEvent::new(
@@ -1268,6 +1422,7 @@ impl TopScheduler {
     ) -> AgentResult<ActionRun> {
         let approved_by = approved_by.into();
         let action = self.store.get_action_run(action_run_id).await?;
+        self.ensure_live_issue(action.issue_id).await?;
         self.ensure_not_archived(action.issue_id).await?;
         let mut next = action.clone();
         next.approve(approved_by.clone())?;
@@ -1392,6 +1547,7 @@ impl TopScheduler {
     /// `Running` with nobody responsible for it. Platform success only moves the action to
     /// `Verifying`; `verify_action` decides the terminal state.
     pub async fn execute_action(&self, action_run_id: ActionRunId) -> AgentResult<ActionRun> {
+        let admission = self.lifecycle_lock.lock().await;
         // Keep admission and Ready -> Running on the same side of a freeze. Once Running is
         // persisted the action has started; freezing never cancels an already admitted command.
         let mode = self.mode.read().await;
@@ -1407,10 +1563,12 @@ impl TopScheduler {
         let platform = self.require_platform("execute_action")?;
 
         let ready = self.store.get_action_run(action_run_id).await?;
+        self.ensure_live_issue(ready.issue_id).await?;
         if ready.status == ActionStatus::Ready
             && let Some(reason) = platform.missing_implementation(&ready)
         {
             drop(mode);
+            drop(admission);
             return self.wait_for_action_implementation(ready, reason).await;
         }
         let mut running = ready.clone();
@@ -1419,6 +1577,7 @@ impl TopScheduler {
             .update_action_run_if(&ready, running.clone())
             .await?;
         drop(mode);
+        drop(admission);
         self.store
             .append_event(
                 NewEvent::new(
@@ -1731,8 +1890,13 @@ impl TopScheduler {
     /// Otherwise it waits for a human to close it or send it on. Acknowledging an
     /// inbox item therefore never resolves an Issue by itself. Terminal Issues are left alone.
     pub async fn reconcile_issue(&self, issue_id: IssueId) -> AgentResult<Issue> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
         let issue = self.store.get_issue(issue_id).await?;
+        if issue.is_archived() {
+            return Ok(issue);
+        }
         if issue.status.is_terminal() {
+            self.cancel_issue_work(&issue).await?;
             return Ok(issue);
         }
         let jobs: Vec<Job> = self
@@ -1758,6 +1922,9 @@ impl TopScheduler {
         let mut updated = issue.clone();
         updated.transition_to(next)?;
         self.store.update_issue_if(&issue, updated.clone()).await?;
+        if updated.status.is_terminal() {
+            self.cancel_issue_work(&updated).await?;
+        }
         self.store
             .append_event(
                 NewEvent::new(
@@ -1787,14 +1954,20 @@ impl TopScheduler {
         closed_by: impl Into<String>,
         comment: Option<String>,
     ) -> AgentResult<Issue> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
         let closed_by = closed_by.into();
         let issue = self.store.get_issue(issue_id).await?;
         if issue.is_archived() {
             return Err(archived(issue_id));
         }
+        if issue.status == closure.status() {
+            self.cancel_issue_work(&issue).await?;
+            return Ok(issue);
+        }
         let mut next = issue.clone();
         next.transition_to(closure.status())?;
         self.store.update_issue_if(&issue, next.clone()).await?;
+        self.cancel_issue_work(&next).await?;
         let comment = comment.filter(|text| !text.trim().is_empty());
         self.store
             .append_event(
@@ -1910,6 +2083,12 @@ impl TopScheduler {
     ) -> AgentResult<RecoverySummary> {
         let (previous_mode, pending_recovery_review) = self.persisted_mode().await?;
         self.set_mode(SchedulerMode::Recovering).await?;
+
+        for issue in self.store.list_issues().await? {
+            if issue.status.is_terminal() && !issue.is_archived() {
+                self.cancel_issue_work(&issue).await?;
+            }
+        }
 
         let (issues, jobs, actions) = self.live_unfinished().await?;
         let mut summary = RecoverySummary {
