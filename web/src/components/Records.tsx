@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
-import type { Issue, Job, SessionBundle, WaitingIssue } from "../types";
+import type { Issue, Job, WaitingIssue } from "../types";
 import { JobTimes } from "./JobTimes";
 import { IssueFeedback } from "./IssueFeedback";
 import { Page } from "./Shell";
@@ -103,8 +103,9 @@ export function Records({ tick, onChanged }: { tick: number; onChanged: () => vo
     setError(null);
     setNotice(null);
     try {
-      const bundle = JSON.parse(await file.text()) as SessionBundle;
-      const summary = await api.importSession(bundle, loadOperator());
+      // Parsing and stringifying here changes 0.0 to 0 and rounds large integers.
+      // The server validates the original file and its artifact hashes.
+      const summary = await api.importSession(await file.text(), loadOperator());
       setNotice(t("records.imported", { title: summary.title, deployment: summary.source_deployment, jobs: summary.jobs, actions: summary.action_runs, events: summary.events }));
       setFilter("archived");
       onChanged();
