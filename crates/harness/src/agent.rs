@@ -189,6 +189,11 @@ pub trait ProgressObserver: Send + Sync {
 /// How one agent run ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentOutcome {
+    /// An abnormal stop with the already completed conversation and usage still in the report.
+    Failed {
+        /// Error surfaced by the model adapter or local context preflight.
+        reason: String,
+    },
     /// A terminal tool was called successfully; `value` is its validated output.
     Structured {
         /// Name of the terminal tool.
@@ -341,6 +346,25 @@ pub async fn run_agent_observed(
         };
     }
 
+    macro_rules! fail {
+        ($stage:expr, $error:expr) => {{
+            let reason = $error.to_string();
+            transcript.failure = Some(crate::conversation::RunFailure {
+                at: Utc::now(),
+                turn: model_turns,
+                stage: $stage.into(),
+                reason: reason.clone(),
+            });
+            append!(Item::Notice {
+                text: format!(
+                    "Run failed during {} on model turn {model_turns}: {reason}",
+                    $stage
+                )
+            });
+            finish!(AgentOutcome::Failed { reason });
+        }};
+    }
+
     loop {
         if cancel.is_cancelled() {
             finish!(AgentOutcome::Cancelled);
@@ -433,7 +457,17 @@ pub async fn run_agent_observed(
                         () = cancel.cancelled() => finish!(AgentOutcome::Cancelled),
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let stage = if matches!(error, HarnessError::ContextLimit(_)) {
+                        "context"
+                    } else {
+                        // A failed backend attempt has unknown usage; retaining the transcript
+                        // must not turn that attempt into a free or nonexistent request.
+                        usage += Usage::unreported();
+                        "model"
+                    };
+                    fail!(stage, error);
+                }
             }
         };
         // The turn is billed whether or not it was usable, so the counters take it first.
@@ -449,9 +483,7 @@ pub async fn run_agent_observed(
             offered_tools: offered.iter().map(|spec| spec.name.clone()).collect(),
         });
         if turn.items.is_empty() {
-            return Err(HarnessError::Model(
-                "the backend returned an empty turn".into(),
-            ));
+            fail!("response", "the backend returned an empty turn");
         }
 
         let mut texts = Vec::new();

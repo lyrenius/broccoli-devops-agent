@@ -388,7 +388,7 @@ async fn transient_backend_failures_are_retried() {
 
     let client = ScriptedModelClient::new(vec![vec![text("never")]]).with_transient_failures(3);
     let (_handle, token) = cancel_pair();
-    let error = run_agent(
+    let report = run_agent(
         &client,
         &ToolRegistry::new(),
         &config,
@@ -397,8 +397,16 @@ async fn transient_backend_failures_are_retried() {
         token,
     )
     .await
-    .unwrap_err();
-    assert!(matches!(error, HarnessError::ModelUnavailable(_)));
+    .unwrap();
+    assert!(matches!(report.outcome, AgentOutcome::Failed { .. }));
+    assert!(
+        report
+            .transcript
+            .failure
+            .unwrap()
+            .reason
+            .contains("unavailable")
+    );
 }
 
 /// The tool-call budget counts refused calls too, so error loops cannot run forever.
@@ -453,12 +461,12 @@ async fn cancellation_is_honored_between_steps() {
     assert_eq!(report.model_turns, 0);
 }
 
-/// An exhausted backend is a harness error, not a silent stop.
+/// An exhausted backend returns a failed report with its initial context retained.
 #[tokio::test]
-async fn exhausted_backend_is_a_model_error() {
+async fn exhausted_backend_retains_a_failed_report() {
     let client = ScriptedModelClient::new(Vec::new());
     let (_handle, token) = cancel_pair();
-    let error = run_agent(
+    let report = run_agent(
         &client,
         &ToolRegistry::new(),
         &AgentConfig::default(),
@@ -467,8 +475,9 @@ async fn exhausted_backend_is_a_model_error() {
         token,
     )
     .await
-    .unwrap_err();
-    assert!(matches!(error, HarnessError::Model(_)));
+    .unwrap();
+    assert!(matches!(report.outcome, AgentOutcome::Failed { .. }));
+    assert_eq!(report.transcript.failure.unwrap().stage, "model");
 }
 
 /// Every request's token counts are summed into the report, and a relay that reports none is
@@ -854,4 +863,58 @@ async fn cancellation_interrupts_retry_wait_and_resource_tool_cleanup_is_awaited
         cleaned.load(Ordering::SeqCst),
         "the report cannot finish ahead of resource cleanup"
     );
+}
+
+#[tokio::test]
+async fn empty_responses_and_local_context_failures_retain_the_inputs() {
+    use broccoli_agent_harness::{HarnessResult, ModelClient, ModelRequest, ModelTurn};
+    struct ContextFailure;
+    #[async_trait::async_trait]
+    impl ModelClient for ContextFailure {
+        async fn complete(&self, _: ModelRequest<'_>) -> HarnessResult<ModelTurn> {
+            Err(HarnessError::ContextLimit(
+                "estimated input is too long; history retained".into(),
+            ))
+        }
+    }
+    let input = Item::UserInput {
+        text: "complete original 中文 input".into(),
+        trust: broccoli_agent_harness::Trust::Trusted,
+    };
+    for empty in [false, true] {
+        let client: Box<dyn ModelClient> = if empty {
+            Box::new(
+                ScriptedModelClient::new(vec![vec![]])
+                    .with_usage_per_turn(Usage::reported(1000, 0, 100)),
+            )
+        } else {
+            Box::new(ContextFailure)
+        };
+        let (_handle, token) = cancel_pair();
+        let report = run_agent(
+            client.as_ref(),
+            &ToolRegistry::new(),
+            &AgentConfig::default(),
+            "system instructions",
+            vec![input.clone()],
+            token,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(report.outcome, AgentOutcome::Failed { .. }));
+        assert_eq!(report.transcript.instructions, "system instructions");
+        assert_eq!(report.transcript.entries[0].item, input);
+        assert_eq!(
+            report.transcript.failure.as_ref().unwrap().stage,
+            if empty { "response" } else { "context" }
+        );
+        assert_eq!(report.usage.total_tokens(), if empty { 1100 } else { 0 });
+        assert!(
+            report
+                .transcript
+                .entries
+                .iter()
+                .any(|e| matches!(&e.item,Item::Notice{text} if text.contains("Run failed")))
+        );
+    }
 }

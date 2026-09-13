@@ -308,6 +308,17 @@ impl HarnessOperateTeam {
         self
     }
 
+    fn model_usage(&self, usage: harness::Usage) -> ModelUsage {
+        ModelUsage {
+            model: self.model_name.clone(),
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            output_tokens: usage.output_tokens,
+            requests: usage.requests,
+            requests_without_usage: usage.requests_without_usage,
+        }
+    }
+
     /// Persists the run transcript as a DiagnosticBundle Artifact and returns it.
     async fn store_transcript(
         &self,
@@ -1085,9 +1096,33 @@ impl AgentTeamPort for HarnessOperateTeam {
         drain.await?;
         let report = finished.map_err(harness_error)?;
 
-        let transcript_artifact = self.store_transcript(job, &report.transcript).await?;
+        let transcript_artifact = match self.store_transcript(job, &report.transcript).await {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                let reason = tr!(
+                    format!("Transcript archival failed; session is incomplete: {error}"),
+                    format!("完整记录归档失败，会话不完整：{error}")
+                );
+                // The event store may still work even when artifact-body storage does not.
+                // Keep the known spend and report the missing archive explicitly.
+                return sink
+                    .deliver(
+                        TeamCallback::new(job.issue_id, job.job_id, reason.clone())
+                            .with_final_result(JobResult::new(JobOutcome::Failed, reason))
+                            .with_usage(self.model_usage(report.usage)),
+                    )
+                    .await;
+            }
+        };
 
         let mut result = match report.outcome {
+            AgentOutcome::Failed { reason } => JobResult::new(
+                JobOutcome::Failed,
+                tr!(
+                    format!("The Team backend failed: {reason}"),
+                    format!("团队后端出错：{reason}")
+                ),
+            ),
             AgentOutcome::Structured { tool, value } if tool == "request_probes" => {
                 let mut result = JobResult::new(
                     JobOutcome::NeedsMoreData,
@@ -1162,14 +1197,7 @@ impl AgentTeamPort for HarnessOperateTeam {
         }
         result.artifact_ids.push(transcript_artifact.artifact_id);
 
-        let usage = ModelUsage {
-            model: self.model_name.clone(),
-            input_tokens: report.usage.input_tokens,
-            cached_input_tokens: report.usage.cached_input_tokens,
-            output_tokens: report.usage.output_tokens,
-            requests: report.usage.requests,
-            requests_without_usage: report.usage.requests_without_usage,
-        };
+        let usage = self.model_usage(report.usage);
         let spent = tr!(
             format!(
                 "{} model request(s), {} tokens",

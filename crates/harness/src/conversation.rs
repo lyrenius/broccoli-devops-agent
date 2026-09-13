@@ -116,6 +116,22 @@ pub struct Transcript {
     /// field existed; the entries alone are still a complete replay.
     #[serde(default)]
     pub turns: Vec<TurnRecord>,
+    /// Why the run stopped abnormally, absent in older or successful transcripts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<RunFailure>,
+}
+
+/// Failure position retained together with the conversation instead of replacing it with an error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunFailure {
+    /// When the failure was observed.
+    pub at: DateTime<Utc>,
+    /// Model turn that failed, counting from one.
+    pub turn: u32,
+    /// `model`, `context`, or `response`.
+    pub stage: String,
+    /// Backend or local preflight explanation.
+    pub reason: String,
 }
 
 impl Transcript {
@@ -125,6 +141,7 @@ impl Transcript {
             instructions: instructions.into(),
             entries: Vec::new(),
             turns: Vec::new(),
+            failure: None,
         }
     }
 

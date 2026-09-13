@@ -398,3 +398,116 @@ async fn a_running_pass_reports_progress_and_can_be_interrupted() {
         )
     );
 }
+
+#[tokio::test]
+async fn model_failure_keeps_known_usage_and_a_roundtrippable_complete_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let controller = runner(
+        dir.path(),
+        vec![vec![
+            call("v", "read_snapshot_view", json!({})),
+            call(
+                "p",
+                "propose_action",
+                json!({"runbook_id":"worker.restart","target_ids":["worker-1"],"reason":"proposal before failure","expected_effect":"healthy"}),
+            ),
+        ]],
+        Usage::reported(1000, 0, 100),
+        SpendBudget::default(),
+    );
+    let (issue, job) = controller
+        .handle_report(report("failure history"))
+        .await
+        .unwrap();
+    assert_eq!(job.status, JobStatus::Failed);
+    assert_eq!(job.usage.as_ref().unwrap().total_tokens(), 1100);
+    assert!(job.result.as_ref().unwrap().proposed_actions.is_empty());
+    let passes = controller.drive_passes(job.clone()).await.unwrap();
+    assert!(passes.iter().all(|pass| pass.actions.is_empty()));
+    let bundle = controller
+        .export_session(issue.issue_id, "test")
+        .await
+        .unwrap();
+    let transcript_artifact = bundle
+        .artifacts
+        .iter()
+        .find(|a| {
+            job.result
+                .as_ref()
+                .unwrap()
+                .artifact_ids
+                .contains(&a.artifact.artifact_id)
+        })
+        .unwrap();
+    let broccoli_devops_agent::session::ArtifactBody::Json(value) = &transcript_artifact.body
+    else {
+        panic!("readable transcript")
+    };
+    let transcript: broccoli_agent_harness::Transcript =
+        serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(transcript.failure.as_ref().unwrap().turn, 2);
+    assert_eq!(transcript.failure.as_ref().unwrap().stage, "model");
+    assert!(!transcript.instructions.is_empty());
+    assert!(transcript.entries.iter().any(|e|matches!(&e.item,broccoli_agent_harness::Item::ToolOutput{tool,..} if tool=="read_snapshot_view")));
+    assert_eq!(transcript.turns[0].usage.total_tokens(), 1100);
+    let dest = tempfile::tempdir().unwrap();
+    let other = runner(
+        dest.path(),
+        vec![],
+        Usage::default(),
+        SpendBudget::default(),
+    );
+    let imported = other
+        .import_session(
+            serde_json::from_slice(&serde_json::to_vec(&bundle).unwrap()).unwrap(),
+            "test",
+        )
+        .await
+        .unwrap();
+    let restored = other
+        .export_session(imported.issue_id, "test")
+        .await
+        .unwrap();
+    let restored_transcript = restored
+        .artifacts
+        .iter()
+        .find(|a| a.artifact.artifact_id == transcript_artifact.artifact.artifact_id)
+        .unwrap();
+    assert_eq!(restored_transcript.body, transcript_artifact.body);
+    assert_eq!(
+        other.usage_totals().await.unwrap().total_tokens,
+        0,
+        "imported history is not this deployment's bill"
+    );
+}
+
+#[tokio::test]
+async fn archive_storage_failure_is_explicit_and_keeps_known_spend() {
+    struct BreakArtifactStorage(std::path::PathBuf);
+    #[async_trait::async_trait]
+    impl ModelClient for BreakArtifactStorage {
+        async fn complete(&self, _: ModelRequest<'_>) -> HarnessResult<ModelTurn> {
+            std::fs::rename(self.0.join("artifact-bodies"), self.0.join("saved-bodies")).unwrap();
+            std::fs::write(self.0.join("artifact-bodies"), b"blocked directory").unwrap();
+            Ok(ModelTurn::with_usage(
+                vec![diagnose("d", "complete")],
+                Usage::reported(1000, 0, 100),
+            ))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let runner = runner_with(
+        dir.path(),
+        Arc::new(BreakArtifactStorage(dir.path().into())),
+        SpendBudget::default(),
+    );
+    let (_, job) = runner
+        .handle_report(report("archive failure"))
+        .await
+        .unwrap();
+    assert_eq!(job.status, JobStatus::Failed);
+    let result = job.result.unwrap();
+    assert!(result.summary.contains("Transcript archival failed"));
+    assert!(result.artifact_ids.is_empty());
+    assert_eq!(job.usage.unwrap().total_tokens(), 1100);
+}
