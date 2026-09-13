@@ -129,6 +129,15 @@ impl OpenAiClient {
         if !status.is_success() {
             let snippet: String = text.chars().take(600).collect();
             let message = format!("{url} returned HTTP {status}: {snippet}");
+            if let Ok(body) = serde_json::from_str::<Value>(&text)
+                && body.get("usage").is_some()
+            {
+                return Err(HarnessError::Response {
+                    reason: message,
+                    usage: parse_usage(&body),
+                    retryable: is_transient_status(status.as_u16()),
+                });
+            }
             return Err(if is_transient_status(status.as_u16()) {
                 HarnessError::ModelUnavailable(message)
             } else {
@@ -148,6 +157,9 @@ fn is_transient_status(status: u16) -> bool {
 
 #[async_trait]
 impl ModelClient for OpenAiClient {
+    fn validate_request(&self, request: ModelRequest<'_>) -> HarnessResult<()> {
+        self.request_body(request).map(|_| ())
+    }
     /// Sends the conversation in the configured wire format and parses the assistant turn.
     ///
     /// The response's `usage` block travels back with the items: it is the only place the real
@@ -159,11 +171,17 @@ impl ModelClient for OpenAiClient {
             WireApi::Chat => "/chat/completions",
         };
         let response = self.post(path, &body).await?;
+        let usage = parse_usage(&response);
         let items = match self.config.wire_api {
-            WireApi::Responses => parse_responses_output(&response)?,
-            WireApi::Chat => parse_chat_output(&response)?,
-        };
-        Ok(ModelTurn::with_usage(items, parse_usage(&response)))
+            WireApi::Responses => parse_responses_output(&response),
+            WireApi::Chat => parse_chat_output(&response),
+        }
+        .map_err(|error| HarnessError::Response {
+            reason: error.to_string(),
+            usage,
+            retryable: false,
+        })?;
+        Ok(ModelTurn::with_usage(items, usage))
     }
 }
 
@@ -179,13 +197,8 @@ pub fn parse_usage(response: &Value) -> Usage {
     if !usage.is_object() {
         return Usage::unreported();
     }
-    let count = |names: &[&str]| -> Option<u64> {
-        names.iter().find_map(|name| {
-            usage[*name]
-                .as_u64()
-                .or_else(|| usage[*name].as_f64().map(|v| v as u64))
-        })
-    };
+    let count =
+        |names: &[&str]| -> Option<u64> { names.iter().find_map(|name| usage[*name].as_u64()) };
     let input = count(&["input_tokens", "prompt_tokens"]);
     let output = count(&["output_tokens", "completion_tokens"]);
     if input.is_none() && output.is_none() {
@@ -197,8 +210,11 @@ pub fn parse_usage(response: &Value) -> Usage {
         .or_else(|| usage["prompt_tokens_details"]["cached_tokens"].as_u64())
         .or_else(|| usage["cached_tokens"].as_u64())
         .unwrap_or(0);
+    let incomplete = input.is_none() || output.is_none();
     let input = input.unwrap_or(0);
-    Usage::reported(input, cached.min(input), output.unwrap_or(0))
+    let mut result = Usage::reported(input, cached.min(input), output.unwrap_or(0));
+    result.requests_without_usage = u32::from(incomplete);
+    result
 }
 
 /// Renders a harness notice as message text. Both wire formats carry it in the user role — the

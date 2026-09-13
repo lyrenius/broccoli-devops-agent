@@ -12,7 +12,10 @@
 //! and every derived figure says so, because a bill quietly rendered as zero is worse than one
 //! marked incomplete.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
+use uuid::Uuid;
 
 use crate::domain::{EventRecord, ModelUsage};
 
@@ -21,6 +24,91 @@ const TOKENS_PER_PRICE_UNIT: f64 = 1_000_000.0;
 
 /// Event kind under which one pass's usage is recorded in the EventLog.
 pub const USAGE_EVENT_KIND: &str = "model.usage";
+
+/// Durable start of an individual model request.
+pub const REQUEST_STARTED: &str = "model.request_started";
+/// Durable completion of an individual model request.
+pub const REQUEST_FINISHED: &str = "model.request_finished";
+
+/// Provider-independent ledger entry. Start and finish share the same request ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestUsage {
+    /// Stable ID across retries of event delivery and log replay.
+    pub request_id: String,
+    /// Job ID or standalone diagnostic run ID used to group attempts into passes.
+    pub namespace: Uuid,
+    /// Configured provider model.
+    pub model: String,
+    /// Associated Issue, absent for diagnostics.
+    pub issue_id: Option<crate::domain::IssueId>,
+    /// Associated Job, absent for diagnostics.
+    pub job_id: Option<crate::domain::JobId>,
+    /// Model turn, distinct from request attempts when there are retries.
+    pub turn: u32,
+    /// Start time.
+    pub started_at: DateTime<Utc>,
+    /// End time, absent for in-flight or interrupted requests.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// started, succeeded, failed, cancelled, interrupted or not_sent.
+    pub status: String,
+    /// Counts actually reported, absent while in flight or when lost during a restart.
+    pub usage: Option<ModelUsage>,
+    /// Backend or recovery explanation.
+    pub error: Option<String>,
+}
+
+impl RequestUsage {
+    /// Known counters. A started request without a finish is explicitly unknown, never free.
+    pub fn counts(&self) -> ModelUsage {
+        if self.status == "not_sent" {
+            return ModelUsage {
+                model: self.model.clone(),
+                ..Default::default()
+            };
+        }
+        self.usage.clone().unwrap_or_else(|| ModelUsage {
+            model: self.model.clone(),
+            requests: 1,
+            requests_without_usage: 1,
+            ..Default::default()
+        })
+    }
+}
+
+/// One attempt with a price computed from its known counters for operator display.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestCost {
+    /// Ledger entry; exported as flat fields in the API.
+    #[serde(flatten)]
+    pub request: RequestUsage,
+    /// Cost of the known portion; absent when completely unknown or no pricing exists.
+    pub cost: Option<f64>,
+    /// Currency of the configured price table.
+    pub currency: Option<String>,
+}
+
+/// Folds duplicate events and prefers the first terminal record over start/repeated records.
+pub fn request_ledger(events: &[EventRecord]) -> Vec<RequestUsage> {
+    let mut records: BTreeMap<String, RequestUsage> = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|e| e.kind == REQUEST_STARTED || e.kind == REQUEST_FINISHED)
+    {
+        let Ok(record) = serde_json::from_value::<RequestUsage>(event.payload.clone()) else {
+            continue;
+        };
+        if records
+            .get(&record.request_id)
+            .is_some_and(|old| old.status != "started")
+        {
+            continue;
+        }
+        records.insert(record.request_id.clone(), record);
+    }
+    let mut records: Vec<_> = records.into_values().collect();
+    records.sort_by_key(|r| (r.started_at, r.request_id.clone()));
+    records
+}
 
 /// What the configured relay charges, per million tokens.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -123,6 +211,9 @@ pub struct ModelTotals {
 /// Everything spent so far, ready to display.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageTotals {
+    /// Per-request detail for new ledger records; old pass-only logs have no fabricated rows.
+    #[serde(default)]
+    pub calls: Vec<RequestCost>,
     /// Model-backed passes counted.
     pub passes: u32,
     /// Input tokens, cached ones included.
@@ -172,11 +263,63 @@ impl UsageTotals {
         pricing: Option<&Pricing>,
         budget: &SpendBudget,
     ) -> Self {
+        let ledger = request_ledger(events);
+        let jobs: HashSet<_> = ledger.iter().filter_map(|r| r.job_id).collect();
+        let namespaces: HashSet<_> = ledger.iter().map(|r| r.namespace).collect();
+        let mut grouped: BTreeMap<Uuid, ModelUsage> = BTreeMap::new();
+        for record in &ledger {
+            if record.status == "not_sent" {
+                continue;
+            }
+            let usage = record.counts();
+            let sum = grouped
+                .entry(record.namespace)
+                .or_insert_with(|| ModelUsage {
+                    model: usage.model.clone(),
+                    ..Default::default()
+                });
+            sum.input_tokens = sum.input_tokens.saturating_add(usage.input_tokens);
+            sum.cached_input_tokens = sum
+                .cached_input_tokens
+                .saturating_add(usage.cached_input_tokens);
+            sum.output_tokens = sum.output_tokens.saturating_add(usage.output_tokens);
+            sum.requests = sum.requests.saturating_add(usage.requests);
+            sum.requests_without_usage = sum
+                .requests_without_usage
+                .saturating_add(usage.requests_without_usage);
+        }
         let usages = events
             .iter()
             .filter(|event| event.kind == USAGE_EVENT_KIND)
-            .filter_map(|event| serde_json::from_value::<ModelUsage>(event.payload.clone()).ok());
-        Self::from_usages(usages, pricing, budget)
+            .filter(|event| event.job_id.is_none_or(|id| !jobs.contains(&id)))
+            .filter(|event| {
+                event.payload["snapshot_id"]
+                    .as_str()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .is_none_or(|id| !namespaces.contains(&id))
+            })
+            .filter_map(|event| serde_json::from_value::<ModelUsage>(event.payload.clone()).ok())
+            .chain(grouped.into_values());
+        let mut totals = Self::from_usages(usages, pricing, budget);
+        totals.calls = ledger
+            .into_iter()
+            .map(|request| {
+                let counts = request.counts();
+                let cost = if request.status == "not_sent"
+                    || (!counts.is_complete() && counts.total_tokens() == 0)
+                {
+                    None
+                } else {
+                    pricing.map(|p| p.cost(&counts))
+                };
+                RequestCost {
+                    request,
+                    cost,
+                    currency: pricing.map(|p| p.currency.clone()),
+                }
+            })
+            .collect();
+        totals
     }
 
     /// Totals over usage records from any source.

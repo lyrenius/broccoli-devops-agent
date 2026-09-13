@@ -742,6 +742,41 @@ fn draw_transcript(
     doc.line(stats);
     doc.blank();
 
+    if let Some(status) = &app.status {
+        let calls: Vec<_> = status
+            .usage
+            .calls
+            .iter()
+            .filter(|call| call.job_id.as_deref() == Some(job.job_id.as_str()))
+            .collect();
+        if !calls.is_empty() {
+            doc.rule("Per-request usage (known counts)");
+            for call in calls {
+                let amount = call.usage.as_ref().map_or("unknown usage".into(), |u| {
+                    format!(
+                        "in {} / cached {} / out {}{}",
+                        u.input_tokens,
+                        u.cached_input_tokens,
+                        u.output_tokens,
+                        if u.requests_without_usage > 0 {
+                            " · incomplete"
+                        } else {
+                            ""
+                        }
+                    )
+                });
+                let cost = call.cost.map_or("unpriced/unknown".into(), |v| {
+                    format!("{v:.6} {}", call.currency.as_deref().unwrap_or(""))
+                });
+                doc.note(&format!(
+                    "{} {} · {amount} · {cost}",
+                    call.request_id, call.status
+                ));
+            }
+            doc.blank();
+        }
+    }
+
     if app.trace.show_instructions {
         doc.rule("Instructions the run started with (I hides)");
         match &view.stored {

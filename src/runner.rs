@@ -410,6 +410,7 @@ impl SliceRunner {
     ) -> AgentResult<Self> {
         let store = Arc::new(FileStateStore::open(data_dir)?);
         let artifacts = FileArtifactStore::new(data_dir.join("artifact-bodies"));
+        let operations = crate::operations::Operations::new(store.clone());
         let collector = Arc::new(TopologyCollector::new(
             topology.clone(),
             store.clone() as Arc<dyn StateStore>,
@@ -458,13 +459,16 @@ impl SliceRunner {
             TeamBackend::ReadOnly => (None, String::new()),
             TeamBackend::Harness { client, model, .. } => (Some(client.clone()), model.clone()),
         };
-        let judge = Arc::new(HybridSnapshotJudge::new(
-            review_client,
-            review_model,
-            artifacts.clone(),
-            store.clone(),
-            settings.clone(),
-        ));
+        let judge = Arc::new(
+            HybridSnapshotJudge::new(
+                review_client,
+                review_model,
+                artifacts.clone(),
+                store.clone(),
+                settings.clone(),
+            )
+            .with_accounting_control(scheduler.clone(), operations.clone()),
+        );
         let (team, team_label): (Box<dyn AgentTeamPort>, String) = match backend {
             TeamBackend::ReadOnly => (
                 Box::new(ReadOnlyOperateTeam::new(artifacts)),
@@ -482,6 +486,7 @@ impl SliceRunner {
                         artifacts,
                         store.clone() as Arc<dyn StateStore>,
                     )
+                    .with_accounting_control(scheduler.clone(), operations.clone())
                     .with_config(budget)
                     .with_model_name(model)
                     .with_inspection(
@@ -497,7 +502,7 @@ impl SliceRunner {
             ),
         };
         Ok(Self {
-            operations: crate::operations::Operations::new(store.clone()),
+            operations,
             topology,
             store,
             scheduler,
@@ -886,12 +891,19 @@ impl SliceRunner {
         let model_allowed = self.freeze_if_budget_spent().await?.is_none();
         crate::operations::phase(crate::operations::OperationPhase::Model, None, None, None)
             .await?;
-        let judgement = crate::operations::cancellable(self.judge.inspect_snapshot(
-            snapshot_id,
-            &view,
-            model_allowed,
-        ))
-        .await?;
+        let review = self
+            .judge
+            .inspect_snapshot(snapshot_id, &view, model_allowed);
+        tokio::pin!(review);
+        let judgement = tokio::select! {
+            result = &mut review => result,
+            () = crate::operations::cancelled() => {
+                // Give the model adapter time to save its cancellation and known usage.
+                tokio::time::timeout(Duration::from_secs(2), &mut review).await
+                    .unwrap_or(Err(AgentError::Cancelled))
+            }
+        }?;
+        crate::operations::check()?;
         if let Some(usage) = &judgement.usage {
             let mut payload = serde_json::to_value(usage)?;
             payload["snapshot_id"] = json!(snapshot_id);
@@ -1214,9 +1226,8 @@ impl SliceRunner {
                 .await?;
             }
         }
-        // The pass has been billed by now, so this is the first honest moment to check the
-        // ceiling. Freezing (rather than erroring) lets the chain stop itself with `Frozen` and
-        // keeps the finished pass's result.
+        // Request accounting already checks live model calls. This fallback also covers Teams
+        // that only deliver a final legacy usage record, while retaining their completed result.
         self.freeze_if_budget_spent().await?;
         self.store.get_job(job.job_id).await
     }
@@ -2000,6 +2011,31 @@ impl SliceRunner {
     /// Recovers control state after a restart, verifying interrupted actions against a fresh
     /// Snapshot; see `TopScheduler::recover_with`.
     pub async fn recover(&self) -> AgentResult<RecoverySummary> {
+        let archived = self.scheduler.archived_issue_ids().await?;
+        for mut request in crate::usage::request_ledger(&self.store.list_events().await?) {
+            if request.status == "started"
+                && request.issue_id.is_none_or(|id| !archived.contains(&id))
+            {
+                request.status = "interrupted".into();
+                request.finished_at = Some(Utc::now());
+                request.error = Some(
+                    "controller restarted before usage was recorded; provider usage unknown".into(),
+                );
+                let mut event = crate::domain::NewEvent::new(
+                    "recovery",
+                    crate::usage::REQUEST_FINISHED,
+                    "interrupted model request; usage unknown",
+                )
+                .with_payload(serde_json::to_value(&request)?);
+                if let Some(id) = request.job_id {
+                    event = event.with_job(id);
+                }
+                if let Some(id) = request.issue_id {
+                    event = event.with_issue(id);
+                }
+                self.store.append_event(event).await?;
+            }
+        }
         let _reviews = self.snapshot_review_lock.lock().await;
         let summary = self
             .scheduler

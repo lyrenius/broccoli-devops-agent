@@ -20,6 +20,6 @@ export class ReportProgressScope {
     if (!this.issueId || event.issue_id !== this.issueId) return false;
     if (event.job_id) this.jobId = event.job_id;
     if (event.kind === "scheduler.issue_created") return true;
-    return Boolean(event.job_id) && ["team.callback", "model.usage", "scheduler.job_cancelled", "scheduler.job_failed"].includes(event.kind);
+    return Boolean(event.job_id) && ["team.callback", "model.usage", "model.request_started", "model.request_finished", "scheduler.job_cancelled", "scheduler.job_failed"].includes(event.kind);
   }
 }

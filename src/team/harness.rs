@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use broccoli_agent_harness as harness;
 use broccoli_agent_harness::{
     AgentConfig, AgentOutcome, Item, ModelClient, ProgressObserver, RunProgress, RunStep,
-    ToolRegistry, ToolSpec, Trust, fence_untrusted, run_agent_observed, tool_fn,
+    ToolRegistry, ToolSpec, Trust, fence_untrusted, run_agent_recorded, tool_fn,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
@@ -203,6 +203,10 @@ fn interim_callback(job: &Job, interim: Interim) -> TeamCallback {
 
 /// Operate Team that delegates diagnosis to a model through the agent harness.
 pub struct HarnessOperateTeam {
+    accounting_control: Option<(
+        Arc<crate::scheduler::TopScheduler>,
+        crate::operations::Operations,
+    )>,
     client: Arc<dyn ModelClient>,
     artifacts: FileArtifactStore,
     store: Arc<dyn StateStore>,
@@ -228,6 +232,7 @@ impl HarnessOperateTeam {
         store: Arc<dyn StateStore>,
     ) -> Self {
         Self {
+            accounting_control: None,
             client,
             artifacts,
             store,
@@ -240,6 +245,16 @@ impl HarnessOperateTeam {
             inspection: None,
             settings: None,
         }
+    }
+
+    /// Lets per-request accounting enforce the deployment's current spending budget.
+    pub fn with_accounting_control(
+        mut self,
+        scheduler: Arc<crate::scheduler::TopScheduler>,
+        operations: crate::operations::Operations,
+    ) -> Self {
+        self.accounting_control = Some((scheduler, operations));
+        self
     }
 
     /// Reads the run budgets and the inspection allowance from the live settings from now on.
@@ -1062,14 +1077,28 @@ impl AgentTeamPort for HarnessOperateTeam {
         let observer = ProgressLines {
             sender: progress_tx_for_steps,
         };
-        let mut agent_run = Box::pin(run_agent_observed(
+        let mut accounting = crate::accounting::RequestAccounting::new(
+            self.store.clone(),
+            self.settings.clone().unwrap_or_default(),
+            self.model_name.clone(),
+            job.job_id,
+            Some(job.job_id),
+            Some(job.issue_id),
+        );
+        if let Some((scheduler, operations)) = &self.accounting_control {
+            accounting = accounting.with_control(scheduler.clone(), operations.clone());
+        }
+        let mut agent_run = Box::pin(run_agent_recorded(
             self.client.as_ref(),
             &registry,
             &config,
             &instructions,
             initial,
             harness_token,
-            Some(&observer),
+            harness::RunObservers {
+                progress: Some(&observer),
+                requests: Some(&accounting),
+            },
         ));
         let drain = async {
             while let Some(interim) = progress_rx.recv().await {

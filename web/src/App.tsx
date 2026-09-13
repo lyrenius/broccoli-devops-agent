@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { api } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, streamEvents } from "./api";
 import type { Status } from "./types";
 import { LocaleProvider } from "./i18n";
 import { Shell, type Tab } from "./components/Shell";
@@ -29,6 +29,7 @@ export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const refreshVersion = useRef(0);
 
   const setTab = (next: Tab) => {
     window.location.hash = next;
@@ -42,10 +43,14 @@ export default function App() {
   }, []);
 
   const refresh = useCallback(async () => {
+    const version = ++refreshVersion.current;
     try {
-      setStatus(await api.status());
+      const next = await api.status();
+      if (version !== refreshVersion.current) return;
+      setStatus(next);
       setError(null);
     } catch (e) {
+      if (version !== refreshVersion.current) return;
       setError((e as Error).message);
     }
     setTick((t) => t + 1);
@@ -57,13 +62,29 @@ export default function App() {
     return () => clearInterval(timer);
   }, [refresh]);
 
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    api.events(1).then(tail => {
+      if (disposed) return;
+      stop = streamEvents(tail.at(-1)?.sequence ?? 0, event => {
+        if ((event.kind.startsWith("model.request_") || event.kind.startsWith("operation.")) && !timer) {
+          timer = setTimeout(() => { timer = undefined; void refresh(); }, 30);
+        }
+      });
+      void refresh();
+    }).catch(() => undefined); // The existing polling loop remains a reconnection fallback.
+    return () => { disposed = true; stop?.(); if (timer) clearTimeout(timer); };
+  }, [refresh]);
+
   return (
     <LocaleProvider agentLanguage={status?.language ?? null}>
       <Shell tab={tab} onTab={setTab} status={status} error={error} onChanged={refresh}>
         {tab === "overview" && <Overview tick={tick} status={status} onChanged={refresh} />}
         {tab === "inbox" && <Inbox tick={tick} status={status} onChanged={refresh} />}
         {tab === "records" && !("trace" in route) && <Records tick={tick} onChanged={refresh} />}
-        {"trace" in route && <Trace key={route.trace.issueId} issueId={route.trace.issueId} jobId={route.trace.jobId} tick={tick} />}
+        {"trace" in route && <Trace key={route.trace.issueId} issueId={route.trace.issueId} jobId={route.trace.jobId} tick={tick} usage={status?.usage} />}
         {tab === "events" && <Events />}
         {tab === "report" && <Report status={status} onChanged={refresh} />}
         {tab === "settings" && <Settings status={status} onChanged={refresh} />}

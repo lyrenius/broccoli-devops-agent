@@ -538,9 +538,9 @@ async fn usage_is_accumulated_across_turns_and_gaps_are_visible() {
     assert!(!report.usage.is_complete());
 }
 
-/// A spent token budget stops the run through the wrap-up path, so it still concludes.
+/// A spent token budget does not purchase an extra wrap-up request.
 #[tokio::test]
-async fn token_budget_ends_the_run_with_a_wrap_up_turn() {
+async fn token_budget_stops_without_a_paid_wrap_up_turn() {
     let counter = Arc::new(AtomicU32::new(0));
     let client = ScriptedModelClient::new(vec![
         vec![call("c1", "add", json!({"a": 1, "b": 1}))],
@@ -554,7 +554,7 @@ async fn token_budget_ends_the_run_with_a_wrap_up_turn() {
         &client,
         &registry(counter),
         &AgentConfig {
-            // Two turns cost 1000 tokens; the third turn is only reached to wrap up.
+            // Two turns cost 1000 tokens; the third turn must never be issued.
             max_total_tokens: 900,
             ..AgentConfig::default()
         },
@@ -568,17 +568,14 @@ async fn token_budget_ends_the_run_with_a_wrap_up_turn() {
     .await
     .unwrap();
 
-    assert!(report.wrapped_up, "the budget must force a wrap-up turn");
+    assert!(!report.wrapped_up);
+    assert!(matches!(report.outcome, AgentOutcome::LimitReached { .. }));
+    assert_eq!(report.usage.total_tokens(), 1000);
     assert_eq!(
-        report.outcome,
-        AgentOutcome::Structured {
-            tool: "finish".into(),
-            value: json!({"answer": "out of budget"}),
-        },
-        "a run stopped on cost still ends in a structured result"
+        client.offered_tools().await.len(),
+        2,
+        "no third paid request"
     );
-    // Only the terminal tool is on offer once the budget is spent.
-    assert_eq!(client.offered_tools().await[2], vec!["finish".to_string()]);
     assert!(
         report
             .transcript

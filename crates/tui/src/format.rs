@@ -146,9 +146,17 @@ pub fn thousands(n: u64) -> String {
 /// Money is only ever shown when a price list exists; tokens are shown regardless.
 pub fn money(usage: &UsageTotals) -> Option<String> {
     usage.cost.map(|cost| {
-        format!("{cost:.4} {}", usage.currency.as_deref().unwrap_or(""))
-            .trim_end()
-            .to_string()
+        format!(
+            "{}{cost:.4} {}",
+            if usage.requests_without_usage > 0 {
+                "≥"
+            } else {
+                ""
+            },
+            usage.currency.as_deref().unwrap_or("")
+        )
+        .trim_end()
+        .to_string()
     })
 }
 

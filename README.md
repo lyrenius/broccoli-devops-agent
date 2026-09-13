@@ -211,7 +211,7 @@ BROCCOLI_API=http://127.0.0.1:4721 pnpm --dir web dev --port 5181
 The repository is a Cargo workspace with three crates and a strict dependency direction:
 
 - **`broccoli-devops-agent`** (root) — the control plane: domain model, ports, Scheduler, Collector, stores, Platform, authority policy, Teams, the HTTP API, and CLI. Its ports (`AgentTeamPort`, `SchedulerPolicyPort`, `SnapshotJudgePort`) are the backend-neutral seam for model-backed work.
-- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call/token budgets with a low-budget warning and wrap-up turns that offer only the terminal tools, per-request token accounting, step-by-step progress observation, retries with backoff on transient backend failures, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (the OpenAI-compatible relay client lives behind its `openai` feature) and knows nothing about Broccoli.
+- **[`crates/harness`](./crates/harness)** (`broccoli-agent-harness`) — our own model-agnostic agentic loop: typed allowlisted tools, terminal tools for structured output, turn/tool-call budgets with low-budget warnings and wrap-up turns, plus a token ceiling that starts no extra requests, per-request token accounting, step-by-step progress observation, retries with backoff on transient backend failures, cooperative cancellation, and replayable transcripts. It is generic over its `ModelClient` boundary (the OpenAI-compatible relay client lives behind its `openai` feature) and knows nothing about Broccoli.
 - **[`crates/tui`](./crates/tui)** (`broccoli-tui`) — the terminal console, a pure HTTP client of the API.
 - **[`web/`](./web)** — the web console (React 19 + Vite + TypeScript + Tailwind v4), also a pure API client, served by Vite separately. It mirrors Broccoli's web UI — the same colour tokens, sidebar navigation, cards, badges, and page headers — so operators move between the judge's admin pages and the console without a visual seam, while sharing no code with Broccoli's plugin system.
 
@@ -301,22 +301,15 @@ Cancellation is cooperative — the Team stops at its next step boundary and sti
 callback, so the transcript is kept and the Job lands in the Failed inbox where a human can send it
 back upstream, rather than vanishing with the process.
 
-**Tokens and cost.** Every backend response's `usage` block is parsed (both wire formats), summed
-over the run, recorded on the Job and as a `model.usage` event, and totalled from that append-only
-log. Costs are never stored — they are derived on demand from the counts and `[model.pricing]`, so
-a changed price list re-prices history correctly and a deployment without one still gets complete
-token accounting. A relay that reports no usage is counted as a request with *unknown* tokens
-rather than as a free one, and every figure says so.
+**Tokens and cost.** Every model attempt has a stable request ID and durable `model.request_started` / `model.request_finished` events. Each response is recorded before another request may begin; the final Job usage is a snapshot, not an additional bill. Older pass-only `model.usage` logs remain readable. Retries and in-flight cancellations count as attempts with unknown usage when no counts were returned; local refusals and cancellation before transport do not count. A response with valid usage keeps it even if its assistant output is invalid. Restart recovery marks unfinished requests as interrupted/unknown, and imported sessions never consume this deployment's budget.
+
+`[model.pricing]` prices ordinary input, cached input and output separately. The API includes per-request details, Web refreshes on ledger events, TUI exposes request breakdowns, and CLI prints each completed attempt. Figures marked ≥ cover only known usage. The `check-model` diagnostic also records its calls in the selected data directory.
 
 ```bash
 cargo run -- usage          # totals, per model, against the ceiling
 ```
 
-**Budgets.** `max_tokens_per_run` bounds one pass: it stops through the same wrap-up path as the
-turn and tool-call budgets, so a run stopped on cost still ends in a structured result. `[budget]`
-bounds the deployment: reaching `max_total_tokens` or `max_total_cost` freezes the Scheduler
-(recovery restores that freeze across restarts) and refuses new reports until the ceiling is raised
-and a human resumes.
+**Budgets.** `max_tokens_per_run` stops further model requests as soon as known usage reaches the limit, without buying a wrap-up request. Turn/tool-call budgets retain their existing wrap-up behavior. `[budget]` is checked after each response: reaching its token or cost ceiling freezes subsequent dispatch and cancels other in-flight model requests. A response that already completed may still deliver its conclusion. Raise the ceiling and resume explicitly to continue. Unknown or not-yet-returned provider usage cannot be predicted, so these limits do not guarantee a zero-overshoot invoice.
 
 ## Testbed
 

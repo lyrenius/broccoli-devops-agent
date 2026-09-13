@@ -56,7 +56,7 @@ fn closed_port() -> u16 {
 fn runner(
     dir: &std::path::Path,
     topology: DeploymentTopology,
-    client: Option<Arc<ScriptedModelClient>>,
+    client: Option<Arc<dyn broccoli_agent_harness::ModelClient>>,
 ) -> SliceRunner {
     let backend = match client {
         Some(client) => TeamBackend::Harness {
@@ -312,6 +312,71 @@ async fn malformed_model_findings_are_refused_and_rule_evidence_survives_a_model
     let usage = runner.usage_totals().await.unwrap();
     assert_eq!(usage.total_tokens, 36);
     assert_eq!(usage.requests_without_usage, 1);
+    assert_eq!(
+        usage.calls.len(),
+        4,
+        "three reviewed responses and one failed attempt"
+    );
+    assert!(usage.calls.iter().all(|call| call.request.job_id.is_none()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_snapshot_review_keeps_each_request_without_creating_work() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct StalledReview(AtomicUsize);
+    #[async_trait::async_trait]
+    impl broccoli_agent_harness::ModelClient for StalledReview {
+        async fn complete(
+            &self,
+            _: broccoli_agent_harness::ModelRequest<'_>,
+        ) -> broccoli_agent_harness::HarnessResult<broccoli_agent_harness::ModelTurn> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(broccoli_agent_harness::ModelTurn::with_usage(
+                    vec![call("first", "unavailable_tool", json!({}))],
+                    Usage::reported(100, 20, 20),
+                ));
+            }
+            std::future::pending().await
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let client = Arc::new(StalledReview(AtomicUsize::new(0)));
+    let controller = Arc::new(runner(
+        dir.path(),
+        topology(closed_port()),
+        Some(client.clone()),
+    ));
+    let task_runner = controller.clone();
+    let task = tokio::spawn(async move { task_runner.capture(SnapshotCause::Manual).await });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while client.0.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let during = controller.usage_totals().await.unwrap();
+    assert_eq!(during.total_tokens, 120);
+    assert_eq!(during.calls.len(), 2);
+    let operation = controller.operations().active().remove(0);
+    controller
+        .operations()
+        .cancel(operation.operation_id, "test")
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let after = controller.usage_totals().await.unwrap();
+    assert_eq!(after.total_tokens, 120);
+    assert_eq!(after.requests, 2);
+    assert_eq!(after.requests_without_usage, 1);
+    assert_eq!(after.calls[1].request.status, "cancelled");
+    assert!(controller.operations().active().is_empty());
+    assert!(controller.store().list_jobs().await.unwrap().is_empty());
+    assert!(controller.store().list_issues().await.unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

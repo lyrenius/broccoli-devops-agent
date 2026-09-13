@@ -336,6 +336,29 @@ fn draw_usage(frame: &mut Frame, area: Rect, app: &App) {
                 usage.passes, usage.requests
             )));
             doc.line(totals);
+            for call in usage.calls.iter().rev().take(3) {
+                let amount = call.usage.as_ref().map_or("unknown usage".into(), |u| {
+                    format!(
+                        "in {} / cached {} / out {}{}",
+                        u.input_tokens,
+                        u.cached_input_tokens,
+                        u.output_tokens,
+                        if u.requests_without_usage > 0 {
+                            " (known only)"
+                        } else {
+                            ""
+                        }
+                    )
+                });
+                let cost = call.cost.map_or("unpriced/unknown".into(), |cost| {
+                    format!("{cost:.6} {}", call.currency.as_deref().unwrap_or(""))
+                });
+                doc.note(&format!(
+                    "{} {} · {amount} · {cost}",
+                    short(&call.request_id),
+                    call.status
+                ));
+            }
             if usage.by_model.len() > 1 {
                 for model in &usage.by_model {
                     let mut line = format!(

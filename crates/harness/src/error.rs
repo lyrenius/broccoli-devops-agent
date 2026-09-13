@@ -13,6 +13,16 @@ pub type HarnessResult<T> = Result<T, HarnessError>;
 /// failure is retried by the loop before it becomes an error; a permanent one is not.
 #[derive(Debug, Error)]
 pub enum HarnessError {
+    /// A response supplied usage even though it could not produce a usable assistant turn.
+    #[error("model response failure: {reason}")]
+    Response {
+        /// Response parsing or provider error.
+        reason: String,
+        /// Counts reported in the response, including explicit usage gaps.
+        usage: crate::Usage,
+        /// Whether the provider asked for a retry.
+        retryable: bool,
+    },
     /// The local context check refused the request before it reached the provider.
     #[error("context limit: {0}")]
     ContextLimit(String),
@@ -33,4 +43,26 @@ pub enum HarnessError {
     /// Conversation or transcript data could not be serialized.
     #[error("serialization failed: {0}")]
     Serialization(#[from] serde_json::Error),
+}
+
+impl HarnessError {
+    /// Whether the next attempt may recover without changing the request.
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::ModelUnavailable(_)
+                | Self::Response {
+                    retryable: true,
+                    ..
+                }
+        )
+    }
+    /// Counts returned before a parsing/provider failure, otherwise one unknown-usage request.
+    pub fn usage(&self) -> crate::Usage {
+        match self {
+            Self::Response { usage, .. } => *usage,
+            Self::ContextLimit(_) => crate::Usage::default(),
+            _ => crate::Usage::unreported(),
+        }
+    }
 }

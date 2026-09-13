@@ -144,6 +144,10 @@ pub struct ModelRequest<'a> {
 /// an adapter that discards it makes cost accounting impossible further up.
 #[async_trait]
 pub trait ModelClient: Send + Sync {
+    /// Local validation before accounting or transport. It must not issue a network request.
+    fn validate_request(&self, _request: ModelRequest<'_>) -> HarnessResult<()> {
+        Ok(())
+    }
     /// Produces the model's next turn for the given conversation.
     async fn complete(&self, request: ModelRequest<'_>) -> HarnessResult<ModelTurn>;
 }

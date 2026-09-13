@@ -15,7 +15,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use broccoli_agent_harness::{Item, ToolRegistry, Trust, cancel_pair, run_agent};
+use broccoli_agent_harness::{
+    Item, RunObservers, ToolRegistry, Trust, cancel_pair, run_agent_recorded,
+};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use broccoli_devops_agent::config::AppConfig;
@@ -811,9 +813,25 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 client.model(),
                 model.wire_api
             );
-            let (_handle, token) = cancel_pair();
+            let (handle, token) = cancel_pair();
+            let interrupt = tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    handle.cancel();
+                }
+            });
+            let store = Arc::new(FileStateStore::open(&config.data.dir)?);
+            let accounting = broccoli_devops_agent::accounting::RequestAccounting::new(
+                store,
+                broccoli_devops_agent::settings::SharedSettings::new(LiveSettings::from_config(
+                    &config,
+                )),
+                model.model.clone(),
+                Uuid::now_v7(),
+                None,
+                None,
+            );
             let started = std::time::Instant::now();
-            let report = run_agent(
+            let report = run_agent_recorded(
                 &client,
                 &ToolRegistry::new(),
                 &model.harness_budget(),
@@ -823,8 +841,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     trust: Trust::Trusted,
                 }],
                 token,
+                RunObservers {
+                    progress: None,
+                    requests: Some(&accounting),
+                },
             )
             .await?;
+            interrupt.abort();
             println!(
                 "reply after {:.1}s: {:?}",
                 started.elapsed().as_secs_f64(),

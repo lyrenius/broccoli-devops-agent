@@ -72,7 +72,24 @@ export interface ModelTotals {
  * `requests_without_usage` means the relay did not report some of its usage, so the real
  * figures are higher than these.
  */
+export interface RequestCost {
+  request_id: string;
+  namespace: string;
+  model: string;
+  job_id: string | null;
+  issue_id: string | null;
+  turn: number;
+  started_at: string;
+  finished_at: string | null;
+  status: "started" | "succeeded" | "failed" | "cancelled" | "interrupted" | "not_sent";
+  usage: ModelUsage | null;
+  error: string | null;
+  cost: number | null;
+  currency: string | null;
+}
+
 export interface UsageTotals {
+  calls?: RequestCost[];
   passes: number;
   input_tokens: number;
   cached_input_tokens: number;

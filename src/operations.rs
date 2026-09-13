@@ -277,6 +277,11 @@ pub fn signal() -> Option<CancelSignal> {
     CURRENT.try_with(|ctx| ctx.signal.clone()).ok()
 }
 
+/// ID of the current activity, used to avoid cancelling a response that already finished.
+pub fn current_id() -> Option<Uuid> {
+    CURRENT.try_with(|ctx| ctx.id).ok()
+}
+
 /// Updates the model phase at the actual step boundary, before asynchronous display messages
 /// can lag behind a subsequent inspection. The Team callback supplies the corresponding event.
 pub fn model_started() {

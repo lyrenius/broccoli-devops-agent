@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use broccoli_agent_harness::{
     AgentOutcome, Item, ModelClient, ProgressObserver, RunProgress, ToolRegistry, ToolSpec,
-    TranscriptEntry, Trust, Usage, cancel_pair, run_agent_observed, tool_fn,
+    TranscriptEntry, Trust, Usage, cancel_pair, run_agent_recorded, tool_fn,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -186,6 +186,10 @@ impl ProgressObserver for ReviewProgress {
 /// Runs a rules-only review when no relay is configured; otherwise adds model correlation.
 /// The model has one terminal reporting tool and no inspection, action, or dispatch tools.
 pub struct HybridSnapshotJudge {
+    accounting_control: Option<(
+        Arc<crate::scheduler::TopScheduler>,
+        crate::operations::Operations,
+    )>,
     client: Option<Arc<dyn ModelClient>>,
     model_name: String,
     artifacts: FileArtifactStore,
@@ -203,12 +207,23 @@ impl HybridSnapshotJudge {
         settings: SharedSettings,
     ) -> Self {
         Self {
+            accounting_control: None,
             client,
             model_name,
             artifacts,
             store,
             settings,
         }
+    }
+
+    /// Shares the request ledger and spending limits used by operator investigations.
+    pub fn with_accounting_control(
+        mut self,
+        scheduler: Arc<crate::scheduler::TopScheduler>,
+        operations: crate::operations::Operations,
+    ) -> Self {
+        self.accounting_control = Some((scheduler, operations));
+        self
     }
 
     async fn transcript(&self, snapshot_id: SnapshotId, body: &Value) -> AgentResult<Artifact> {
@@ -310,18 +325,36 @@ impl SnapshotJudgePort for HybridSnapshotJudge {
                         .map_err(|e| AgentError::InvalidInput(e.to_string()))?,
                     trust: Trust::Untrusted,
                 }];
-                let (_handle, cancel) = cancel_pair();
+                let (handle, cancel) = cancel_pair();
                 let progress = ReviewProgress::default();
-                let report = run_agent_observed(
+                let mut accounting = crate::accounting::RequestAccounting::new(
+                    self.store.clone(),
+                    self.settings.clone(),
+                    self.model_name.clone(),
+                    snapshot_id,
+                    None,
+                    None,
+                );
+                if let Some((scheduler, operations)) = &self.accounting_control {
+                    accounting = accounting.with_control(scheduler.clone(), operations.clone());
+                }
+                let work = run_agent_recorded(
                     client.as_ref(),
                     &registry,
                     &config,
                     &instructions,
                     input,
                     cancel,
-                    Some(&progress),
-                )
-                .await;
+                    broccoli_agent_harness::RunObservers {
+                        progress: Some(&progress),
+                        requests: Some(&accounting),
+                    },
+                );
+                tokio::pin!(work);
+                let report = tokio::select! {
+                    report = &mut work => report,
+                    () = crate::operations::cancelled() => { handle.cancel(); work.await },
+                };
                 let (usage, transcript, outcome) = match report {
                     Ok(report) => (
                         report.usage,

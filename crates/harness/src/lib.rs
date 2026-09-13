@@ -40,9 +40,11 @@ pub mod conversation;
 pub mod error;
 #[cfg(feature = "openai")]
 pub mod openai;
+pub mod request;
 pub mod testing;
 pub mod tool;
 
+pub use agent::run_agent_recorded;
 pub use agent::{
     AgentConfig, AgentOutcome, AgentRunReport, CancelHandle, CancelToken, ProgressObserver,
     RunProgress, RunStep, cancel_pair, run_agent, run_agent_observed,
@@ -50,6 +52,7 @@ pub use agent::{
 pub use client::{AssistantItem, ModelClient, ModelRequest, ModelTurn, Usage};
 pub use conversation::{Item, Transcript, TranscriptEntry, Trust, TurnRecord, fence_untrusted};
 pub use error::{HarnessError, HarnessResult};
+pub use request::{RequestObserver, RequestRecord, RequestStatus, RunObservers};
 pub use tool::{
     Tool, ToolHandler, ToolRegistry, ToolResult, ToolSpec, tool_fn, tool_fn_cancellable,
 };

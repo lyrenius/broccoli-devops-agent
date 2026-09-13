@@ -108,10 +108,24 @@ pub struct RunningPass {
     pub started_at: String,
 }
 
+/// One request's durable counters and current price, including failed and incomplete calls.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RequestCost {
+    pub request_id: String,
+    pub job_id: Option<String>,
+    pub status: String,
+    pub usage: Option<ModelUsage>,
+    pub cost: Option<f64>,
+    pub currency: Option<String>,
+}
+
 /// Token and cost totals.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct UsageTotals {
+    /// Per-request records priced by the server.
+    pub calls: Vec<RequestCost>,
     /// Model-backed passes counted.
     pub passes: u32,
     /// Input tokens, cached ones included.

@@ -1,4 +1,6 @@
 import { AlertTriangle, Archive, ArrowLeft, Bot, ChevronRight, Download, Info, Radio, Terminal, User, Waypoints, Wrench } from "lucide-react";
+import { RequestUsageTable } from "./Spend";
+import type { UsageTotals } from "../types";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, streamEvents } from "../api";
 import { useT } from "../i18n";
@@ -197,7 +199,7 @@ function TurnDivider({ turn }: { turn: TurnRecord }) {
     <div className="flex items-center gap-2 lg:pl-[12.75rem] text-[11px] text-muted-foreground">
       <span className="font-medium text-foreground">{t("trace.turn", { n: turn.turn })}</span>
       <span>· {fmtDuration(latency)}</span>
-      {turn.usage.requests_without_usage === 0 && <span>· {t("trace.tokens", { n: tokens.toLocaleString() })}</span>}
+      {turn.usage.requests_without_usage === 0 && <span>· {t("usage.input")} {turn.usage.input_tokens.toLocaleString()} / {t("usage.output")} {turn.usage.output_tokens.toLocaleString()} · {t("trace.tokens", { n: tokens.toLocaleString() })}</span>}
       {turn.retries > 0 && <Badge variant="warning">{t("trace.turn.retries", { n: turn.retries, ies: turn.retries === 1 ? "y" : "ies" })}</Badge>}
       {turn.wrap_up && <Badge variant="warning">{t("trace.turn.wrapUp")}</Badge>}
       <span className="h-px flex-1 bg-border" />
@@ -308,7 +310,7 @@ function ActionRow({ action }: { action: ActionRun }) {
   );
 }
 
-export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: string; tick: number }) {
+export function Trace({ issueId, jobId, tick, usage }: { issueId: string; jobId?: string; tick: number; usage?: UsageTotals }) {
   const { t, status: label, dateTime } = useT();
   const [bundle, setBundle] = useState<SessionBundle | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -584,6 +586,7 @@ export function Trace({ issueId, jobId, tick }: { issueId: string; jobId?: strin
                   <Clamp text={pretty(viewOf(selected))} mono lines={20} />
                 </Fold>
               )}
+              <RequestUsageTable calls={usage?.calls?.filter(call => call.job_id === selected.job_id) ?? []} />
               <PassTrace job={selected} transcript={transcriptOf(selected)} steps={steps[selected.job_id] ?? []} live={LIVE_JOB.has(selected.status)} endAt={endOf(selected)} />
             </CardContent>
           </Card>

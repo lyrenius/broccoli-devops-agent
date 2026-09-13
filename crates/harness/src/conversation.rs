@@ -112,7 +112,7 @@ pub struct Transcript {
     pub instructions: String,
     /// Every conversation item in order.
     pub entries: Vec<TranscriptEntry>,
-    /// One record per model request, in order. Absent from transcripts written before this
+    /// One record per completed model turn, in order; retries are separate request attempts. Absent from transcripts written before this
     /// field existed; the entries alone are still a complete replay.
     #[serde(default)]
     pub turns: Vec<TurnRecord>,
@@ -128,7 +128,7 @@ pub struct RunFailure {
     pub at: DateTime<Utc>,
     /// Model turn that failed, counting from one.
     pub turn: u32,
-    /// `model`, `context`, or `response`.
+    /// Failure stage, such as `model`, `context`, `response`, `budget`, or `usage_persistence`.
     pub stage: String,
     /// Backend or local preflight explanation.
     pub reason: String,

@@ -1,5 +1,7 @@
 //! The bounded agent loop: model turns, tool execution, limits, retries, and cancellation.
 
+use crate::{RequestRecord, RequestStatus, RunObservers};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -277,9 +279,35 @@ pub async fn run_agent_observed(
     config: &AgentConfig,
     instructions: &str,
     initial_items: Vec<Item>,
-    mut cancel: CancelToken,
+    cancel: CancelToken,
     progress: Option<&dyn ProgressObserver>,
 ) -> HarnessResult<AgentRunReport> {
+    run_agent_recorded(
+        client,
+        registry,
+        config,
+        instructions,
+        initial_items,
+        cancel,
+        RunObservers {
+            progress,
+            requests: None,
+        },
+    )
+    .await
+}
+
+/// Drives a run with awaited request accounting, while keeping display callbacks best-effort.
+pub async fn run_agent_recorded(
+    client: &dyn ModelClient,
+    registry: &ToolRegistry,
+    config: &AgentConfig,
+    instructions: &str,
+    initial_items: Vec<Item>,
+    mut cancel: CancelToken,
+    observers: RunObservers<'_>,
+) -> HarnessResult<AgentRunReport> {
+    let progress = observers.progress;
     let mut transcript = Transcript::new(instructions);
     // Every item goes through here, so the observer sees the transcript grow exactly as it is
     // written — including the inputs, so a live view starts where the stored one does.
@@ -310,6 +338,7 @@ pub async fn run_agent_observed(
     let mut model_turns: u32 = 0;
     let mut tool_calls: u32 = 0;
     let mut model_retries: u32 = 0;
+    let mut request_sequence: u32 = 0;
     let mut usage = Usage::default();
     let mut wrap_up_used: u32 = 0;
     let mut warned = false;
@@ -368,6 +397,17 @@ pub async fn run_agent_observed(
     loop {
         if cancel.is_cancelled() {
             finish!(AgentOutcome::Cancelled);
+        }
+        if config.max_total_tokens > 0 && usage.total_tokens() >= config.max_total_tokens {
+            let reason = format!(
+                "token budget ({}) exhausted at {}; no further model requests",
+                config.max_total_tokens,
+                usage.total_tokens()
+            );
+            append!(Item::Notice {
+                text: reason.clone()
+            });
+            finish!(AgentOutcome::LimitReached { reason });
         }
         if exhausted.is_none() {
             if model_turns >= config.max_model_turns {
@@ -431,25 +471,93 @@ pub async fn run_agent_observed(
         // Cancellation may arrive while the backend is thinking or while a retry waits; racing
         // keeps the loop honest about "cooperative" instead of waiting out a slow model call.
         let turn = loop {
+            if cancel.is_cancelled() {
+                finish!(AgentOutcome::Cancelled);
+            }
+            if let Err(error) = client.validate_request(request) {
+                fail!("context", error);
+            }
+            if let Some(observer) = observers.requests
+                && let Err(error) = observer.before_request().await
+            {
+                fail!("budget", error);
+            }
+            if cancel.is_cancelled() {
+                finish!(AgentOutcome::Cancelled);
+            }
+            request_sequence += 1;
+            let mut record = RequestRecord {
+                request_id: request_sequence,
+                turn: model_turns,
+                started_at: Utc::now(),
+                finished_at: None,
+                status: RequestStatus::Started,
+                usage: None,
+                error: None,
+            };
+            if let Some(observer) = observers.requests
+                && let Err(error) = observer.record(&record).await
+            {
+                fail!("usage_persistence", error);
+            }
+            // Check after the durable start write too: cancellation during that write is not a
+            // network attempt. The flag distinguishes a dropped unpolled future from an in-flight call.
+            let issued = AtomicBool::new(false);
             let attempt = tokio::select! {
-                attempt = client.complete(request) => attempt,
-                () = cancel.cancelled() => {
-                    // The request was issued and then abandoned. Whether the backend billed it
-                    // is unknowable from here, so it is counted as a request whose usage was
-                    // never reported rather than as one that never happened.
-                    usage += Usage::unreported();
-                    finish!(AgentOutcome::Cancelled)
+                biased;
+                () = cancel.cancelled() => None,
+                attempt = async { issued.store(true, Ordering::SeqCst); client.complete(request).await } => Some(attempt),
+            };
+            record.finished_at = Some(Utc::now());
+            let spent = match &attempt {
+                Some(Ok(turn)) => {
+                    record.status = if turn.items.is_empty() {
+                        RequestStatus::Failed
+                    } else {
+                        RequestStatus::Succeeded
+                    };
+                    if turn.items.is_empty() {
+                        record.error = Some("empty assistant turn".into());
+                    }
+                    turn.usage
+                }
+                Some(Err(error)) => {
+                    record.status = if matches!(error, HarnessError::ContextLimit(_)) {
+                        RequestStatus::NotSent
+                    } else {
+                        RequestStatus::Failed
+                    };
+                    record.error = Some(error.to_string());
+                    error.usage()
+                }
+                None if issued.load(Ordering::SeqCst) => {
+                    record.status = RequestStatus::Cancelled;
+                    record.error = Some("cancelled in flight; provider usage unknown".into());
+                    Usage::unreported()
+                }
+                None => {
+                    record.status = RequestStatus::NotSent;
+                    record.error = Some("cancelled before transport".into());
+                    Usage::default()
                 }
             };
+            record.usage = Some(spent);
+            usage += spent;
+            if let Some(observer) = observers.requests
+                && let Err(error) = observer.record(&record).await
+            {
+                fail!("usage_persistence", error);
+            }
             match attempt {
-                Ok(turn) => break turn,
-                Err(HarnessError::ModelUnavailable(reason))
-                    if model_retries < config.max_model_retries =>
+                None => finish!(AgentOutcome::Cancelled),
+                Some(Ok(turn)) => break turn,
+                Some(Err(error))
+                    if error.retryable() && model_retries < config.max_model_retries =>
                 {
                     model_retries += 1;
                     report!(RunStep::Retrying {
                         attempt: model_retries,
-                        reason,
+                        reason: error.to_string()
                     });
                     let backoff = config.retry_backoff * model_retries;
                     tokio::select! {
@@ -457,21 +565,16 @@ pub async fn run_agent_observed(
                         () = cancel.cancelled() => finish!(AgentOutcome::Cancelled),
                     }
                 }
-                Err(error) => {
+                Some(Err(error)) => {
                     let stage = if matches!(error, HarnessError::ContextLimit(_)) {
                         "context"
                     } else {
-                        // A failed backend attempt has unknown usage; retaining the transcript
-                        // must not turn that attempt into a free or nonexistent request.
-                        usage += Usage::unreported();
                         "model"
                     };
                     fail!(stage, error);
                 }
             }
         };
-        // The turn is billed whether or not it was usable, so the counters take it first.
-        usage += turn.usage;
         transcript.record_turn(TurnRecord {
             turn: model_turns,
             started_at: turn_started_at,

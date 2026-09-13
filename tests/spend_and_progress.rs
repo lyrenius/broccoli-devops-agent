@@ -511,3 +511,236 @@ async fn archive_storage_failure_is_explicit_and_keeps_known_spend() {
     assert!(result.artifact_ids.is_empty());
     assert_eq!(job.usage.unwrap().total_tokens(), 1100);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_response_is_billed_while_the_next_request_is_still_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = Arc::new(SlowModelClient {
+        inner: ScriptedModelClient::new(vec![
+            vec![call("r1", "read_snapshot_view", json!({}))],
+            vec![diagnose("r2", "done")],
+        ])
+        .with_usage_per_turn(Usage::reported(1000, 0, 100)),
+        delay: Duration::from_millis(300),
+    });
+    let controller = Arc::new(runner_with(dir.path(), client, SpendBudget::default()));
+    let pending = {
+        let controller = controller.clone();
+        tokio::spawn(async move { controller.handle_report(report("live ledger")).await })
+    };
+    let live = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let totals = controller.usage_totals().await.unwrap();
+            if totals.calls.len() == 2 && totals.calls[1].request.status == "started" {
+                break totals;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!pending.is_finished());
+    assert_eq!(live.input_tokens, 1000);
+    assert_eq!(live.output_tokens, 100);
+    assert_eq!(live.requests, 2);
+    assert_eq!(live.requests_without_usage, 1);
+    assert!((live.cost.unwrap() - 0.0045).abs() < 1e-9);
+    assert_eq!(live.calls[0].request.status, "succeeded");
+    pending.await.unwrap().unwrap();
+    let totals = controller.usage_totals().await.unwrap();
+    assert_eq!(totals.total_tokens, 2200);
+    assert_eq!(totals.requests, 2);
+    assert_eq!(totals.passes, 1);
+    assert_eq!(totals.requests_without_usage, 0);
+    assert!((totals.cost.unwrap() - 0.009).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retries_are_attempts_with_unknown_usage_and_final_summaries_are_not_double_billed() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = Arc::new(
+        ScriptedModelClient::new(vec![vec![diagnose("d", "done")]])
+            .with_transient_failures(1)
+            .with_usage_per_turn(Usage::reported(1000, 200, 100)),
+    );
+    let controller = runner_with(dir.path(), client, SpendBudget::default());
+    let mut live = controller.settings().current();
+    live.harness.retry_backoff = Duration::from_millis(1);
+    controller.settings().replace(live);
+    let (_, job) = controller
+        .handle_report(report("retry ledger"))
+        .await
+        .unwrap();
+    let totals = controller.usage_totals().await.unwrap();
+    assert_eq!(totals.requests, 2);
+    assert_eq!(totals.requests_without_usage, 1);
+    assert_eq!(totals.total_tokens, 1100);
+    assert_eq!(totals.passes, 1);
+    assert_eq!(job.usage.unwrap().requests, 2);
+    assert_eq!(totals.calls[0].request.status, "failed");
+    assert_eq!(totals.calls[1].request.status, "succeeded");
+    assert_ne!(
+        totals.calls[0].request.request_id,
+        totals.calls[1].request.request_id
+    );
+    assert!((totals.cost.unwrap() - 0.00396).abs() < 1e-9);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_global_budget_cancels_another_in_flight_model_request() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    struct ConcurrentModel {
+        entered: AtomicU32,
+        barrier: tokio::sync::Barrier,
+    }
+    #[async_trait::async_trait]
+    impl ModelClient for ConcurrentModel {
+        async fn complete(&self, _: ModelRequest<'_>) -> HarnessResult<ModelTurn> {
+            let id = self.entered.fetch_add(1, Ordering::SeqCst);
+            self.barrier.wait().await;
+            if id == 0 {
+                Ok(ModelTurn::with_usage(
+                    vec![diagnose("d", "complete")],
+                    Usage::reported(1000, 0, 100),
+                ))
+            } else {
+                std::future::pending().await
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let client = Arc::new(ConcurrentModel {
+        entered: AtomicU32::new(0),
+        barrier: tokio::sync::Barrier::new(2),
+    });
+    let controller = Arc::new(runner_with(
+        dir.path(),
+        client.clone(),
+        SpendBudget {
+            max_total_tokens: 1000,
+            max_total_cost: 0.0,
+        },
+    ));
+    let a = {
+        let c = controller.clone();
+        tokio::spawn(async move { c.handle_report(report("concurrent A")).await })
+    };
+    let b = {
+        let c = controller.clone();
+        tokio::spawn(async move { c.handle_report(report("concurrent B")).await })
+    };
+    let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
+        (a.await.unwrap().unwrap(), b.await.unwrap().unwrap())
+    })
+    .await
+    .unwrap();
+    assert!(a.1.status == JobStatus::Completed || b.1.status == JobStatus::Completed);
+    assert!(a.1.status == JobStatus::Failed || b.1.status == JobStatus::Failed);
+    assert_eq!(client.entered.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        controller.scheduler().mode().await,
+        SchedulerMode::FullyFrozen
+    );
+    let totals = controller.usage_totals().await.unwrap();
+    assert_eq!(totals.total_tokens, 1100);
+    assert_eq!(totals.requests, 2);
+    assert_eq!(totals.requests_without_usage, 1);
+}
+
+#[tokio::test]
+async fn ledger_replay_deduplicates_events_and_recovers_unfinished_attempts() {
+    use broccoli_devops_agent::{
+        domain::{ModelUsage, NewEvent},
+        usage::{REQUEST_FINISHED, REQUEST_STARTED, RequestUsage},
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let controller = runner(dir.path(), vec![], Usage::default(), SpendBudget::default());
+    let namespace = Uuid::now_v7();
+    let mut record = RequestUsage {
+        request_id: format!("{namespace}:1"),
+        namespace,
+        model: "test-model".into(),
+        job_id: Some(namespace),
+        issue_id: None,
+        turn: 1,
+        started_at: chrono::Utc::now(),
+        finished_at: None,
+        status: "started".into(),
+        usage: None,
+        error: None,
+    };
+    controller
+        .store()
+        .append_event(
+            NewEvent::new("test", REQUEST_STARTED, "started")
+                .with_job(namespace)
+                .with_payload(serde_json::to_value(&record).unwrap()),
+        )
+        .await
+        .unwrap();
+    record.status = "succeeded".into();
+    record.finished_at = Some(chrono::Utc::now());
+    record.usage = Some(ModelUsage {
+        model: "test-model".into(),
+        input_tokens: 1000,
+        output_tokens: 100,
+        requests: 1,
+        ..Default::default()
+    });
+    for _ in 0..2 {
+        controller
+            .store()
+            .append_event(
+                NewEvent::new("test", REQUEST_FINISHED, "finished")
+                    .with_job(namespace)
+                    .with_payload(serde_json::to_value(&record).unwrap()),
+            )
+            .await
+            .unwrap();
+    }
+    controller
+        .store()
+        .append_event(
+            NewEvent::new("test", "model.usage", "legacy summary")
+                .with_job(namespace)
+                .with_payload(serde_json::to_value(record.usage.clone().unwrap()).unwrap()),
+        )
+        .await
+        .unwrap();
+    let namespace = Uuid::now_v7();
+    record.namespace = namespace;
+    record.request_id = format!("{namespace}:1");
+    record.job_id = None;
+    record.status = "started".into();
+    record.usage = None;
+    record.finished_at = None;
+    controller
+        .store()
+        .append_event(
+            NewEvent::new("test", REQUEST_STARTED, "orphan")
+                .with_payload(serde_json::to_value(&record).unwrap()),
+        )
+        .await
+        .unwrap();
+    let before = controller.usage_totals().await.unwrap();
+    assert_eq!(before.total_tokens, 1100);
+    assert_eq!(before.requests, 2);
+    assert_eq!(before.requests_without_usage, 1);
+    drop(controller);
+    let restarted = runner(dir.path(), vec![], Usage::default(), SpendBudget::default());
+    restarted.recover().await.unwrap();
+    restarted.recover().await.unwrap();
+    let after = restarted.usage_totals().await.unwrap();
+    assert_eq!(after.total_tokens, 1100);
+    assert_eq!(after.requests, 2);
+    assert_eq!(after.requests_without_usage, 1);
+    assert_eq!(
+        after
+            .calls
+            .iter()
+            .filter(|call| call.request.status == "interrupted")
+            .count(),
+        1
+    );
+    assert_eq!(after.calls.len(), 2);
+}

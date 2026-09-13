@@ -5,12 +5,17 @@ import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
 import { ReportProgressScope, type ReportProgressRequest } from "../lib/report-progress";
-import type { ActiveOperation, EventRecord, RunningPass, UsageTotals } from "../types";
+import type { ActiveOperation, EventRecord, RequestCost, RunningPass, UsageTotals } from "../types";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Kv, StatTile } from "./ui";
 
 /** One unit throughout the console: one Mtok is one million tokens. */
 export function tokens(n: number): string {
   return `${(n / 1_000_000).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Mtoks`;
+}
+
+/** Cost of the known usage under the configured price list. */
+export function money(usage: UsageTotals): string | null {
+  return usage.cost == null ? null : `${usage.requests_without_usage > 0 ? "≥" : ""}${usage.cost.toFixed(6)} ${usage.currency ?? ""}`.trim();
 }
 
 /** Cumulative model usage and proximity to the configured budget. */
@@ -28,7 +33,7 @@ export function SpendTile({ usage }: { usage: UsageTotals | undefined }) {
         usage
           ? noCalls
             ? t("usage.none")
-            : t("stat.usageHint", { requests: usage.requests })
+            : `${t("stat.usageHint", { requests: usage.requests })} · ${money(usage) ?? t("usage.unpriced")}`
           : undefined
       }
     />
@@ -58,6 +63,7 @@ export function UsageCard({ usage }: { usage: UsageTotals | null }) {
                 { k: t("usage.cached"), v: <span className="font-mono tabular-nums text-muted-foreground">{tokens(usage.cached_input_tokens)}</span> },
                 { k: t("usage.output"), v: <span className="font-mono tabular-nums">{tokens(usage.output_tokens)}</span> },
                 { k: t("usage.total"), v: <span className="font-mono font-medium tabular-nums">{tokens(usage.total_tokens)}</span> },
+                { k: t("usage.cost"), v: <span className="font-mono tabular-nums">{money(usage) ?? t("usage.unpriced")}</span> },
               ]}
             />
             {usage.by_model.length > 1 && (
@@ -96,9 +102,35 @@ export function UsageCard({ usage }: { usage: UsageTotals | null }) {
             )}
           </>
         )}
+        {!!usage.calls?.length && <RequestUsageTable calls={usage.calls} />}
       </CardContent>
     </Card>
   );
+}
+
+/** Counts and prices from durable request records, including incomplete and failed attempts. */
+export function RequestUsageTable({ calls }: { calls: RequestCost[] }) {
+  const { t } = useT();
+  if (!calls.length) return null;
+  return <div className="grid gap-2">
+    <p className="text-sm font-medium">{t("usage.requestsDetail")}</p>
+    <div className="max-h-72 overflow-auto rounded-md border">
+      <table className="w-full text-left text-xs">
+        <thead><tr>{[t("usage.request"), t("usage.requestState"), t("usage.input"), t("usage.cached"), t("usage.output"), t("usage.cost")].map(label => <th key={label} className="p-2 font-medium">{label}</th>)}</tr></thead>
+        <tbody>{[...calls].reverse().map(call => {
+          const incomplete = !call.usage || call.usage.requests_without_usage > 0;
+          const count = (value: number | undefined) => value == null || (incomplete && value === 0) ? t("usage.unknown") : `${incomplete ? "≥" : ""}${value.toLocaleString()}`;
+          return <tr key={call.request_id} className="border-t" title={call.error ?? call.model}>
+            <td className="p-2 font-mono">{call.request_id.split(":")[0].slice(-8)}:{call.request_id.split(":").pop()}</td>
+            <td className="p-2">{t(`usage.requestStatus.${call.status}`)}</td>
+            <td className="p-2 tabular-nums">{count(call.usage?.input_tokens)}</td><td className="p-2 tabular-nums">{count(call.usage?.cached_input_tokens)}</td><td className="p-2 tabular-nums">{count(call.usage?.output_tokens)}</td>
+            <td className="p-2 tabular-nums">{call.cost == null ? "—" : `${incomplete ? "≥" : ""}${call.cost.toFixed(6)} ${call.currency ?? ""}`}</td>
+          </tr>;
+        })}</tbody>
+      </table>
+    </div>
+    {calls.some(call => !call.usage || call.usage.requests_without_usage > 0) && <p className="text-xs text-muted-foreground">{t("usage.knownOnly")}</p>}
+  </div>;
 }
 
 /** The passes in flight, each with the button that stops it. */
