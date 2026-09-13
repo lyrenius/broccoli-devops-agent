@@ -27,6 +27,17 @@ export interface RecoverySummary {
   reconstructed_review_job_ids: string[];
 }
 
+export interface ActiveOperation {
+  operation_id: string;
+  kind: string;
+  phase: "capture" | "model" | "inspection" | "action" | "verification";
+  started_at: string;
+  issue_id: string | null;
+  job_id: string | null;
+  action_run_id: string | null;
+  cancel_requested: boolean;
+}
+
 /** A pass running right now; `job_id` is what the cancel route takes. */
 export interface RunningPass {
   job_id: string;
@@ -90,6 +101,7 @@ export interface Status {
   counts: Counts;
   inbox: InboxCounts;
   running: RunningPass[];
+  active_operations?: ActiveOperation[];
   usage: UsageTotals;
 }
 

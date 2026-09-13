@@ -1281,3 +1281,464 @@ async fn broccoli_probes_read_heartbeats_and_queues() {
             .any(|m| m.name == "broccoli.dlq_unresolved" && m.value == 1.0)
     );
 }
+
+async fn wait_for_activity(
+    runner: &SliceRunner,
+    phase: broccoli_devops_agent::operations::OperationPhase,
+) -> broccoli_devops_agent::operations::ActiveOperation {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(op) = runner
+                .operations()
+                .active()
+                .into_iter()
+                .find(|op| op.phase == phase)
+            {
+                return op;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("activity must remain visible while its work is pending")
+}
+
+#[tokio::test]
+async fn operator_cancellation_reaps_commands_keeps_output_and_releases_lanes() {
+    use broccoli_devops_agent::operations::OperationPhase;
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started");
+    let escaped = dir.path().join("escaped");
+    let (worker, port) = listener();
+    let mut deployment = topology(OperationMode::Rehearsal, port, closed_port(), closed_port());
+    deployment
+        .resources
+        .push(resource("worker-2", ResourceKind::Worker, port));
+    let platform = PlatformConfig {
+        dry_run: false,
+        command_timeout_secs: 60,
+        runbooks: vec![RunbookCommand {
+            id: "worker.restart".into(),
+            command: format!(
+                "echo before-cancel; touch {}; (sleep 2; touch {}) & sleep 30",
+                started.display(),
+                escaped.display()
+            ),
+        }],
+        ..Default::default()
+    };
+    let runner = Arc::new(runner(
+        dir.path(),
+        deployment,
+        platform,
+        vec![
+            vec![call(
+                "a",
+                "propose_action",
+                json!({"runbook_id":"worker.restart", "target_ids":["worker-1","worker-2"], "reason":"audit", "expected_effect":"healthy"}),
+            )],
+            vec![diagnosis("b")],
+        ],
+    ));
+    let (_, job) = runner
+        .handle_report(HumanReport::new("test", "restart", "test cancellation"))
+        .await
+        .unwrap();
+    let pending = {
+        let runner = runner.clone();
+        let job = job.clone();
+        tokio::spawn(async move { runner.run_proposals(&job).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let op = wait_for_activity(&runner, OperationPhase::Action).await;
+    assert_eq!(op.job_id, Some(job.job_id));
+    assert!(
+        runner.running_passes().await.is_empty(),
+        "the model already finished"
+    );
+    assert!(
+        runner.cancel_pass(job.job_id, "operator").await.unwrap(),
+        "legacy job route reaches execution"
+    );
+    assert!(
+        runner
+            .operations()
+            .cancel(op.operation_id, "operator")
+            .await
+            .unwrap(),
+        "repeat cancel is idempotent"
+    );
+    let actions = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(actions[0].status, ActionStatus::Cancelled);
+    let artifact = runner
+        .store()
+        .get_artifact(actions[0].execution_artifact_id.unwrap())
+        .await
+        .unwrap();
+    let body: serde_json::Value =
+        serde_json::from_slice(&runner.artifacts().read_verified(&artifact).unwrap()).unwrap();
+    assert_eq!(body["runs"].as_array().unwrap().len(), 1);
+    assert!(
+        body["runs"][0]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("before-cancel")
+    );
+    assert_eq!(body["unstarted_targets"], json!(["worker-2"]));
+    assert!(runner.operations().active().is_empty());
+    let events = runner.store().list_events().await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == "operation.cancel_requested")
+            .count(),
+        1
+    );
+    // A second attempt takes the same target lanes after cleanup; it cannot hang on a leaked lock.
+    let mut live = runner.settings().current();
+    live.platform.runbooks[0].command = "echo completed {target}".into();
+    runner.settings().replace(live);
+    let retry = tokio::time::timeout(Duration::from_secs(2), runner.run_proposals(&job))
+        .await
+        .unwrap()
+        .unwrap();
+    if retry[0].status == ActionStatus::WaitingForApproval {
+        let done = tokio::time::timeout(
+            Duration::from_secs(2),
+            runner.approve_action(retry[0].action_run_id, "operator"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(done.status, ActionStatus::Succeeded);
+    } else {
+        assert_eq!(retry[0].status, ActionStatus::Succeeded);
+    }
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    assert!(
+        !escaped.exists(),
+        "cancelled process group has no surviving helper"
+    );
+    drop(worker);
+}
+
+#[tokio::test]
+async fn cancellation_reaches_initial_capture_before_a_job_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut deployment = topology(
+        OperationMode::Rehearsal,
+        closed_port(),
+        closed_port(),
+        closed_port(),
+    );
+    deployment.resources[0].probes = vec![ProbeSpec {
+        url: Some(format!("http://{}", http.local_addr().unwrap())),
+        ..ProbeSpec::new("http.status")
+    }];
+    let runner = Arc::new(runner(dir.path(), deployment, echo_platform(), vec![]));
+    let pending = {
+        let runner = runner.clone();
+        tokio::spawn(async move {
+            runner
+                .handle_report(HumanReport::new("test", "slow", "waiting for HTTP"))
+                .await
+        })
+    };
+    let (_stream, _) = http.accept().await.unwrap();
+    let op = wait_for_activity(
+        &runner,
+        broccoli_devops_agent::operations::OperationPhase::Capture,
+    )
+    .await;
+    assert!(op.job_id.is_none());
+    assert!(
+        runner
+            .operations()
+            .cancel(op.operation_id, "operator")
+            .await
+            .unwrap()
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(AgentError::Cancelled)
+    ));
+    assert!(runner.store().list_jobs().await.unwrap().is_empty());
+    assert!(runner.store().list_snapshots().await.unwrap().is_empty());
+    assert!(runner.operations().active().is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_during_inspection_drains_the_output_before_saving_the_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("inspection-started");
+    let (worker, port) = listener();
+    let platform = PlatformConfig {
+        dry_run: false,
+        runbooks: vec![RunbookCommand {
+            id: "service.status".into(),
+            command: format!(
+                "echo inspection-output; touch {}; sleep 30",
+                started.display()
+            ),
+        }],
+        ..Default::default()
+    };
+    let runner = Arc::new(runner(
+        dir.path(),
+        topology(OperationMode::Rehearsal, port, closed_port(), closed_port()),
+        platform,
+        vec![vec![call(
+            "i",
+            "inspect",
+            json!({"runbook_id":"service.status", "target_ids":["worker-1"], "reason":"inspect"}),
+        )]],
+    ));
+    let pending = {
+        let runner = runner.clone();
+        tokio::spawn(async move {
+            runner
+                .handle_report(HumanReport::new("test", "inspect", "slow command"))
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let op = wait_for_activity(
+        &runner,
+        broccoli_devops_agent::operations::OperationPhase::Inspection,
+    )
+    .await;
+    runner
+        .operations()
+        .cancel(op.operation_id, "test")
+        .await
+        .unwrap();
+    let (_, job) = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(job.status, JobStatus::Failed);
+    let bundle = runner.export_session(job.issue_id, "test").await.unwrap();
+    let serialized = serde_json::to_string(&bundle).unwrap();
+    assert!(serialized.contains("inspection-output"));
+    assert!(serialized.contains("cancelled"));
+    assert!(!job.result.unwrap().artifact_ids.is_empty());
+    drop(worker);
+}
+
+#[tokio::test]
+async fn an_approved_action_can_be_cancelled_while_executing() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("approved-started");
+    let (server, port) = listener();
+    let platform = PlatformConfig {
+        dry_run: false,
+        runbooks: vec![RunbookCommand {
+            id: "server.restart".into(),
+            command: format!("touch {}; sleep 30", started.display()),
+        }],
+        ..Default::default()
+    };
+    let runner = Arc::new(runner(
+        dir.path(),
+        topology(
+            OperationMode::ContestLocked,
+            closed_port(),
+            port,
+            closed_port(),
+        ),
+        platform,
+        vec![
+            vec![propose("p", "server.restart", "broccoli-server")],
+            vec![diagnosis("d")],
+        ],
+    ));
+    let (_, job) = runner
+        .handle_report(HumanReport::new("test", "restart", "approval test"))
+        .await
+        .unwrap();
+    let actions = runner.run_proposals(&job).await.unwrap();
+    assert_eq!(actions[0].status, ActionStatus::WaitingForApproval);
+    let id = actions[0].action_run_id;
+    let pending = {
+        let runner = runner.clone();
+        tokio::spawn(async move { runner.approve_action(id, "test").await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !started.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(runner.cancel_pass(job.job_id, "test").await.unwrap());
+    let action = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(action.status, ActionStatus::Cancelled);
+    assert!(action.execution_artifact_id.is_some());
+    drop(server);
+}
+
+#[tokio::test]
+async fn cancelling_verification_preserves_execution_and_marks_effect_unverified() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("command-finished");
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = http.local_addr().unwrap();
+    let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+    let server = {
+        let marker = marker.clone();
+        tokio::spawn(async move {
+            let mut waiting = Some(waiting_tx);
+            loop {
+                let (mut stream, _) = http.accept().await.unwrap();
+                let mut data = [0_u8; 2048];
+                let _ = stream.read(&mut data).await;
+                if marker.exists() {
+                    if let Some(tx) = waiting.take() {
+                        let _ = tx.send(());
+                    }
+                    let mut byte = [0];
+                    let _ = stream.read(&mut byte).await;
+                } else {
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                }
+            }
+        })
+    };
+    let mut deployment = topology(
+        OperationMode::Rehearsal,
+        closed_port(),
+        closed_port(),
+        closed_port(),
+    );
+    deployment.resources[0].probes = vec![ProbeSpec {
+        url: Some(format!("http://{address}")),
+        ..ProbeSpec::new("http.status")
+    }];
+    let platform = PlatformConfig {
+        dry_run: false,
+        runbooks: vec![RunbookCommand {
+            id: "worker.restart".into(),
+            command: format!("echo executed; touch {}", marker.display()),
+        }],
+        ..Default::default()
+    };
+    let runner = Arc::new(runner(
+        dir.path(),
+        deployment,
+        platform,
+        vec![
+            vec![propose("p", "worker.restart", "worker-1")],
+            vec![diagnosis("d")],
+        ],
+    ));
+    let (_, job) = runner
+        .handle_report(HumanReport::new("test", "verify", "slow after probe"))
+        .await
+        .unwrap();
+    let pending = {
+        let runner = runner.clone();
+        tokio::spawn(async move { runner.run_proposals(&job).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), waiting_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let op = wait_for_activity(
+        &runner,
+        broccoli_devops_agent::operations::OperationPhase::Verification,
+    )
+    .await;
+    runner
+        .operations()
+        .cancel(op.operation_id, "test")
+        .await
+        .unwrap();
+    let actions = tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(actions[0].status, ActionStatus::VerificationFailed);
+    assert!(actions[0].execution_artifact_id.is_some());
+    assert!(
+        actions[0]
+            .verification_summary
+            .as_deref()
+            .unwrap()
+            .contains("unverified")
+    );
+    assert!(
+        marker.exists(),
+        "completed execution is not rolled back by cancelling verification"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancellation_while_waiting_for_a_lock_does_not_acquire_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileStateStore::open(dir.path()).unwrap());
+    let operations = broccoli_devops_agent::operations::Operations::new(store);
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    let held = lock.lock().await;
+    let pending = {
+        let operations = operations.clone();
+        let lock = lock.clone();
+        tokio::spawn(async move {
+            operations
+                .run("lock-test", async {
+                    broccoli_devops_agent::operations::cancellable(async {
+                        let _guard = lock.lock().await;
+                        Ok(())
+                    })
+                    .await
+                })
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    let active = operations.active();
+    assert_eq!(active.len(), 1);
+    operations
+        .cancel(active[0].operation_id, "test")
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(AgentError::Cancelled)
+    ));
+    drop(held);
+    assert!(lock.try_lock().is_ok());
+}

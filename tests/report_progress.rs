@@ -95,6 +95,12 @@ async fn concurrent_reports_have_distinct_early_admission_and_reject_duplicate_i
         .unwrap();
     let mut admitted = vec![];
     for id in ids {
+        let operation = events
+            .iter()
+            .find(|event| {
+                event.kind == "operation.started" && event.payload["operation_id"] == json!(id)
+            })
+            .expect("the request is visible by its client ID before admission");
         let report = events
             .iter()
             .find(|event| {
@@ -109,6 +115,7 @@ async fn concurrent_reports_have_distinct_early_admission_and_reject_duplicate_i
             })
             .unwrap();
         assert!(report.sequence < created.sequence);
+        assert!(operation.sequence < report.sequence);
         admitted.push(created.issue_id.unwrap());
     }
     assert_ne!(admitted[0], admitted[1]);
@@ -134,5 +141,6 @@ async fn concurrent_reports_have_distinct_early_admission_and_reject_duplicate_i
         assert_eq!(response["issue"]["issue_id"], json!(issue));
     }
     assert!(runner.running_passes().await.is_empty());
+    assert!(runner.operations().active().is_empty());
     server.abort();
 }

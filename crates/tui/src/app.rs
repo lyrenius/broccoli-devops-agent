@@ -784,20 +784,33 @@ impl App {
 
     /// Interrupts the pass selected on the Overview, or the one running longest.
     fn interrupt_selected(&mut self) {
-        let running = self
-            .status
-            .as_ref()
-            .map(|s| s.running.clone())
-            .unwrap_or_default();
+        let running = self.running();
         let index = if self.screen == Screen::Overview {
             self.overview.selected.min(running.len().saturating_sub(1))
         } else {
             0
         };
         match running.get(index) {
-            Some(pass) => self.interrupt(pass.job_id.clone()),
+            Some(pass) => {
+                if let Some(id) = &pass.operation_id {
+                    self.interrupt_operation(id.clone());
+                } else {
+                    self.interrupt(pass.job_id.clone());
+                }
+            }
             None => self.message = Some("no pass is running".to_string()),
         }
+    }
+
+    fn interrupt_operation(&mut self, id: String) {
+        let client = self.client.clone();
+        let by = self.operator.clone();
+        self.run("interrupting operation", async move {
+            match client.cancel_operation(&id, &by).await {
+                Ok(_) => Outcome::message("cancellation requested; waiting for cleanup"),
+                Err(error) => Outcome::error(format!("interrupt failed: {error}")),
+            }
+        });
     }
 
     /// Interrupts a running pass. Cooperative: the Team stops at its next step boundary and
@@ -996,8 +1009,28 @@ impl App {
     }
 
     /// The running passes, from the last status.
-    pub fn running(&self) -> &[crate::api::RunningPass] {
-        self.status.as_ref().map_or(&[], |s| s.running.as_slice())
+    pub fn running(&self) -> Vec<crate::api::RunningPass> {
+        let Some(status) = &self.status else {
+            return Vec::new();
+        };
+        if status.active_operations.is_empty() {
+            return status.running.clone();
+        }
+        status
+            .active_operations
+            .iter()
+            .map(|op| crate::api::RunningPass {
+                operation_id: Some(op.operation_id.clone()),
+                phase: if op.cancel_requested {
+                    format!("{} · cancelling", op.phase)
+                } else {
+                    op.phase.clone()
+                },
+                job_id: op.job_id.clone().unwrap_or_default(),
+                issue_id: op.issue_id.clone().unwrap_or_default(),
+                started_at: op.started_at.clone(),
+            })
+            .collect()
     }
 
     /// The newest `team.callback` line, so a slow pass is visibly working rather than stalled.
@@ -1005,6 +1038,6 @@ impl App {
         self.events
             .iter()
             .rev()
-            .find(|event| event.kind == "team.callback")
+            .find(|event| event.kind == "team.callback" || event.kind.starts_with("operation."))
     }
 }

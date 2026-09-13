@@ -355,7 +355,14 @@ impl TopScheduler {
     /// its cause, is persisted and logged here.
     pub async fn request_snapshot(&self, request: CaptureRequest) -> AgentResult<Snapshot> {
         let collector = self.require_collector("request_snapshot")?;
-        let snapshot = collector.capture_snapshot(request.clone()).await?;
+        if crate::operations::current_phase()
+            != Some(crate::operations::OperationPhase::Verification)
+        {
+            crate::operations::phase(crate::operations::OperationPhase::Capture, None, None, None)
+                .await?;
+        }
+        let snapshot =
+            crate::operations::cancellable(collector.capture_snapshot(request.clone())).await?;
         self.store.insert_snapshot(snapshot.clone()).await?;
         self.store
             .append_event(
@@ -1076,6 +1083,13 @@ impl TopScheduler {
                 output_artifact_id: None,
             },
             None => {
+                crate::operations::phase(
+                    crate::operations::OperationPhase::Inspection,
+                    Some(job.issue_id),
+                    Some(job.job_id),
+                    None,
+                )
+                .await?;
                 let outcome = match platform.inspect(&job, &request).await {
                     Ok(outcome) => outcome,
                     Err(error) => PlatformOperationResult::new(
@@ -1586,6 +1600,14 @@ impl TopScheduler {
             drop(admission);
             return self.wait_for_action_implementation(ready, reason).await;
         }
+        crate::operations::phase(
+            crate::operations::OperationPhase::Action,
+            Some(ready.issue_id),
+            Some(ready.originating_job_id),
+            Some(action_run_id),
+        )
+        .await?;
+        crate::operations::check()?;
         let mut running = ready.clone();
         running.start()?;
         self.store
@@ -1691,6 +1713,13 @@ impl TopScheduler {
         after_capture: CaptureRequest,
     ) -> AgentResult<ActionRun> {
         let action = self.store.get_action_run(action_run_id).await?;
+        crate::operations::phase(
+            crate::operations::OperationPhase::Verification,
+            Some(action.issue_id),
+            Some(action.originating_job_id),
+            Some(action_run_id),
+        )
+        .await?;
         let after = match self.request_snapshot(after_capture).await {
             Ok(after) => after,
             Err(error) => {

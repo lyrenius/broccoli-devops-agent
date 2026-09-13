@@ -40,7 +40,11 @@ pub fn key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> bool {
         KeyCode::Enter | KeyCode::Char('t') => {
             let index = app.overview.selected.min(running.saturating_sub(1));
             match app.running().get(index).cloned() {
-                Some(pass) => app.open_trace(pass.issue_id, Some(pass.job_id)),
+                Some(pass) if !pass.issue_id.is_empty() => app.open_trace(
+                    pass.issue_id,
+                    (!pass.job_id.is_empty()).then_some(pass.job_id),
+                ),
+                Some(_) => app.message = Some("collecting; no Issue exists yet".into()),
                 None => app.message = Some("no pass is running".to_string()),
             }
         }
@@ -256,7 +260,7 @@ fn draw_running(frame: &mut Frame, area: Rect, app: &mut App) {
         app.overview.selected = running.len().saturating_sub(1);
     }
     let mut doc = Doc::new(inner_width(area));
-    doc.note("Passes in flight. Interrupting one stops it at its next step; its transcript is kept and the Job lands in the Failed inbox.");
+    doc.note("Active operations. Press c to cancel, including collection and command execution; recorded effects are kept.");
     if running.is_empty() {
         doc.note("Nothing is running.");
     }
@@ -270,7 +274,11 @@ fn draw_running(frame: &mut Frame, area: Rect, app: &mut App) {
         doc.line(vec![
             Span::styled(marker, Style::default().fg(Color::Green)),
             Span::styled("● ", Style::default().fg(Color::Green)),
-            bold(format!("Job {}", short(&pass.job_id))),
+            bold(if pass.phase.is_empty() {
+                format!("Job {}", short(&pass.job_id))
+            } else {
+                pass.phase.clone()
+            }),
             sep(),
             Span::raw(format!("Issue {}", short(&pass.issue_id))),
             sep(),

@@ -81,6 +81,7 @@ struct ApiError(StatusCode, String);
 impl From<AgentError> for ApiError {
     fn from(error: AgentError) -> Self {
         let status = match &error {
+            AgentError::Cancelled => StatusCode::CONFLICT,
             AgentError::NotFound { .. } => StatusCode::NOT_FOUND,
             AgentError::InvalidInput(_) | AgentError::InvalidTransition { .. } => {
                 StatusCode::BAD_REQUEST
@@ -138,6 +139,7 @@ pub fn router(state: Arc<ApiState>) -> Router {
         .route("/api/actions/{id}/approve", post(approve))
         .route("/api/actions/{id}/reject", post(reject))
         .route("/api/actions/{id}/review", post(review_action))
+        .route("/api/operations/{id}/cancel", post(cancel_operation))
         .route("/api/usage", get(usage))
         .route("/api/events", get(events))
         .route("/api/events/stream", get(events_stream))
@@ -212,6 +214,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
         // What is happening right now, and what it has cost: both are live, so a console can
         // show a pass in flight and its running bill without polling a second route.
         "running": state.runner.running_passes().await,
+        "active_operations": state.runner.operations().active(),
         "usage": state.runner.usage_totals().await?,
         "counts": {
             "issues": store.list_issues().await?.len(),
@@ -378,6 +381,20 @@ async fn usage(State(state): State<Arc<ApiState>>) -> ApiResult<Value> {
     )?))
 }
 
+async fn cancel_operation(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<Uuid>,
+    Json(request): Json<DecisionRequest>,
+) -> ApiResult<Value> {
+    if !state.runner.operations().cancel(id, request.who()).await? {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "operation is not active".into(),
+        ));
+    }
+    Ok(Json(json!({"operation_id": id, "cancelling": true})))
+}
+
 /// Interrupts a pass that is still running.
 ///
 /// Cooperative, like every cancellation here: the Team stops at its next step boundary and still
@@ -429,8 +446,15 @@ async fn report(
     if let Some(id) = request.report_id {
         report.report_id = id;
     }
-    let (issue, job) = state.runner.handle_report(report).await?;
-    let passes = state.runner.drive_passes(job).await?;
+    let (issue, passes) = state
+        .runner
+        .operations()
+        .run_with_id("report", report.report_id, async {
+            let (issue, job) = state.runner.handle_report(report).await?;
+            let passes = state.runner.drive_passes(job).await?;
+            Ok((issue, passes))
+        })
+        .await?;
     let issue = state.runner.store().get_issue(issue.issue_id).await?;
     // `job` and `actions` describe the first pass, as before; `passes` is the whole chain.
     let first = passes.first().expect("at least the first pass");

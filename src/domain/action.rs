@@ -89,6 +89,9 @@ pub struct PlatformOperationResult {
     pub operation_id: PlatformOperationId,
     /// Whether the underlying execution succeeded.
     pub succeeded: bool,
+    /// Whether the operator stopped execution; old records default to false.
+    #[serde(default)]
+    pub cancelled: bool,
     /// Whether the Platform only rendered the commands (dry run) instead of executing them.
     #[serde(default)]
     pub dry_run: bool,
@@ -113,6 +116,7 @@ impl PlatformOperationResult {
     ) -> Self {
         Self {
             operation_id: Uuid::now_v7(),
+            cancelled: false,
             succeeded,
             dry_run: false,
             requires_human: false,
@@ -354,7 +358,7 @@ impl ActionRun {
         matches!(
             self.status,
             ActionStatus::Failed | ActionStatus::VerificationFailed
-        )
+        ) || (self.status == ActionStatus::Cancelled && self.execution_artifact_id.is_some())
     }
 
     /// Marks an action with satisfied approval and preconditions as running.
@@ -384,7 +388,9 @@ impl ActionRun {
         if result.requires_human {
             return self.wait_for_human(result.summary);
         }
-        self.transition_to(if result.succeeded {
+        self.transition_to(if result.cancelled {
+            ActionStatus::Cancelled
+        } else if result.succeeded {
             ActionStatus::Verifying
         } else {
             ActionStatus::Failed

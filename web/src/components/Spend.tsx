@@ -5,7 +5,7 @@ import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
 import { ReportProgressScope, type ReportProgressRequest } from "../lib/report-progress";
-import type { EventRecord, RunningPass, UsageTotals } from "../types";
+import type { ActiveOperation, EventRecord, RunningPass, UsageTotals } from "../types";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Kv, StatTile } from "./ui";
 
 /** One unit throughout the console: one Mtok is one million tokens. */
@@ -102,63 +102,47 @@ export function UsageCard({ usage }: { usage: UsageTotals | null }) {
 }
 
 /** The passes in flight, each with the button that stops it. */
-export function RunningCard({ running, onChanged }: { running: RunningPass[]; onChanged: () => void }) {
+export function RunningCard({ operations, running = [], onChanged }: { operations?: ActiveOperation[]; running?: RunningPass[]; onChanged: () => void }) {
   const { t, dateTime, age } = useT();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const interrupt = async (jobId: string) => {
-    setBusy(jobId);
-    setError(null);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(timer); }, []);
+  const activities: ActiveOperation[] = operations ?? running.map(pass => ({ operation_id: pass.job_id, kind: "job", phase: "model", started_at: pass.started_at, issue_id: pass.issue_id, job_id: pass.job_id, action_run_id: null, cancel_requested: false }));
+  const interrupt = async (id: string) => {
+    setBusy(id); setError(null);
     try {
-      await api.cancelJob(jobId, loadOperator());
+      if (operations !== undefined) await api.cancelOperation(id, loadOperator());
+      else await api.cancelJob(id, loadOperator());
       onChanged();
-    } catch (e) {
-      setError(t("running.interruptFailed", { error: (e as Error).message }));
-    } finally {
-      setBusy(null);
-    }
+    } catch (e) { setError(t("running.interruptFailed", { error: (e as Error).message })); }
+    finally { setBusy(null); }
   };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Loader2 className={`h-4 w-4 ${running.length > 0 ? "animate-spin" : ""}`} />
-          {t("running.title")}
-        </CardTitle>
-        <CardDescription>{t("running.desc")}</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-2">
-        {error && (
-          <Alert icon={AlertTriangle}>
-            <p>{error}</p>
-          </Alert>
-        )}
-        {running.length === 0 && <p className="text-sm text-muted-foreground">{t("running.none")}</p>}
-        {running.map((pass) => (
-          <div key={pass.job_id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
-            <span className="font-mono text-xs font-medium">{t("running.job", { id: `${pass.job_id.slice(0, 8)}…` })}</span>
-            <span className="font-mono text-xs text-muted-foreground">{t("running.since", { time: dateTime(pass.started_at) })}</span>
-            <span className="text-xs text-muted-foreground">{t("running.elapsed", { seconds: Math.max(0, Math.floor((Date.now() - Date.parse(pass.started_at)) / 1000)) })}</span>
-            <a className="ml-auto inline-flex h-8 items-center gap-1 rounded-md border border-input bg-background px-3 text-xs font-medium shadow-xs hover:bg-accent hover:text-accent-foreground [&_svg]:size-4" href={traceHash(pass.issue_id, pass.job_id)} title={t("records.trace.title")}>
-              <Waypoints />
-              {t("running.trace")}
-            </a>
-            <Button size="sm" variant="outline" disabled={busy === pass.job_id} onClick={() => interrupt(pass.job_id)}>
-              <Square />
-              {busy === pass.job_id ? t("running.interrupting") : t("running.interrupt")}
-            </Button>
-            <div className="w-full border-t pt-2 text-xs">
-              <p className="whitespace-pre-wrap break-words">{pass.last_progress ?? t("progress.waiting")}</p>
-              {pass.last_progress_at && <p className="mt-1 text-muted-foreground" title={dateTime(pass.last_progress_at)}>{t("running.lastProgress", { age: age(pass.last_progress_at) })}</p>}
-              {Date.now() - Date.parse(pass.last_progress_at ?? pass.started_at) >= 120_000 && <p className="mt-1 text-amber-600 dark:text-amber-400">{t("running.quiet")}</p>}
-            </div>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
+  return <Card>
+    <CardHeader>
+      <CardTitle className="flex items-center gap-2 text-base"><Loader2 className={`h-4 w-4 ${activities.length ? "animate-spin" : ""}`} />{t("running.title")}</CardTitle>
+      <CardDescription>{t("running.operationsDesc")}</CardDescription>
+    </CardHeader>
+    <CardContent className="grid gap-2">
+      {error && <Alert icon={AlertTriangle}>{error}</Alert>}
+      {!activities.length && <p className="text-sm text-muted-foreground">{t("running.none")}</p>}
+      {activities.map(op => {
+        const pass = running.find(pass => pass.job_id === op.job_id);
+        return <div key={op.operation_id} className="flex flex-wrap items-center gap-2 rounded-lg border p-3 text-sm">
+          <span className="font-medium">{t(`running.phase.${op.phase}`)}</span>
+          <span className="text-xs text-muted-foreground">{t("running.since", { time: dateTime(op.started_at) })}</span>
+          <span className="text-xs text-muted-foreground">{t("running.elapsed", { seconds: Math.max(0, Math.floor((now - Date.parse(op.started_at)) / 1000)) })}</span>
+          {op.issue_id && <a className="ml-auto inline-flex items-center gap-1 text-xs underline [&_svg]:size-4" href={traceHash(op.issue_id, op.job_id ?? undefined)}><Waypoints />{t("running.trace")}</a>}
+          <Button size="sm" variant="outline" disabled={busy === op.operation_id || op.cancel_requested} onClick={() => interrupt(op.operation_id)}><Square />{busy === op.operation_id || op.cancel_requested ? t("running.interrupting") : t("running.interrupt")}</Button>
+          {pass && <div className="w-full border-t pt-2 text-xs">
+            <p className="whitespace-pre-wrap break-words">{pass.last_progress ?? t("progress.waiting")}</p>
+            {pass.last_progress_at && <p className="mt-1 text-muted-foreground" title={dateTime(pass.last_progress_at)}>{t("running.lastProgress", { age: age(pass.last_progress_at) })}</p>}
+            {now - Date.parse(pass.last_progress_at ?? pass.started_at) >= 120_000 && <p className="mt-1 text-amber-600 dark:text-amber-400">{t("running.quiet")}</p>}
+          </div>}
+        </div>;
+      })}
+    </CardContent>
+  </Card>;
 }
 
 /**

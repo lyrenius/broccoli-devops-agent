@@ -5,9 +5,9 @@ import { useT } from "../i18n";
 import { loadOperator } from "../lib/prefs";
 import { traceHash } from "../lib/routes";
 import type { ReportProgressRequest } from "../lib/report-progress";
-import type { ActionRun, Issue, Job, PassOutcome } from "../types";
+import type { ActionRun, Issue, Job, PassOutcome, Status } from "../types";
 import { Page } from "./Shell";
-import { LiveProgress } from "./Spend";
+import { LiveProgress, RunningCard } from "./Spend";
 import { StatusBadge } from "./status";
 import { Alert, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, Field, Input, Select, Textarea } from "./ui";
 
@@ -26,7 +26,7 @@ function loadDraft() {
   } catch { return fallback; }
 }
 
-export function Report({ onChanged }: { onChanged: () => void }) {
+export function Report({ status, onChanged }: { status: Status | null; onChanged: () => void }) {
   const [draft, setDraft] = useState(loadDraft);
   const { title, description, reporter, priority } = draft;
   useEffect(() => {
@@ -61,6 +61,7 @@ export function Report({ onChanged }: { onChanged: () => void }) {
 
   return (
     <Page icon={FilePlus2} title={t("report.title")} subtitle={t("report.subtitle")}>
+      {busy && <RunningCard operations={(status?.active_operations ?? []).filter(op => op.operation_id === progress?.reportId)} running={status?.running} onChanged={onChanged} />}
       <div className="grid gap-6 md:grid-cols-2">
         <Card>
           <CardHeader>

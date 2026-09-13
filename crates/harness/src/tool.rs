@@ -36,6 +36,19 @@ pub type ToolResult = Result<Value, String>;
 pub trait ToolHandler: Send + Sync {
     /// Validates and executes one call with the model-supplied arguments.
     async fn call(&self, arguments: Value) -> ToolResult;
+
+    /// Stops disposable futures by default. Resource-owning handlers override this and return
+    /// only after their child processes and output have been cleaned up.
+    async fn call_with_cancel(
+        &self,
+        arguments: Value,
+        mut cancel: crate::CancelToken,
+    ) -> ToolResult {
+        tokio::select! { biased;
+            () = cancel.cancelled() => Err("tool cancelled".into()),
+            result = self.call(arguments) => result,
+        }
+    }
 }
 
 /// A registered tool: its model-facing spec plus its handler.
@@ -69,6 +82,35 @@ where
     }
 
     Arc::new(FnTool(f))
+}
+
+/// Wraps a resource-owning handler. It must observe the supplied signal and finish its cleanup;
+/// the loop waits for that result on cancellation and timeout rather than dropping the owner.
+pub fn tool_fn_cancellable<F, Fut>(f: F) -> Arc<dyn ToolHandler>
+where
+    F: Fn(Value, crate::CancelToken) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ToolResult> + Send + 'static,
+{
+    struct Cooperative<F>(F);
+    #[async_trait]
+    impl<F, Fut> ToolHandler for Cooperative<F>
+    where
+        F: Fn(Value, crate::CancelToken) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ToolResult> + Send + 'static,
+    {
+        async fn call(&self, arguments: Value) -> ToolResult {
+            let (_handle, token) = crate::cancel_pair();
+            (self.0)(arguments, token).await
+        }
+        async fn call_with_cancel(
+            &self,
+            arguments: Value,
+            cancel: crate::CancelToken,
+        ) -> ToolResult {
+            (self.0)(arguments, cancel).await
+        }
+    }
+    Arc::new(Cooperative(f))
 }
 
 /// The allowlist of tools available to one agent run.

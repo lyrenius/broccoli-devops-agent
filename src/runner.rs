@@ -356,6 +356,7 @@ pub struct Revision {
 
 /// Fully wired control plane over one data directory and one topology.
 pub struct SliceRunner {
+    operations: crate::operations::Operations,
     topology: DeploymentTopology,
     store: Arc<FileStateStore>,
     scheduler: Arc<TopScheduler>,
@@ -496,6 +497,7 @@ impl SliceRunner {
             ),
         };
         Ok(Self {
+            operations: crate::operations::Operations::new(store.clone()),
             topology,
             store,
             scheduler,
@@ -555,6 +557,11 @@ impl SliceRunner {
         self.settings.read(|settings| settings.pass_policy)
     }
 
+    /// Activity registry shared by HTTP, CLI and the platform execution scopes.
+    pub fn operations(&self) -> &crate::operations::Operations {
+        &self.operations
+    }
+
     /// Everything spent at the relay so far, priced when a price list is configured.
     ///
     /// Summed from the EventLog rather than from the Jobs: the log is append-only, so a pass
@@ -606,11 +613,12 @@ impl SliceRunner {
     /// final callback, so the Job ends as a failure in the inbox with its transcript intact rather
     /// than vanishing mid-flight. Returns whether a run was actually in flight to stop.
     pub async fn cancel_pass(&self, job_id: JobId, by: &str) -> AgentResult<bool> {
+        let operation_cancelled = self.operations.cancel_job(job_id, by).await?;
         let Some(running) = self.running.lock().await.get(&job_id).map(|running| {
             running.cancel.cancel();
             running.issue_id
         }) else {
-            return Ok(false);
+            return Ok(operation_cancelled);
         };
         self.store
             .append_event(
@@ -631,6 +639,7 @@ impl SliceRunner {
 
     /// Asks every running pass to stop; returns how many were asked.
     pub async fn cancel_all_passes(&self, by: &str) -> AgentResult<usize> {
+        let operation_count = self.operations.cancel_all(by).await?;
         let job_ids: Vec<JobId> = self.running.lock().await.keys().copied().collect();
         let mut stopped = 0;
         for job_id in job_ids {
@@ -638,7 +647,7 @@ impl SliceRunner {
                 stopped += 1;
             }
         }
-        Ok(stopped)
+        Ok(stopped.max(operation_count))
     }
 
     /// Freezes the Scheduler when the cumulative spend ceiling has been reached.
@@ -800,6 +809,12 @@ impl SliceRunner {
     /// internal before/after/probe captures do not recursively generate investigations.
     /// Review errors are recorded separately and never discard a successfully stored Snapshot.
     pub async fn capture(&self, cause: SnapshotCause) -> AgentResult<Snapshot> {
+        self.operations
+            .run("capture", Box::pin(self.capture_work(cause)))
+            .await
+    }
+
+    async fn capture_work(&self, cause: SnapshotCause) -> AgentResult<Snapshot> {
         let snapshot = self
             .scheduler
             .request_snapshot(self.capture_request(cause))
@@ -834,7 +849,9 @@ impl SliceRunner {
     /// Reviews a stored Snapshot once, records the exact input/output, and feeds valid findings
     /// through Scheduler triage. Repeated reviews of the same ID return the recorded result.
     pub async fn review_snapshot(&self, snapshot_id: SnapshotId) -> AgentResult<Value> {
-        let _review = self.snapshot_review_lock.lock().await;
+        let _review =
+            crate::operations::cancellable(async { Ok(self.snapshot_review_lock.lock().await) })
+                .await?;
         if let Some(event) = self
             .store
             .list_events()
@@ -848,6 +865,16 @@ impl SliceRunner {
         {
             return Ok(event.payload);
         }
+
+        self.operations
+            .run(
+                "review_snapshot",
+                Box::pin(self.review_snapshot_work(snapshot_id)),
+            )
+            .await
+    }
+
+    async fn review_snapshot_work(&self, snapshot_id: SnapshotId) -> AgentResult<Value> {
         let snapshot = self.store.get_snapshot(snapshot_id).await?;
         let view = self.judge_views.build_judge_view(&snapshot)?;
         self.store.insert_artifact(view.clone()).await?;
@@ -857,10 +884,14 @@ impl SliceRunner {
             "updated_at": Utc::now(), "issue_ids": [], "artifact_ids": [view.artifact_id], "error": null }))
             .with_artifacts(vec![view.artifact_id])).await?;
         let model_allowed = self.freeze_if_budget_spent().await?.is_none();
-        let judgement = self
-            .judge
-            .inspect_snapshot(snapshot_id, &view, model_allowed)
+        crate::operations::phase(crate::operations::OperationPhase::Model, None, None, None)
             .await?;
+        let judgement = crate::operations::cancellable(self.judge.inspect_snapshot(
+            snapshot_id,
+            &view,
+            model_allowed,
+        ))
+        .await?;
         if let Some(usage) = &judgement.usage {
             let mut payload = serde_json::to_value(usage)?;
             payload["snapshot_id"] = json!(snapshot_id);
@@ -1061,6 +1092,12 @@ impl SliceRunner {
     /// here, and the chain is not continued; see `drive_passes` (or `run_proposals` for the
     /// single-pass flow).
     pub async fn handle_report(&self, report: HumanReport) -> AgentResult<(Issue, Job)> {
+        self.operations
+            .run("handle_report", Box::pin(self.handle_report_work(report)))
+            .await
+    }
+
+    async fn handle_report_work(&self, report: HumanReport) -> AgentResult<(Issue, Job)> {
         self.refuse_if_budget_spent("accept a human report").await?;
         let issue = self
             .scheduler
@@ -1089,6 +1126,12 @@ impl SliceRunner {
     /// error becomes a `Failed` result, so the Job lands in the Failed Job inbox rather than
     /// staying `Running` forever with nobody responsible for it.
     async fn run_team(&self, job: Job, view: &Artifact) -> AgentResult<Job> {
+        self.operations
+            .run("run_team", Box::pin(self.run_team_work(job, view)))
+            .await
+    }
+
+    async fn run_team_work(&self, job: Job, view: &Artifact) -> AgentResult<Job> {
         let sink = SchedulerSink {
             scheduler: self.scheduler.clone(),
             watchers: self.watchers.clone(),
@@ -1133,6 +1176,13 @@ impl SliceRunner {
             guard.finish().await;
             return self.store.get_job(job.job_id).await;
         }
+        crate::operations::phase(
+            crate::operations::OperationPhase::Model,
+            Some(job.issue_id),
+            Some(job.job_id),
+            None,
+        )
+        .await?;
         let mut cancellation = cancel_signal.clone();
         let work = self.team.run_job(&job, view, &sink, cancel_signal);
         tokio::pin!(work);
@@ -1182,9 +1232,16 @@ impl SliceRunner {
     /// can send it back upstream with a fresh budget. Anything waiting for a human (an approval,
     /// a denial, a failure) stops the chain too; an approval resumes it.
     pub async fn drive_passes(&self, job: Job) -> AgentResult<Vec<PassOutcome>> {
+        self.operations
+            .run("drive_passes", Box::pin(self.drive_passes_work(job)))
+            .await
+    }
+
+    async fn drive_passes_work(&self, job: Job) -> AgentResult<Vec<PassOutcome>> {
         let mut passes = Vec::new();
         let mut job = job;
         loop {
+            crate::operations::check()?;
             if self
                 .store
                 .get_issue(job.issue_id)
@@ -1535,6 +1592,12 @@ impl SliceRunner {
     /// (see `approve_action`); `deny` actions are cancelled with the rule's reason on them and
     /// wait in the Permission Denied inbox.
     pub async fn run_proposals(&self, job: &Job) -> AgentResult<Vec<ActionRun>> {
+        self.operations
+            .run("run_proposals", Box::pin(self.run_proposals_work(job)))
+            .await
+    }
+
+    async fn run_proposals_work(&self, job: &Job) -> AgentResult<Vec<ActionRun>> {
         let proposals: Vec<ActionProposal> = job
             .result
             .as_ref()
@@ -1542,6 +1605,7 @@ impl SliceRunner {
             .unwrap_or_default();
         let mut actions = Vec::with_capacity(proposals.len());
         for proposal in proposals {
+            crate::operations::check()?;
             let key = idempotency_key(job, &proposal)?;
             let action = self
                 .scheduler
@@ -1567,6 +1631,15 @@ impl SliceRunner {
     /// Executes a `Ready` action and verifies it, or leaves it durably queued while frozen.
     /// Concurrent callers for the same action observe its current result without replaying it.
     pub async fn execute_and_verify(&self, action_run_id: ActionRunId) -> AgentResult<ActionRun> {
+        self.operations
+            .run(
+                "execute_and_verify",
+                Box::pin(self.execute_and_verify_work(action_run_id)),
+            )
+            .await
+    }
+
+    async fn execute_and_verify_work(&self, action_run_id: ActionRunId) -> AgentResult<ActionRun> {
         let lock = self
             .execution_locks
             .lock()
@@ -1604,6 +1677,19 @@ impl SliceRunner {
     /// action, the chain resumes: the follow-up pass runs before this returns (its Job is in
     /// the store and the event stream; the approved action is what is returned).
     pub async fn approve_action(
+        &self,
+        action_run_id: ActionRunId,
+        approved_by: &str,
+    ) -> AgentResult<ActionRun> {
+        self.operations
+            .run(
+                "approve_action",
+                Box::pin(self.approve_action_work(action_run_id, approved_by)),
+            )
+            .await
+    }
+
+    async fn approve_action_work(
         &self,
         action_run_id: ActionRunId,
         approved_by: &str,
@@ -1670,7 +1756,23 @@ impl SliceRunner {
         decision: InboxDecision,
         comment: Option<String>,
     ) -> AgentResult<ReviewOutcome<ActionRun>> {
-        let _serialized = self.review_lock.lock().await;
+        self.operations
+            .run(
+                "review_action",
+                Box::pin(self.review_action_work(action_run_id, reviewer, decision, comment)),
+            )
+            .await
+    }
+
+    async fn review_action_work(
+        &self,
+        action_run_id: ActionRunId,
+        reviewer: &str,
+        decision: InboxDecision,
+        comment: Option<String>,
+    ) -> AgentResult<ReviewOutcome<ActionRun>> {
+        let _serialized =
+            crate::operations::cancellable(async { Ok(self.review_lock.lock().await) }).await?;
         let action = self.store.get_action_run(action_run_id).await?;
         if !action.needs_review() {
             return Err(AgentError::InvalidInput(format!(
@@ -1728,7 +1830,23 @@ impl SliceRunner {
         decision: InboxDecision,
         comment: Option<String>,
     ) -> AgentResult<ReviewOutcome<Job>> {
-        let _serialized = self.review_lock.lock().await;
+        self.operations
+            .run(
+                "review_job",
+                Box::pin(self.review_job_work(job_id, reviewer, decision, comment)),
+            )
+            .await
+    }
+
+    async fn review_job_work(
+        &self,
+        job_id: JobId,
+        reviewer: &str,
+        decision: InboxDecision,
+        comment: Option<String>,
+    ) -> AgentResult<ReviewOutcome<Job>> {
+        let _serialized =
+            crate::operations::cancellable(async { Ok(self.review_lock.lock().await) }).await?;
         let job = self.store.get_job(job_id).await?;
         if !job.needs_review() {
             return Err(AgentError::InvalidInput(format!(
@@ -2001,7 +2119,23 @@ impl SliceRunner {
         reviewer: &str,
         comment: String,
     ) -> AgentResult<Revision> {
-        let _serialized = self.review_lock.lock().await;
+        self.operations
+            .run(
+                "feedback_issue",
+                Box::pin(self.feedback_issue_work(issue_id, expected_job_id, reviewer, comment)),
+            )
+            .await
+    }
+
+    async fn feedback_issue_work(
+        &self,
+        issue_id: IssueId,
+        expected_job_id: JobId,
+        reviewer: &str,
+        comment: String,
+    ) -> AgentResult<Revision> {
+        let _serialized =
+            crate::operations::cancellable(async { Ok(self.review_lock.lock().await) }).await?;
         let comment = comment.trim().to_string();
         if comment.is_empty() {
             return Err(AgentError::InvalidInput(

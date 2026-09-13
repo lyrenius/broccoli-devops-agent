@@ -45,6 +45,7 @@ export const api = {
     post<Revision>(`/api/issues/${id}/feedback`, { expected_job_id: expectedJobId, by, comment }),
   usage: () => request<UsageTotals>("/api/usage"),
   /** Asks a running pass to stop; the Team still delivers a final result and keeps its transcript. */
+  cancelOperation: (id: string, by: string) => post<{ operation_id: string }>(`/api/operations/${id}/cancel`, { by }),
   cancelJob: (id: string, by: string) => post<{ job_id: string }>(`/api/jobs/${id}/cancel`, { by }),
   events: (limit: number | undefined, filter?: { issue_id?: string; job_id?: string; after?: number; before?: number; q?: string }) => {
     const query = new URLSearchParams();

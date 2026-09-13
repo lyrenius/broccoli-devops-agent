@@ -135,6 +135,9 @@ impl ProgressObserver for ProgressLines {
     }
 
     fn observe(&self, progress: RunProgress) {
+        if matches!(progress.step, RunStep::TurnStarted) {
+            crate::operations::model_started();
+        }
         let tokens = progress.usage.total_tokens();
         let line = match &progress.step {
             RunStep::TurnStarted => tr!(
@@ -527,7 +530,7 @@ impl HarnessOperateTeam {
                         }),
                         terminal: false,
                     },
-                    tool_fn(move |arguments| {
+                    harness::tool_fn_cancellable(move |arguments, mut tool_cancel| {
                         let access = access.clone();
                         let state = state.clone();
                         let artifacts = artifacts.clone();
@@ -565,11 +568,11 @@ impl HarnessOperateTeam {
                                 arguments: string_map(&arguments["arguments"]),
                                 reason,
                             };
-                            let result = access
-                                .port
-                                .inspect(job_id, request)
-                                .await
-                                .map_err(|error| error.to_string())?;
+                            let (handle, signal) = crate::ports::cancel_pair();
+                            let bridge = tokio::spawn(async move { tool_cancel.cancelled().await; handle.cancel(); });
+                            let inspected = crate::operations::with_signal(signal, access.port.inspect(job_id, request)).await;
+                            bridge.abort();
+                            let result = inspected.map_err(|error| error.to_string())?;
                             if let Some(reason) = result.refused {
                                 return Err(format!("refused: {reason}"));
                             }
@@ -986,8 +989,12 @@ impl AgentTeamPort for HarnessOperateTeam {
         // Bridge the control plane's cancellation into the harness's own token.
         let (harness_handle, harness_token) = harness::cancel_pair();
         let mut watched = cancel.clone();
+        let operation_signal = crate::operations::signal();
         let bridge = tokio::spawn(async move {
-            watched.cancelled().await;
+            tokio::select! {
+                () = watched.cancelled() => {},
+                () = async { if let Some(mut signal) = operation_signal { signal.cancelled().await; } else { std::future::pending::<()>().await; } } => {},
+            }
             harness_handle.cancel();
         });
 

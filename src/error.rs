@@ -12,6 +12,9 @@ pub type AgentResult<T> = Result<T, AgentError>;
 /// layer.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    /// The operator stopped the current request; completed effects remain recorded.
+    #[error("operation cancelled by operator")]
+    Cancelled,
     /// An insert found an existing object with the same ID.
     #[error("{entity} `{id}` already exists")]
     Duplicate {

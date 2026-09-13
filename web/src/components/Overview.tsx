@@ -133,7 +133,7 @@ export function Overview({ tick, status, onChanged }: { tick: number; status: St
 
       {/* What is happening right now and what it has cost: the two live facts a Snapshot cannot show. */}
       <div className="grid gap-6 lg:grid-cols-2">
-        <RunningCard running={status?.running ?? []} onChanged={onChanged} />
+        <RunningCard operations={status?.active_operations} running={status?.running ?? []} onChanged={onChanged} />
         <UsageCard usage={status?.usage ?? null} />
       </div>
 

@@ -30,3 +30,12 @@ test('unbound progress is never attributed to a report', () => {
   assert.equal(scope.accept(event(1, 'team.callback', { issue_id: 'some-issue', job_id: 'some-job' })), false);
   assert.equal(scope.issueId, null);
 });
+
+test('pre-admission operation progress belongs only to its report', () => {
+  const a = new ReportProgressScope('report-a');
+  assert.equal(a.accept(event(1, 'operation.started', { payload: { operation_id: 'report-b' } })), false);
+  assert.equal(a.accept(event(2, 'operation.started', { payload: { operation_id: 'report-a' } })), true);
+  assert.equal(a.accept(event(3, 'operation.progress', { payload: { operation_id: 'background-capture' } })), false);
+  assert.equal(a.accept(event(4, 'operation.cancel_requested', { payload: { operation_id: 'report-a' } })), true);
+  assert.equal(a.issueId, null);
+});

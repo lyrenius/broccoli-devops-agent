@@ -34,6 +34,8 @@ pub struct Status {
     pub inbox: InboxCounts,
     /// Passes running right now, with the Job that can be interrupted.
     pub running: Vec<RunningPass>,
+    /// Whole-request activities, including work before a Job exists.
+    pub active_operations: Vec<ActiveOperation>,
     /// What the model relay has been asked to do, and what it cost.
     pub usage: UsageTotals,
 }
@@ -78,10 +80,26 @@ impl RecoverySummary {
     }
 }
 
+/// One cancellable activity, as returned by the controller.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ActiveOperation {
+    pub operation_id: String,
+    pub phase: String,
+    pub started_at: String,
+    pub issue_id: Option<String>,
+    pub job_id: Option<String>,
+    pub cancel_requested: bool,
+}
+
 /// One pass in flight.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct RunningPass {
+    /// New activity ID, absent when connected to an older server.
+    pub operation_id: Option<String>,
+    /// Current activity phase.
+    pub phase: String,
     /// Job being run; the ID the cancel route takes.
     pub job_id: String,
     /// Issue it serves.
@@ -1273,6 +1291,14 @@ impl ApiClient {
     }
 
     /// Asks a running pass to stop; the Team still delivers a final result.
+    pub async fn cancel_operation(&self, id: &str, by: &str) -> Result<Value, String> {
+        self.post(
+            &format!("/api/operations/{id}/cancel"),
+            Some(json!({"by": by})),
+        )
+        .await
+    }
+
     pub async fn cancel_job(&self, id: &str, by: &str) -> Result<Value, String> {
         self.post(&format!("/api/jobs/{id}/cancel"), Some(json!({ "by": by })))
             .await

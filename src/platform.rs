@@ -133,6 +133,7 @@ struct CommandOutcome {
     stdout: String,
     stderr: String,
     timed_out: bool,
+    cancelled: bool,
     killed: bool,
     output_truncated: bool,
     spawn_error: Option<String>,
@@ -140,7 +141,10 @@ struct CommandOutcome {
 
 impl CommandOutcome {
     fn succeeded(&self) -> bool {
-        self.exit_code == Some(0) && !self.timed_out && self.spawn_error.is_none()
+        self.exit_code == Some(0)
+            && !self.cancelled
+            && !self.timed_out
+            && self.spawn_error.is_none()
     }
 }
 
@@ -166,6 +170,7 @@ async fn run_command(command: &str, timeout: Duration) -> CommandOutcome {
                 stdout: String::new(),
                 stderr: String::new(),
                 timed_out: false,
+                cancelled: false,
                 killed: false,
                 output_truncated: false,
                 spawn_error: Some(error.to_string()),
@@ -192,13 +197,16 @@ async fn run_command(command: &str, timeout: Duration) -> CommandOutcome {
     let stdout_task = tokio::spawn(read_capped(stdout));
     let stderr_task = tokio::spawn(read_capped_err(stderr));
 
-    let (exit_code, timed_out, killed) = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => (status.code(), false, false),
-        Ok(Err(_)) => (None, false, false),
-        Err(_) => {
-            // Kill the whole group so helpers spawned by the runbook die with it, then reap the
-            // child. `kill(1)` is used instead of a raw libc call because this crate forbids
-            // unsafe code; the group id equals the child's pid because of `process_group(0)`.
+    let (status, cancelled) = tokio::select! {
+        biased;
+        status = child.wait() => (Some(status), false),
+        () = crate::operations::cancelled() => (None, true),
+        () = tokio::time::sleep(timeout) => (None, false),
+    };
+    let (exit_code, timed_out, killed) = match status {
+        Some(Ok(status)) => (status.code(), false, false),
+        Some(Err(_)) => (None, false, false),
+        None => {
             if let Some(pid) = pid {
                 let _ = Command::new("kill")
                     .args(["-KILL", &format!("-{pid}")])
@@ -210,7 +218,7 @@ async fn run_command(command: &str, timeout: Duration) -> CommandOutcome {
             }
             let _ = child.start_kill();
             let _ = child.wait().await;
-            (None, true, true)
+            (None, !cancelled, true)
         }
     };
     // Readers finish when the pipes close; after a group kill that is immediate. The guard is
@@ -231,6 +239,7 @@ async fn run_command(command: &str, timeout: Duration) -> CommandOutcome {
         stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
         stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
         timed_out,
+        cancelled,
         killed,
         output_truncated,
         spawn_error: None,
@@ -530,12 +539,36 @@ impl LocalCommandPlatform {
         // per-target executors in order. Each executor reaps its process before the next
         // starts, and the lanes are released only after the last one has. Inspections take
         // the lanes too, so a log read never interleaves with a restart of the same target.
-        let _lanes = self.lanes.acquire(target_ids).await;
+        let _lanes = match crate::operations::cancellable(async {
+            Ok(self.lanes.acquire(target_ids).await)
+        })
+        .await
+        {
+            Ok(lanes) => lanes,
+            Err(crate::error::AgentError::Cancelled) => {
+                let mut result = self
+                    .finish(
+                        producer,
+                        false,
+                        "cancelled while waiting for target locks; no commands started".into(),
+                        json!({"cancelled": true, "runs": [], "unstarted_targets": target_ids}),
+                    )
+                    .await?;
+                result.cancelled = true;
+                return Ok(result);
+            }
+            Err(error) => return Err(error),
+        };
         let timeout = Duration::from_secs(config.command_timeout_secs);
         let mut runs = Vec::new();
         let mut all_ok = true;
         let mut problems = Vec::new();
+        let mut cancelled = false;
         for (target, command) in &commands {
+            if crate::operations::check().is_err() {
+                cancelled = true;
+                break;
+            }
             let outcome = run_command(command, timeout).await;
             if !outcome.succeeded() {
                 all_ok = false;
@@ -564,8 +597,22 @@ impl LocalCommandPlatform {
             entry["target"] = json!(target);
             entry["command"] = json!(command);
             runs.push(entry);
+            if outcome.cancelled {
+                cancelled = true;
+                break;
+            }
         }
-        self.finish(
+        let executed_count = runs.len();
+        let unstarted: Vec<_> = commands
+            .iter()
+            .skip(executed_count)
+            .map(|(target, _)| target)
+            .collect();
+        if cancelled {
+            all_ok = false;
+            problems.push("cancelled; prior effects require verification".into());
+        }
+        let mut result = self.finish(
             producer,
             all_ok,
             {
@@ -577,17 +624,19 @@ impl LocalCommandPlatform {
                 tr!(
                     format!(
                         "executed {} command(s) for `{runbook_id}`: {outcome_text}",
-                        commands.len()
+                        executed_count
                     ),
                     format!(
                         "已为 `{runbook_id}` 执行 {} 条命令：{outcome_text}",
-                        commands.len()
+                        executed_count
                     )
                 )
             },
-            json!({ "dry_run": false, "runs": runs }),
+            json!({ "dry_run": false, "runs": runs, "cancelled": cancelled, "unstarted_targets": unstarted }),
         )
-        .await
+        .await?;
+        result.cancelled = cancelled;
+        Ok(result)
     }
 }
 

@@ -748,3 +748,110 @@ async fn every_entry_is_observed_and_every_turn_is_recorded() {
     let old: Transcript = serde_json::from_str(r#"{"instructions":"x","entries":[]}"#).unwrap();
     assert!(old.turns.is_empty());
 }
+
+#[tokio::test]
+async fn cancellation_interrupts_retry_wait_and_resource_tool_cleanup_is_awaited() {
+    use broccoli_agent_harness::{ProgressObserver, RunProgress, RunStep, tool_fn_cancellable};
+    use std::sync::atomic::AtomicBool;
+    struct Retrying(Arc<AtomicBool>);
+    impl ProgressObserver for Retrying {
+        fn observe(&self, progress: RunProgress) {
+            if matches!(progress.step, RunStep::Retrying { .. }) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+    let retrying = Arc::new(AtomicBool::new(false));
+    let (handle, token) = cancel_pair();
+    let pending = {
+        let flag = retrying.clone();
+        tokio::spawn(async move {
+            broccoli_agent_harness::run_agent_observed(
+                &ScriptedModelClient::new(vec![]).with_transient_failures(1),
+                &ToolRegistry::new(),
+                &AgentConfig {
+                    retry_backoff: Duration::from_secs(60),
+                    ..Default::default()
+                },
+                "test",
+                vec![],
+                token,
+                Some(&Retrying(flag)),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !retrying.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    handle.cancel();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .outcome,
+        AgentOutcome::Cancelled
+    );
+    let started = Arc::new(AtomicBool::new(false));
+    let cleaned = Arc::new(AtomicBool::new(false));
+    let mut tools = ToolRegistry::new();
+    let started_tool = started.clone();
+    let cleaned_tool = cleaned.clone();
+    tools
+        .register(
+            ToolSpec {
+                name: "resource".into(),
+                description: "test".into(),
+                parameters: json!({}),
+                terminal: false,
+            },
+            tool_fn_cancellable(move |_args, mut cancel| {
+                let started = started_tool.clone();
+                let cleaned = cleaned_tool.clone();
+                async move {
+                    started.store(true, Ordering::SeqCst);
+                    cancel.cancelled().await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    cleaned.store(true, Ordering::SeqCst);
+                    Ok(json!({"cancelled":true}))
+                }
+            }),
+        )
+        .unwrap();
+    let (handle, token) = cancel_pair();
+    let pending = tokio::spawn(async move {
+        run_agent(
+            &ScriptedModelClient::new(vec![vec![call("r", "resource", json!({}))]]),
+            &tools,
+            &AgentConfig::default(),
+            "test",
+            vec![],
+            token,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    handle.cancel();
+    let report = tokio::time::timeout(Duration::from_secs(1), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.outcome, AgentOutcome::Cancelled);
+    assert!(
+        cleaned.load(Ordering::SeqCst),
+        "the report cannot finish ahead of resource cleanup"
+    );
+}

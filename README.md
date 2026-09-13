@@ -387,3 +387,9 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
+
+### Cancelling the whole request
+
+The activity list now covers collection before a Job exists, model/retry waits, inspections, target-lock waits, execution and verification. `/api/status.active_operations` exposes stable operation IDs and stages; `POST /api/operations/{id}/cancel` stops one operation. The existing Job cancel route also reaches its active execution. Web/TUI show elapsed time and cancellation during cleanup; CLI snapshot, report, approval and review commands accept Ctrl-C.
+
+A cancelled command's process group is killed and reaped before target locks are released. Completed output and unstarted targets are retained. Cancelling execution records `Cancelled`; cancelling the after-snapshot records a verification failure, with completed execution preserved. Cancellation stops future work, not past remote effects. Repeated operation cancellations are idempotent. Custom resource-owning harness tools use `tool_fn_cancellable` and finish cleanup before returning on cancellation or timeout.

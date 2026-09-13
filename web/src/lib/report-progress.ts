@@ -13,7 +13,8 @@ export class ReportProgressScope {
   accept(event: EventRecord): boolean {
     if (event.sequence <= this.lastSequence) return false;
     this.lastSequence = event.sequence;
-    const payload = event.payload as { report_id?: string; source_event_id?: string } | undefined;
+    const payload = event.payload as { report_id?: string; source_event_id?: string; operation_id?: string } | undefined;
+    if (event.kind.startsWith("operation.")) return payload?.operation_id === this.reportId;
     if (event.kind === "human.issue_reported" && payload?.report_id === this.reportId && !this.sourceEventId) this.sourceEventId = event.event_id;
     if (event.kind === "scheduler.issue_created" && this.sourceEventId && payload?.source_event_id === this.sourceEventId && !this.issueId) this.issueId = event.issue_id;
     if (!this.issueId || event.issue_id !== this.issueId) return false;

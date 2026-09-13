@@ -546,8 +546,18 @@ pub async fn run_agent_observed(
                 continue;
             };
 
-            let executed =
-                tokio::time::timeout(config.tool_timeout, tool.handler.call(arguments)).await;
+            let (tool_cancel, tool_signal) = cancel_pair();
+            let mut call = std::pin::pin!(tool.handler.call_with_cancel(arguments, tool_signal));
+            let executed = tokio::select! {
+                biased;
+                () = cancel.cancelled() => { tool_cancel.cancel(); Ok(call.await) },
+                result = &mut call => Ok(result),
+                () = tokio::time::sleep(config.tool_timeout) => {
+                    tool_cancel.cancel();
+                    let _ = call.await;
+                    Err(())
+                },
+            };
             match executed {
                 Err(_) => {
                     refuse!(format!(
@@ -570,13 +580,17 @@ pub async fn run_agent_observed(
                         trust: Trust::Mixed,
                     });
                     finished!(false);
-                    if terminal {
+                    if terminal && !cancel.is_cancelled() {
                         finish!(AgentOutcome::Structured {
                             tool: tool_name,
                             value,
                         });
                     }
                 }
+            }
+
+            if cancel.is_cancelled() {
+                finish!(AgentOutcome::Cancelled);
             }
 
             // The warning goes out once, when the budget first reaches the threshold, so the

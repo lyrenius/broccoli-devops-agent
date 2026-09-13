@@ -356,3 +356,9 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 ```
+
+### 取消整个请求
+
+活动列表覆盖 Job 创建前的采集、模型及重试等待、检视、目标锁等待、命令执行和执行后验证。`/api/status.active_operations` 提供稳定操作 ID 与阶段，`POST /api/operations/{id}/cancel` 取消对应操作；原有 Job 取消接口也能停止该 Job 的操作执行。Web/TUI 显示持续更新的耗时和清理状态，CLI 的快照、上报、审批与审阅命令支持 Ctrl-C。
+
+取消命令时先终止并回收进程组、保存已有输出和未启动目标，再释放执行锁。执行取消记为 `Cancelled`；命令完成后的验证被取消则记为验证失败，保留已执行结果。取消停止后续工作，不撤销远端已发生的效果。同一操作重复取消是幂等的。持有资源的自定义工具使用 `tool_fn_cancellable`，在取消或超时后完成清理再返回。

@@ -65,7 +65,7 @@ export default function App() {
         {tab === "records" && !("trace" in route) && <Records tick={tick} onChanged={refresh} />}
         {"trace" in route && <Trace key={route.trace.issueId} issueId={route.trace.issueId} jobId={route.trace.jobId} tick={tick} />}
         {tab === "events" && <Events />}
-        {tab === "report" && <Report onChanged={refresh} />}
+        {tab === "report" && <Report status={status} onChanged={refresh} />}
         {tab === "settings" && <Settings status={status} onChanged={refresh} />}
       </Shell>
     </LocaleProvider>

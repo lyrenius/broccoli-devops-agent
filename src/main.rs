@@ -398,16 +398,21 @@ fn wire_runner(
 /// Prints Team progress to stderr as it is delivered, leaving stdout for the result.
 fn spawn_progress_printer(runner: &Arc<SliceRunner>) -> tokio::task::JoinHandle<()> {
     let mut progress = runner.watch_progress();
+    let runner = runner.clone();
     tokio::spawn(async move {
-        while let Ok(callback) = progress.recv().await {
-            // Forwarded transcript entries feed the console's live trace; here the progress
-            // lines already say what the pass is doing.
-            if callback.step.is_some() {
-                continue;
-            }
-            // Interim callbacks only: the final result is printed properly by the caller.
-            if callback.final_result.is_none() {
-                eprintln!("  · {}", callback.summary);
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                callback = progress.recv() => match callback {
+                    Ok(callback) if callback.step.is_none() && callback.final_result.is_none() => eprintln!("  · {}", callback.summary),
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                    Err(_) => break,
+                },
+                _ = interval.tick() => {
+                    for op in runner.operations().active() {
+                        eprintln!("  · {:?} · {}s{}", op.phase, (chrono::Utc::now() - op.started_at).num_seconds(), if op.cancel_requested { " · cancelling" } else { "" });
+                    }
+                }
             }
         }
     })
@@ -439,6 +444,21 @@ fn spawn_interrupt_handler(runner: &Arc<SliceRunner>) -> tokio::task::JoinHandle
     })
 }
 
+struct CliWatchers(Vec<tokio::task::JoinHandle<()>>);
+impl Drop for CliWatchers {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+fn watch_cli(runner: &Arc<SliceRunner>) -> CliWatchers {
+    CliWatchers(vec![
+        spawn_progress_printer(runner),
+        spawn_interrupt_handler(runner),
+    ])
+}
+
 /// Runs one CLI command and reports failures as readable errors.
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = effective_config(&cli)?;
@@ -448,6 +468,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &config,
                 select_backend(&config, TeamChoice::Auto)?,
             )?);
+            let _watchers = watch_cli(&runner);
             let snapshot = runner.capture(SnapshotCause::Manual).await?;
             print!("{}", runner.render_snapshot(&snapshot));
             if let Some(review) = runner.latest_snapshot_review().await? {
@@ -476,9 +497,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let interrupt = spawn_interrupt_handler(&runner);
             let mut report = HumanReport::new(reporter, title, description);
             report.priority = priority;
-            let (issue, job) = runner.handle_report(report).await?;
-            print!("{}", SliceRunner::render_report_outcome(&issue, &job));
-            let passes = runner.drive_passes(job).await?;
+            let (issue, passes) = runner
+                .operations()
+                .run("report", async {
+                    let (issue, job) = runner.handle_report(report).await?;
+                    print!("{}", SliceRunner::render_report_outcome(&issue, &job));
+                    let passes = runner.drive_passes(job).await?;
+                    Ok((issue, passes))
+                })
+                .await?;
             printer.abort();
             interrupt.abort();
             print!("{}", SliceRunner::render_passes(&passes, runner.dry_run()));
@@ -645,7 +672,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Actions { action } => {
-            let runner = wire_runner(&config, TeamBackend::ReadOnly)?;
+            let runner = Arc::new(wire_runner(&config, TeamBackend::ReadOnly)?);
+            let _watchers = watch_cli(&runner);
             match action {
                 ActionsAction::List => {
                     let actions = runner.list_actions().await?;
@@ -680,7 +708,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ReviewItem::Job { id, decision } => (decision, true, *id),
             };
             let decision = args.decision()?;
-            let runner = wire_runner(&config, select_backend(&config, args.team)?)?;
+            let runner = Arc::new(wire_runner(&config, select_backend(&config, args.team)?)?);
+            let _watchers = watch_cli(&runner);
             let revision = if is_job {
                 let outcome = runner
                     .review_job(id, &args.by, decision, args.comment.clone())
