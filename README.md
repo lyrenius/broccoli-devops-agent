@@ -169,6 +169,12 @@ Two files, both safe to commit — neither holds credentials:
 
 `broccoli-devops-agent config show` prints the effective configuration as JSON (key redacted) for a frontend or for checking what the agent will actually use.
 
+### Context window and reasoning
+
+In `[model]`, `context_window_tokens` limits one request's estimated input plus reserved output; it is independent of `max_tokens_per_run` (cumulative usage). `max_output_tokens` sets the output limit and defaults to 4096 when a context window is enabled. A window must exceed that reservation. The local `tiktoken-rs` tokenizer counts the rendered instructions, conversation and tool schemas with framing headroom; unknown models use a conservative UTF-8 byte estimate. These are preflight estimates, never billing counts. An overflow stops before HTTP and keeps the entire history: raise the window or lower the output reservation to retry.
+
+`reasoning_effort = "auto"` preserves the provider default. Other non-empty values are sent as Responses `reasoning.effort` or Chat Completions `reasoning_effort`; use a value your relay/model supports. Unsupported options are reported, never silently removed. Edit these startup settings in TOML and restart; Web/TUI Settings display them. Omitting all three preserves existing behavior.
+
 ## Operator UIs
 
 The control plane exposes an HTTP + SSE API (`serve`), and two user interfaces are pure clients of it — one process, two consoles, no UI-only state:

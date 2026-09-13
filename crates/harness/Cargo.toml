@@ -8,7 +8,7 @@ description = "Model-agnostic agentic loop: typed tools, bounded turns, replayab
 [features]
 default = []
 # OpenAI-compatible HTTP backend (Responses or Chat Completions wire format).
-openai = ["dep:reqwest"]
+openai = ["dep:reqwest", "dep:tiktoken-rs"]
 
 [dependencies]
 async-trait = "0.1.89"
@@ -17,6 +17,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
+tiktoken-rs = { version = "0.9.1", optional = true }
 tokio = { version = "1.49.0", features = ["macros", "sync", "time"] }
 
 [dev-dependencies]

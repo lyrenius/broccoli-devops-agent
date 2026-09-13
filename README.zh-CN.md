@@ -169,6 +169,12 @@ flowchart TB
 
 `broccoli-devops-agent config show` 以 JSON 打印生效的配置（密钥已脱敏），供前端使用，或用于核对智能体实际采用的值。
 
+### 上下文窗口和思考模式
+
+`[model] context_window_tokens` 限制单次请求的估算输入与预留输出之和，独立于累计消耗预算 `max_tokens_per_run`。`max_output_tokens` 设置输出上限；启用上下文窗口而省略输出设置时使用 4096，窗口必须大于该值。本地 `tiktoken-rs` 对完整指令、对话和工具定义计数并预留协议开销；未知模型使用保守的 UTF-8 字节估算。这些预检估算不会写入实际计费统计。超限会在发送 HTTP 前明确停止并保留全部历史，提示调大窗口或降低输出额度。
+
+`reasoning_effort = "auto"` 使用服务默认值，其他非空值映射到 Responses 的 `reasoning.effort` 或 Chat Completions 的 `reasoning_effort`；取值须受模型/中继支持，不支持时明确报错，不静默去掉参数。三个参数都通过编辑 TOML 并重启生效，Web/TUI 设置页显示配置。省略它们可保留原有行为。
+
 ## 操作员界面
 
 控制平面暴露一个 HTTP + SSE API（`serve`），两个用户界面都是它的纯客户端——一个进程，两个控制台，没有任何只存在于 UI 的状态：

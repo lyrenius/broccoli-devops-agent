@@ -13,6 +13,9 @@ pub type HarnessResult<T> = Result<T, HarnessError>;
 /// failure is retried by the loop before it becomes an error; a permanent one is not.
 #[derive(Debug, Error)]
 pub enum HarnessError {
+    /// The local context check refused the request before it reached the provider.
+    #[error("context limit: {0}")]
+    ContextLimit(String),
     /// The model backend failed permanently or returned something unusable (a malformed body,
     /// a rejected request); retrying the same request would not help.
     #[error("model backend failure: {0}")]

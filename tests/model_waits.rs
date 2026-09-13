@@ -24,6 +24,7 @@ async fn slow_reply_completes_within_deadline_and_longer_wait_times_out() {
             api_key: "test-only".into(),
             wire_api: WireApi::Responses,
             timeout,
+            generation: Default::default(),
         })
         .unwrap();
         let outcome = client

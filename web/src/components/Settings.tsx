@@ -292,6 +292,9 @@ export function Settings({ status, onChanged }: { status: Status | null; onChang
             { k: t("settings.f.base_url"), v: <span className="font-mono text-xs">{page.config.model?.base_url ?? "—"}</span> },
             { k: t("settings.f.model"), v: <span className="font-mono text-xs">{page.config.model?.model ?? "—"}</span> },
             { k: t("settings.f.wire_api"), v: page.config.model?.wire_api ?? "—" },
+            { k: t("settings.f.context_window"), v: String(page.config.model?.context_window_tokens ?? 0) },
+            { k: t("settings.f.max_output"), v: page.config.model?.max_output_tokens != null ? String(page.config.model.max_output_tokens) : page.config.model?.context_window_tokens ? "4096" : "auto" },
+            { k: t("settings.f.reasoning"), v: page.config.model?.reasoning_effort ?? "auto" },
             {
               k: t("settings.f.api_key_env"),
               v: page.config.model ? (

@@ -394,6 +394,9 @@ export interface AgentConfig {
     api_key_env: string;
     wire_api: string;
     timeout_secs: number;
+    context_window_tokens: number;
+    max_output_tokens: number | null;
+    reasoning_effort: string;
     max_model_turns: number;
     max_tool_calls: number;
     max_inspections: number;

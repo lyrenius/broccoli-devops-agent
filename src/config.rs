@@ -86,6 +86,9 @@ impl Default for TopologyConfig {
 /// Model relay settings for the harness-backed Teams and, later, the Scheduler Policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
+    /// Request-local context and reasoning controls, flattened into `[model]` in TOML/JSON.
+    #[serde(flatten)]
+    pub generation: broccoli_agent_harness::context::GenerationConfig,
     /// OpenAI-compatible base URL including the API prefix, e.g. `https://api.thuics.icu/v1`.
     pub base_url: String,
     /// Model name sent with every request.
@@ -169,6 +172,7 @@ impl ModelConfig {
             api_key,
             wire_api: self.wire_api,
             timeout: Duration::from_secs(self.timeout_secs),
+            generation: self.generation.clone(),
         })
         .map_err(|error| AgentError::InvalidInput(format!("model client: {error}")))
     }
@@ -264,6 +268,12 @@ impl AppConfig {
     /// typically the key itself, pasted in by mistake — the error explains the fix without
     /// echoing the value, so the secret does not end up in a terminal or a log.
     pub fn validate(&self) -> AgentResult<()> {
+        if let Some(model) = &self.model {
+            model
+                .generation
+                .validate()
+                .map_err(|error| AgentError::InvalidInput(error.to_string()))?;
+        }
         if let Some(model) = &self.model
             && !is_env_var_name(&model.api_key_env)
         {
@@ -413,6 +423,34 @@ mod tests {
             1,
             "zero passes would mean no work at all; clamped to one"
         );
+    }
+
+    #[test]
+    fn generation_settings_are_flat_startup_values_and_not_run_budgets() {
+        let base = "[model]\nbase_url = \"http://localhost:1234/v1\"\nmodel = \"local\"\n";
+        let config = AppConfig::from_toml(base).unwrap();
+        assert_eq!(
+            config.model.as_ref().unwrap().generation,
+            Default::default()
+        );
+        let config = AppConfig::from_toml(&format!("{base}context_window_tokens = 8192\nmax_output_tokens = 512\nreasoning_effort = \"high\"\nmax_tokens_per_run = 123\n")).unwrap();
+        let model = config.model.as_ref().unwrap();
+        assert_eq!(model.generation.context_window_tokens, 8192);
+        assert_eq!(model.harness_budget().max_total_tokens, 123);
+        let json = config.effective_json().unwrap();
+        assert_eq!(json["model"]["reasoning_effort"], "high");
+        assert_eq!(json["model"]["max_output_tokens"], 512);
+        for key in [
+            "context_window_tokens",
+            "max_output_tokens",
+            "reasoning_effort",
+        ] {
+            assert_eq!(
+                crate::settings::classify(&format!("model.{key}")),
+                crate::settings::SettingClass::Startup
+            );
+        }
+        assert!(AppConfig::from_toml(&format!("{base}context_window_tokens = 4096\n")).is_err());
     }
 
     #[test]

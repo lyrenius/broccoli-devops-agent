@@ -34,6 +34,8 @@
 
 pub mod agent;
 pub mod client;
+#[cfg(feature = "openai")]
+pub mod context;
 pub mod conversation;
 pub mod error;
 #[cfg(feature = "openai")]

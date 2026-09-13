@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::client::{AssistantItem, ModelClient, ModelRequest, ModelTurn, Usage};
+use crate::context::GenerationConfig;
 use crate::conversation::Item;
 use crate::error::{HarnessError, HarnessResult};
 use crate::tool::ToolSpec;
@@ -44,6 +45,8 @@ pub struct OpenAiConfig {
     pub wire_api: WireApi,
     /// Per-request timeout.
     pub timeout: Duration,
+    /// Context window, output reservation and provider reasoning configuration.
+    pub generation: GenerationConfig,
 }
 
 /// [`ModelClient`] over an OpenAI-compatible HTTP endpoint.
@@ -55,6 +58,7 @@ pub struct OpenAiClient {
 impl OpenAiClient {
     /// Builds a client; a base URL without a scheme is assumed to be HTTPS.
     pub fn new(mut config: OpenAiConfig) -> HarnessResult<Self> {
+        config.generation.validate()?;
         if !config.base_url.contains("://") {
             config.base_url = format!("https://{}", config.base_url);
         }
@@ -74,6 +78,32 @@ impl OpenAiClient {
     /// Returns the normalized base URL.
     pub fn base_url(&self) -> &str {
         &self.config.base_url
+    }
+
+    /// Renders and checks a request before transport; also used by local preflight tests.
+    pub fn request_body(&self, request: ModelRequest<'_>) -> HarnessResult<Value> {
+        let mut body = match self.config.wire_api {
+            WireApi::Responses => responses_request(&self.config.model, request),
+            WireApi::Chat => chat_request(&self.config.model, request),
+        };
+        let generation = &self.config.generation;
+        if generation.reasoning_effort != "auto" {
+            match self.config.wire_api {
+                WireApi::Responses => {
+                    body["reasoning"] = json!({"effort": generation.reasoning_effort})
+                }
+                WireApi::Chat => body["reasoning_effort"] = json!(generation.reasoning_effort),
+            }
+        }
+        if let Some(limit) = generation.output_limit() {
+            let key = match self.config.wire_api {
+                WireApi::Responses => "max_output_tokens",
+                WireApi::Chat => "max_completion_tokens",
+            };
+            body[key] = json!(limit);
+        }
+        generation.check(&self.config.model, &body)?;
+        Ok(body)
     }
 
     /// Posts one JSON body and returns the parsed JSON response, mapping HTTP failures to errors.
@@ -123,16 +153,12 @@ impl ModelClient for OpenAiClient {
     /// The response's `usage` block travels back with the items: it is the only place the real
     /// token counts exist, and dropping it here would make every figure upstream a guess.
     async fn complete(&self, request: ModelRequest<'_>) -> HarnessResult<ModelTurn> {
-        let response = match self.config.wire_api {
-            WireApi::Responses => {
-                let body = responses_request(&self.config.model, request);
-                self.post("/responses", &body).await?
-            }
-            WireApi::Chat => {
-                let body = chat_request(&self.config.model, request);
-                self.post("/chat/completions", &body).await?
-            }
+        let body = self.request_body(request)?;
+        let path = match self.config.wire_api {
+            WireApi::Responses => "/responses",
+            WireApi::Chat => "/chat/completions",
         };
+        let response = self.post(path, &body).await?;
         let items = match self.config.wire_api {
             WireApi::Responses => parse_responses_output(&response)?,
             WireApi::Chat => parse_chat_output(&response)?,
@@ -590,6 +616,7 @@ mod tests {
             api_key: "k".into(),
             wire_api: WireApi::Responses,
             timeout: Duration::from_secs(5),
+            generation: GenerationConfig::default(),
         })
         .unwrap();
         assert_eq!(client.base_url(), "https://api.thuics.icu/v1");

@@ -427,6 +427,18 @@ pub fn rows(draft: &Value, page: &SettingsPage, mode: &str) -> Vec<RowSpec> {
         out.push(read_only("model.base_url", "Model relay"));
         out.push(read_only("model.model", "Model"));
         out.push(read_only("model.wire_api", "Wire format"));
+        out.push(read_only(
+            "model.context_window_tokens",
+            "Context window (estimated tokens; 0 = off)",
+        ));
+        out.push(read_only(
+            "model.max_output_tokens",
+            "Output limit (context default: 4096)",
+        ));
+        out.push(read_only(
+            "model.reasoning_effort",
+            "Reasoning effort (auto = provider default)",
+        ));
         out.push(read_only("model.api_key_env", "API key variable"));
         out.push(read_only("model.timeout_secs", "Relay timeout (seconds)"));
     }
